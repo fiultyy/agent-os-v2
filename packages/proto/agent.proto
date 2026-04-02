@@ -1,0 +1,60 @@
+syntax = "proto3";
+
+package agentos.agent.v1;
+
+service AgentService {
+  rpc CreateAgent(CreateAgentRequest) returns (Agent);
+  rpc GetAgent(GetAgentRequest) returns (Agent);
+  rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse);
+  rpc RunAgent(RunAgentRequest) returns (RunAgentResponse);
+  rpc StreamAgent(RunAgentRequest) returns (stream AgentEvent);
+}
+
+message Agent {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  string status = 4;
+  string model = 5;
+  repeated string tools = 6;
+  int64 created_at = 7;
+  int64 updated_at = 8;
+}
+
+message CreateAgentRequest {
+  string name = 1;
+  string description = 2;
+  string model = 3;
+  repeated string tools = 4;
+}
+
+message GetAgentRequest {
+  string id = 1;
+}
+
+message ListAgentsRequest {
+  int32 page_size = 1;
+  string page_token = 2;
+}
+
+message ListAgentsResponse {
+  repeated Agent agents = 1;
+  string next_page_token = 2;
+}
+
+message RunAgentRequest {
+  string agent_id = 1;
+  string input = 2;
+  map<string, string> parameters = 3;
+}
+
+message RunAgentResponse {
+  string execution_id = 1;
+  string status = 2;
+}
+
+message AgentEvent {
+  string execution_id = 1;
+  string event_type = 2;
+  string data = 3;
+}

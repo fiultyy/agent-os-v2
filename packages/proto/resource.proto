@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package agentos.resource.v1;
+
+service ResourceService {
+  rpc ListProviders(ListProvidersRequest) returns (ListProvidersResponse);
+  rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
+  rpc RouteModel(RouteModelRequest) returns (RouteModelResponse);
+}
+
+message Provider {
+  string id = 1;
+  string name = 2;
+  string type = 3;
+  bool available = 4;
+}
+
+message ModelInfo {
+  string id = 1;
+  string name = 2;
+  string provider_id = 3;
+  int32 context_window = 4;
+  repeated string capabilities = 5;
+}
+
+message ListProvidersRequest {}
+message ListProvidersResponse {
+  repeated Provider providers = 1;
+}
+
+message ListModelsRequest {
+  string provider_id = 1;
+}
+message ListModelsResponse {
+  repeated ModelInfo models = 1;
+}
+
+message RouteModelRequest {
+  string model_alias = 1;
+  map<string, string> preferences = 2;
+}
+
+message RouteModelResponse {
+  string provider_id = 1;
+  string model_id = 2;
+}

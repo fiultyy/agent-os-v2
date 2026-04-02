@@ -1,0 +1,14 @@
+[project]
+name = "agent-os-conversation-observer"
+version = "0.1.0"
+description = "Conversation observation and analytics service"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "pydantic>=2.10",
+]
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"

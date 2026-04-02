@@ -1,0 +1,43 @@
+version: "3.9"
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./apps/web:/app
+      - /app/node_modules
+    environment:
+      - NEXT_PUBLIC_API_URL=http://gateway:8000
+    depends_on:
+      - gateway
+
+  gateway:
+    build:
+      context: ./services/gateway
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./services/gateway/src:/app/src
+    environment:
+      - ORCHESTRATOR_URL=http://orchestrator:8001
+      - PROMPT_MANAGER_URL=http://prompt-manager:8002
+      - CONVERSATION_OBSERVER_URL=http://conversation-observer:8003
+      - RESOURCE_MANAGER_URL=http://resource-manager:8004
+    depends_on:
+      - orchestrator
+
+  orchestrator:
+    build:
+      context: ./services/orchestrator
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./services/orchestrator/src:/app/src
+    environment:
+      - GATEWAY_URL=http://gateway:8000

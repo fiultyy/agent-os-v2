@@ -1,0 +1,47 @@
+syntax = "proto3";
+
+package agentos.prompt.v1;
+
+service PromptService {
+  rpc CreatePrompt(CreatePromptRequest) returns (Prompt);
+  rpc GetPrompt(GetPromptRequest) returns (Prompt);
+  rpc ListPrompts(ListPromptsRequest) returns (ListPromptsResponse);
+  rpc RenderPrompt(RenderPromptRequest) returns (RenderPromptResponse);
+}
+
+message Prompt {
+  string id = 1;
+  string name = 2;
+  string template = 3;
+  int32 version = 4;
+  int64 created_at = 5;
+  int64 updated_at = 6;
+}
+
+message CreatePromptRequest {
+  string name = 1;
+  string template = 2;
+}
+
+message GetPromptRequest {
+  string id = 1;
+}
+
+message ListPromptsRequest {
+  int32 page_size = 1;
+  string page_token = 2;
+}
+
+message ListPromptsResponse {
+  repeated Prompt prompts = 1;
+  string next_page_token = 2;
+}
+
+message RenderPromptRequest {
+  string prompt_id = 1;
+  map<string, string> variables = 2;
+}
+
+message RenderPromptResponse {
+  string rendered = 1;
+}
