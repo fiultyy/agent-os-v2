@@ -7,9 +7,6 @@ services:
       dockerfile: apps/web/Dockerfile
     ports:
       - "3000:3000"
-    volumes:
-      - ./apps/web:/app
-      - /app/node_modules
     environment:
       - NEXT_PUBLIC_API_URL=http://gateway:8000
     depends_on:
@@ -30,6 +27,9 @@ services:
       - RESOURCE_MANAGER_URL=http://resource-manager:8004
     depends_on:
       - orchestrator
+      - prompt-manager
+      - conversation-observer
+      - resource-manager
 
   orchestrator:
     build:
@@ -41,3 +41,30 @@ services:
       - ./services/orchestrator/src:/app/src
     environment:
       - GATEWAY_URL=http://gateway:8000
+
+  prompt-manager:
+    build:
+      context: ./services/prompt-manager
+      dockerfile: Dockerfile
+    ports:
+      - "8002:8002"
+    volumes:
+      - ./services/prompt-manager/src:/app/src
+
+  conversation-observer:
+    build:
+      context: ./services/conversation-observer
+      dockerfile: Dockerfile
+    ports:
+      - "8003:8003"
+    volumes:
+      - ./services/conversation-observer/src:/app/src
+
+  resource-manager:
+    build:
+      context: ./services/resource-manager
+      dockerfile: Dockerfile
+    ports:
+      - "8004:8004"
+    volumes:
+      - ./services/resource-manager/src:/app/src
