@@ -18,6 +18,7 @@ import { PromptNode } from "./nodes/PromptNode";
 import { DataEdge } from "./edges/DataEdge";
 import { useFlowStore } from "@/stores/flowStore";
 import { useAgentStore } from "@/stores/agentStore";
+import { createAgent } from "@/lib/api";
 import type { FlowNodeType } from "@/types/flow";
 
 const nodeTypes = {
@@ -94,21 +95,39 @@ export function FlowCanvas() {
       };
       addNode(newNode);
 
-      // Sync to agent store if it's an agent node
+      // Sync to agent store + backend API if it's an agent node
       if (type === "agent") {
-        addAgent({
-          id: nodeId,
-          name: String(newNode.data.label),
-          description: "",
-          status: "idle",
-          model: "gpt-4o-mini",
-          tools: [],
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        });
+        const label = String(newNode.data.label);
+        createAgent({ name: label, model: "gpt-4o-mini" })
+          .then((remote) => {
+            updateNodeData(nodeId, { agentId: remote.id, label: remote.name });
+            addAgent({
+              id: remote.id,
+              name: remote.name,
+              description: remote.description ?? "",
+              status: remote.status ?? "idle",
+              model: remote.model ?? "gpt-4o-mini",
+              tools: remote.tools ?? [],
+              createdAt: remote.createdAt ?? new Date().toISOString(),
+              updatedAt: remote.updatedAt ?? new Date().toISOString(),
+            });
+          })
+          .catch(() => {
+            // Fallback: still add locally even if API fails
+            addAgent({
+              id: nodeId,
+              name: label,
+              description: "",
+              status: "idle",
+              model: "gpt-4o-mini",
+              tools: [],
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            });
+          });
       }
     },
-    [addNode, addAgent]
+    [addNode, addAgent, updateNodeData]
   );
 
   const onNodeDoubleClick = useCallback(

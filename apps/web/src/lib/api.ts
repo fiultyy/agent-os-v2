@@ -14,10 +14,25 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json();
 }
 
+/** Map snake_case backend response to camelCase AgentItem. */
+function mapAgent(raw: Record<string, unknown>): AgentItem {
+  return {
+    id: String(raw.id ?? ""),
+    name: String(raw.name ?? ""),
+    description: String(raw.description ?? ""),
+    status: (raw.status as AgentItem["status"]) ?? "idle",
+    model: String(raw.model ?? ""),
+    tools: (raw.tools as string[]) ?? [],
+    createdAt: String(raw.created_at ?? raw.createdAt ?? ""),
+    updatedAt: String(raw.updated_at ?? raw.updatedAt ?? ""),
+  };
+}
+
 // ── Agent CRUD ────────────────────────────────────────────────
 
 export async function getAgents(): Promise<AgentItem[]> {
-  return request<AgentItem[]>("/agents/");
+  const raw = await request<Record<string, unknown>[]>("/agents/");
+  return raw.map(mapAgent);
 }
 
 export async function createAgent(data: {
@@ -26,14 +41,16 @@ export async function createAgent(data: {
   model?: string;
   tools?: string[];
 }): Promise<AgentItem> {
-  return request<AgentItem>("/agents/", {
+  const raw = await request<Record<string, unknown>>("/agents/", {
     method: "POST",
     body: JSON.stringify(data),
   });
+  return mapAgent(raw);
 }
 
 export async function getAgent(id: string): Promise<AgentItem> {
-  return request<AgentItem>(`/agents/${id}`);
+  const raw = await request<Record<string, unknown>>(`/agents/${id}`);
+  return mapAgent(raw);
 }
 
 export async function deleteAgent(id: string): Promise<void> {

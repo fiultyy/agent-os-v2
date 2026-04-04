@@ -8,7 +8,7 @@ Exports:
     - :class:`InMemoryCheckpointStore` — state checkpoint persistence.
 """
 
-from typing import Callable
+from typing import Awaitable, Callable
 
 from src.graph.state import GraphState
 from src.graph.nodes import GraphNode
@@ -139,11 +139,20 @@ class StateGraph:
         self._checkpoint_store = store
         return self
 
-    async def run(self, initial_state: GraphState) -> GraphState:
+    async def run(
+        self,
+        initial_state: GraphState,
+        on_node_complete: Callable[[str, GraphState], Awaitable[None]] | None = None,
+    ) -> GraphState:
         """Execute the graph starting from the entry point.
 
         Walks the graph node by node, resolving conditional edges
         as needed, until no more edges are found (graph ends).
+
+        Args:
+            initial_state: The starting state for execution.
+            on_node_complete: Optional async callback invoked after each node
+                finishes. Receives ``(node_name, state)``.
 
         Returns:
             The final graph state after all nodes have executed.
@@ -169,6 +178,10 @@ class StateGraph:
                 self._checkpoint_counter += 1
                 cp_id = f"step-{self._checkpoint_counter}"
                 self._checkpoint_store.save(self.graph_id, cp_id, state)
+
+            # Notify listener after each node
+            if on_node_complete is not None:
+                await on_node_complete(current_node_name, state)
 
             # Resolve next node
             current_node_name = self._resolve_next(current_node_name, state)

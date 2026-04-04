@@ -1,9 +1,9 @@
-FROM node:20-slim AS base
+FROM node:22-slim AS base
 RUN corepack enable
 WORKDIR /app
 
 # Install dependencies
-COPY package.json pnpm-lock.yaml ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/web/package.json ./apps/web/package.json
 RUN pnpm install --frozen-lockfile
 
@@ -12,5 +12,24 @@ COPY apps/web ./apps/web
 WORKDIR /app/apps/web
 RUN pnpm build
 
+# Production image
+FROM node:22-slim AS runner
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+
+RUN addgroup --system --gid 1001 nodejs && \
+    adduser --system --uid 1001 nextjs
+
+COPY --from=base /app/apps/web/public ./public 2>/dev/null || true
+COPY --from=base --chown=nextjs:nodejs /app/apps/web/.next/standalone ./
+COPY --from=base --chown=nextjs:nodejs /app/apps/web/.next/static ./apps/web/.next/static
+
+USER nextjs
+
 EXPOSE 3000
-CMD ["pnpm", "start"]
+ENV PORT=3000
+ENV HOSTNAME="0.0.0.0"
+
+CMD ["node", "apps/web/server.js"]

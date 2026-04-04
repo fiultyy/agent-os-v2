@@ -16,7 +16,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from src.graph import StateGraph, GraphState, InMemoryCheckpointStore
-from src.graph.nodes import GraphNode, FunctionNode
+from src.graph.nodes import FunctionNode
 from src.memory import MemoryService, InMemoryStore, MemoryType, MemoryScope
 
 app = FastAPI(title="Agent OS — Orchestrator", version="0.1.0", redirect_slashes=False)
@@ -91,6 +91,121 @@ async def delete_agent(agent_id: str) -> dict:
     return {"error": "Agent not found"}
 
 
+# ── Node handler functions (used by FunctionNode) ────────────────
+
+
+async def _node_start(state: GraphState) -> GraphState:
+    """Initialize the execution pipeline."""
+    state.messages.append({"role": "system", "content": "Processing started"})
+    state.context["original_input"] = state.input
+    state.current_node = "start"
+    state.output = "started"
+    return state
+
+
+async def _node_llm(state: GraphState) -> GraphState:
+    """Simulate LLM processing with memory integration."""
+    agent_id = state.agent_id
+    session_id = state.session_id
+
+    memories = await _memory_service.recall(
+        query=state.input,
+        agent_id=agent_id,
+        session_id=session_id,
+        top_k=3,
+    )
+    memory_ctx = ""
+    if memories:
+        memory_ctx = "\n".join(f"- {m.content}" for m in memories[:3])
+
+    user_input = state.input
+    if memory_ctx:
+        response = f"[LLM] Based on previous context:\n{memory_ctx}\n\nProcessing: {user_input}"
+    else:
+        response = f"[LLM] Processed: {user_input}"
+
+    state.messages.append({"role": "user", "content": user_input})
+    state.messages.append({"role": "assistant", "content": response})
+    state.output = response
+    state.current_node = "llm"
+
+    ref = await _memory_service.store(
+        content=f"User: {user_input}\nAssistant: {response}",
+        agent_id=agent_id,
+        session_id=session_id,
+        memory_type=MemoryType.SESSION,
+        scope=MemoryScope.AGENT,
+    )
+    state.memory_refs.append(ref.id)
+
+    # Flag whether a tool call is needed (checked by conditional edge)
+    if "search" in response.lower() or "tool_call" in state.context:
+        state.context["needs_tool"] = True
+    else:
+        state.context["needs_tool"] = False
+
+    return state
+
+
+async def _node_tool(state: GraphState) -> GraphState:
+    """Simulate tool execution."""
+    tool_name = state.context.get("tool_call", "web_search")
+    result = f"[Tool] {tool_name} returned: Simulated result for '{state.input}'"
+    state.tool_results.append({"tool": tool_name, "result": result})
+    state.context["tool_result"] = result
+    state.current_node = "tool"
+    return state
+
+
+async def _node_llm_synthesize(state: GraphState) -> GraphState:
+    """LLM synthesizes tool results into final answer."""
+    tool_result = state.context.get("tool_result", "")
+    response = f"[LLM] Based on tool results: {tool_result}\n\nFinal answer for: {state.input}"
+    state.messages.append({"role": "assistant", "content": response})
+    state.output = response
+    state.current_node = "llm_synthesize"
+    return state
+
+
+# ── Graph builder ────────────────────────────────────────────────
+
+
+def _build_execution_graph() -> StateGraph:
+    """Build the orchestration graph with nodes and edges.
+
+    Graph topology::
+
+        start → llm → [needs_tool?] → tool → llm_synthesize → end
+                         ↓ no
+                        end
+    """
+    graph = StateGraph("exec-graph")
+    graph.set_checkpoint_store(InMemoryCheckpointStore())
+
+    # Register nodes
+    graph.add_node("start", FunctionNode("start", _node_start))
+    graph.add_node("llm", FunctionNode("llm", _node_llm))
+    graph.add_node("tool", FunctionNode("tool", _node_tool))
+    graph.add_node("llm_synthesize", FunctionNode("llm_synthesize", _node_llm_synthesize))
+
+    # Unconditional edges
+    graph.add_edge("start", "llm")
+    graph.add_edge("tool", "llm_synthesize")
+
+    # Conditional edge: llm → tool (if needed) or end
+    graph.add_conditional_edge(
+        source="llm",
+        targets={
+            "tool": "tool",
+            "__default__": "",
+        },
+        condition=lambda state: "tool" if state.context.get("needs_tool") else "__default__",
+    )
+
+    graph.set_entry_point("start")
+    return graph
+
+
 # ── Execution (SSE) ─────────────────────────────────────────────
 
 
@@ -105,141 +220,75 @@ async def execute(req: ExecuteRequest) -> StreamingResponse:
         )
 
     session_id = req.session_id or str(uuid.uuid4())
-
-    # Create session
     await _memory_service.create_session(session_id, req.agent_id)
 
-    # Build execution graph
-    graph, _ = _build_execution_graph(req.agent_id, session_id)
-
+    graph = _build_execution_graph()
     initial_state = GraphState(
         input=req.input,
         agent_id=req.agent_id,
         session_id=session_id,
     )
 
+    # Queue for SSE events produced by the graph callback
+    event_queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+    async def on_node_complete(node_name: str, state: GraphState) -> None:
+        """Callback fired after each graph node completes — pushes SSE events."""
+        if node_name == "start":
+            await event_queue.put(_sse("node_start", {"node": "start", "status": "running"}))
+            await event_queue.put(_sse("node_complete", {
+                "node": "start", "status": "done", "output": state.output or "started",
+            }))
+        elif node_name == "llm":
+            await event_queue.put(_sse("node_start", {"node": "llm", "status": "running"}))
+            await event_queue.put(_sse("node_complete", {
+                "node": "llm", "status": "done", "output": state.output,
+            }))
+        elif node_name == "tool":
+            await event_queue.put(_sse("node_start", {"node": "tool", "status": "running"}))
+            await event_queue.put(_sse("node_complete", {
+                "node": "tool", "status": "done",
+                "output": state.context.get("tool_result", ""),
+            }))
+        elif node_name == "llm_synthesize":
+            await event_queue.put(_sse("node_start", {"node": "llm_synthesize", "status": "running"}))
+            await event_queue.put(_sse("node_complete", {
+                "node": "llm_synthesize", "status": "done", "output": state.output,
+            }))
+
     async def event_stream() -> AsyncGenerator[str, None]:
-        # Mark agent running
         agent["status"] = "running"
         yield _sse("agent_status", {"agent_id": req.agent_id, "status": "running"})
 
-        # Run graph step-by-step with event emission
-        state = initial_state
-        state.status = "running"
+        # Run graph in background, feeding SSE via the queue
+        async def run_graph():
+            try:
+                final_state = await graph.run(initial_state, on_node_complete=on_node_complete)
+                agent["status"] = "idle"
+                await event_queue.put(_sse("agent_status", {"agent_id": req.agent_id, "status": "idle"}))
+                await event_queue.put(_sse("execution_complete", {
+                    "output": final_state.output,
+                    "memory_count": len(final_state.memory_refs),
+                }))
+            except Exception as exc:
+                agent["status"] = "idle"
+                await event_queue.put(_sse("error", {"message": str(exc)}))
+            finally:
+                await event_queue.put(None)  # sentinel
 
-        # Start node
-        yield _sse("node_start", {"node": "start", "status": "running"})
-        state = await _run_start(state)
-        yield _sse("node_complete", {
-            "node": "start", "status": "done", "output": state.output or "started"
-        })
+        task = asyncio.create_task(run_graph())
 
-        # LLM node
-        yield _sse("node_start", {"node": "llm", "status": "running"})
-        state = await _run_llm(state, req.agent_id, session_id)
-        yield _sse("node_complete", {
-            "node": "llm", "status": "done", "output": state.output
-        })
+        # Drain queue → SSE stream
+        while True:
+            item = await event_queue.get()
+            if item is None:
+                break
+            yield item
 
-        # Check if tool call needed
-        if "search" in state.output.lower() or "tool_call" in state.context:
-            yield _sse("node_start", {"node": "tool", "status": "running"})
-            state = await _run_tool(state)
-            yield _sse("node_complete", {
-                "node": "tool", "status": "done", "output": state.context.get("tool_result", "")
-            })
-
-            # Feed tool result back to LLM
-            yield _sse("node_start", {"node": "llm_synthesize", "status": "running"})
-            state = await _run_llm_synthesize(state)
-            yield _sse("node_complete", {
-                "node": "llm_synthesize", "status": "done", "output": state.output
-            })
-
-        # End
-        state.status = "done"
-        agent["status"] = "idle"
-        yield _sse("agent_status", {"agent_id": req.agent_id, "status": "idle"})
-        yield _sse("execution_complete", {
-            "output": state.output,
-            "memory_count": len(state.memory_refs),
-        })
         yield "data: [DONE]\n\n"
+        await task
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
-
-
-async def _run_start(state: GraphState) -> GraphState:
-    state.messages.append({"role": "system", "content": "Processing started"})
-    state.context["original_input"] = state.input
-    state.current_node = "start"
-    state.output = "started"
-    return state
-
-
-async def _run_llm(state: GraphState, agent_id: str, session_id: str) -> GraphState:
-    """Simulate LLM processing with memory integration."""
-    # Recall relevant memories
-    memories = await _memory_service.recall(
-        query=state.input,
-        agent_id=agent_id,
-        session_id=session_id,
-        top_k=3,
-    )
-    memory_ctx = ""
-    if memories:
-        memory_ctx = "\n".join(f"- {m.content}" for m in memories[:3])
-
-    # Simulate LLM response
-    user_input = state.input
-    if memory_ctx:
-        response = f"[LLM] Based on previous context:\n{memory_ctx}\n\nProcessing: {user_input}"
-    else:
-        response = f"[LLM] Processed: {user_input}"
-
-    state.messages.append({"role": "user", "content": user_input})
-    state.messages.append({"role": "assistant", "content": response})
-    state.output = response
-    state.current_node = "llm"
-
-    # Store to memory
-    ref = await _memory_service.store(
-        content=f"User: {user_input}\nAssistant: {response}",
-        agent_id=agent_id,
-        session_id=session_id,
-        memory_type=MemoryType.SESSION,
-        scope=MemoryScope.AGENT,
-    )
-    state.memory_refs.append(ref.id)
-    return state
-
-
-async def _run_tool(state: GraphState) -> GraphState:
-    """Simulate tool execution."""
-    tool_name = state.context.get("tool_call", "web_search")
-    result = f"[Tool] {tool_name} returned: Simulated result for '{state.input}'"
-    state.tool_results.append({"tool": tool_name, "result": result})
-    state.context["tool_result"] = result
-    state.current_node = "tool"
-    return state
-
-
-async def _run_llm_synthesize(state: GraphState) -> GraphState:
-    """LLM synthesizes tool results into final answer."""
-    tool_result = state.context.get("tool_result", "")
-    response = f"[LLM] Based on tool results: {tool_result}\n\nFinal answer for: {state.input}"
-    state.messages.append({"role": "assistant", "content": response})
-    state.output = response
-    state.current_node = "llm_synthesize"
-    return state
-
-
-def _build_execution_graph(agent_id: str, session_id: str) -> tuple[StateGraph, MemoryService]:
-    """Build a minimal execution graph."""
-    checkpoint_store = InMemoryCheckpointStore()
-    graph = StateGraph("exec-graph")
-    graph.set_checkpoint_store(checkpoint_store)
-    return graph, _memory_service
 
 
 # ── SSE helpers ──────────────────────────────────────────────────
@@ -259,21 +308,24 @@ async def _sse_error(msg: str) -> AsyncGenerator[str, None]:
 
 def main() -> None:
     """CLI entry point: run the minimal graph demo."""
-    graph, memory = _build_execution_graph("cli", "cli-session")
 
     async def run_demo():
+        graph = _build_execution_graph()
+
         for i, user_input in enumerate([
             "Hello, Agent OS!",
             "What is the weather today?",
             "Remember my preferences",
         ], 1):
             state = GraphState(input=user_input, agent_id="cli", session_id="cli-session")
-            result = await _run_llm(state, "cli", "cli-session")
+            result = await graph.run(state)
             print(f"\n--- Round {i} ---")
             print(f"  Input:  {user_input}")
             print(f"  Output: {result.output}")
 
-        memories = await memory.recall(query="", agent_id="cli", session_id="cli-session", top_k=10)
+        memories = await _memory_service.recall(
+            query="", agent_id="cli", session_id="cli-session", top_k=10,
+        )
         print(f"\n=== {len(memories)} memories stored ===")
 
     asyncio.run(run_demo())
