@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.routes import agents, prompts, conversations, resources
 
-app = FastAPI(title="Agent OS — API Gateway", version="0.1.0")
+app = FastAPI(title="Agent OS — API Gateway", version="0.1.0", redirect_slashes=False)
 
 app.add_middleware(
     CORSMiddleware,
