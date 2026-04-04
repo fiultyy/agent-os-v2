@@ -3,6 +3,8 @@
 Provides:
 - FastAPI app with agent CRUD + execution endpoints.
 - Graph execution with memory integration and SSE event emission.
+- Phase 8: Multi-agent communication, concurrency, shared memory.
+- Phase 9: Memory API, Communication API, Debug API, Knowledge Graph API.
 """
 
 import asyncio
@@ -20,6 +22,12 @@ from pydantic import BaseModel
 from src.graph import StateGraph, GraphState, InMemoryCheckpointStore
 from src.graph.nodes import FunctionNode
 from src.memory import MemoryService, InMemoryStore, MemoryType, MemoryScope
+from src.memory.permissions import PermissionManager, PermissionLevel
+from src.memory.knowledge_graph import KnowledgeGraph
+from src.communication.bus import CommunicationBus
+from src.communication.message import AgentMessage, MessageType, MessagePriority
+from src.communication.scope import ScopeManager, ScopeLevel
+from src.concurrency.controller import ConcurrencyController
 from src.tools.executor import ToolExecutor
 from src.tools.registry import ToolRegistry
 from src.tools.guardrail import Guardrail
@@ -65,13 +73,19 @@ class LLMClient:
 
 _llm_client = LLMClient()
 
-app = FastAPI(title="Agent OS — Orchestrator", version="0.1.0", redirect_slashes=False)
+app = FastAPI(title="Agent OS — Orchestrator", version="0.2.0", redirect_slashes=False)
 
-# ── In-memory agent registry ────────────────────────────────────
+# ── Global services ──────────────────────────────────────────────
 
 _agents: dict[str, dict[str, Any]] = {}
 _memory_service = MemoryService(InMemoryStore())
 _tool_executor = ToolExecutor(ToolRegistry())
+_communication_bus = CommunicationBus()
+_concurrency_controller = ConcurrencyController()
+_knowledge_graph = KnowledgeGraph()
+
+
+# ── Request models ───────────────────────────────────────────────
 
 
 class CreateAgentRequest(BaseModel):
@@ -85,6 +99,33 @@ class ExecuteRequest(BaseModel):
     agent_id: str
     input: str
     session_id: str = ""
+
+
+class StoreMemoryRequest(BaseModel):
+    content: str
+    agent_id: str = ""
+    session_id: str = ""
+    memory_type: str = "session"
+    scope: str = "agent"
+    importance: float = 0.5
+
+
+class SendMessageRequest(BaseModel):
+    sender_id: str
+    recipient_id: str | None = None
+    session_id: str = ""
+    workspace_id: str = ""
+    content: str
+    message_type: str = "task"
+    priority: int = 1
+
+
+class GrantPermissionRequest(BaseModel):
+    grantor_id: str
+    grantee_id: str
+    target_agent_id: str
+    level: int = 2
+    expires_at: str | None = None
 
 
 # ── Health ───────────────────────────────────────────────────────
@@ -138,6 +179,204 @@ async def delete_agent(agent_id: str) -> dict:
     return {"error": "Agent not found"}
 
 
+# ── Memory API (Phase 9) ─────────────────────────────────────────
+
+
+@app.post("/memories")
+async def store_memory(req: StoreMemoryRequest) -> dict:
+    """Store a new memory item."""
+    ref = await _memory_service.store(
+        content=req.content,
+        agent_id=req.agent_id,
+        session_id=req.session_id,
+        memory_type=MemoryType(req.memory_type),
+        scope=MemoryScope(req.scope),
+        importance=req.importance,
+    )
+    return {"id": ref.id, "memory_type": ref.memory_type.value, "scope": ref.scope.value}
+
+
+@app.get("/memories")
+async def list_memories(
+    agent_id: str = "",
+    session_id: str = "",
+    memory_type: str = "",
+    limit: int = 100,
+) -> list[dict]:
+    """List memories with optional filters."""
+    items = await _memory_service.recall(
+        query="",
+        agent_id=agent_id,
+        session_id=session_id,
+        memory_type=MemoryType(memory_type) if memory_type else None,
+        top_k=limit,
+    )
+    return [
+        {
+            "id": m.id,
+            "agent_id": m.agent_id,
+            "session_id": m.session_id,
+            "memory_type": m.memory_type.value,
+            "scope": m.scope.value,
+            "content": m.content,
+            "importance": m.importance,
+            "created_at": m.created_at,
+            "archived": m.archived,
+        }
+        for m in items
+    ]
+
+
+@app.get("/memories/layers")
+async def memory_layers(agent_id: str = "") -> dict:
+    """Get memory layer statistics for an agent."""
+    items = await _memory_service.recall(
+        query="",
+        agent_id=agent_id,
+        top_k=1000,
+    )
+    stats: dict[str, int] = {"working": 0, "session": 0, "episodic": 0, "semantic": 0}
+    for m in items:
+        if not m.archived and m.memory_type.value in stats:
+            stats[m.memory_type.value] += 1
+    return stats
+
+
+@app.delete("/memories/{memory_id}")
+async def delete_memory(memory_id: str) -> dict:
+    """Delete a memory item."""
+    deleted = await _memory_service.delete(memory_id)
+    return {"deleted": deleted}
+
+
+# ── Permission API (Phase 8) ──────────────────────────────────────
+
+
+@app.post("/permissions/grant")
+async def grant_permission(req: GrantPermissionRequest) -> dict:
+    """Grant memory access permission between agents."""
+    grant_id = _memory_service.grant_access(
+        grantor_id=req.grantor_id,
+        grantee_id=req.grantee_id,
+        target_agent_id=req.target_agent_id,
+        level=req.level,
+        expires_at=req.expires_at,
+    )
+    return {"grant_id": grant_id, "level": req.level}
+
+
+@app.get("/permissions/log")
+async def permission_log(
+    accessor_id: str = "",
+    target_agent_id: str = "",
+    limit: int = 50,
+) -> list[dict]:
+    """Get memory access log."""
+    entries = _memory_service.get_access_log(
+        accessor_id=accessor_id,
+        target_agent_id=target_agent_id,
+        limit=limit,
+    )
+    return [
+        {
+            "id": e.id,
+            "accessor_id": e.accessor_id,
+            "target_agent_id": e.target_agent_id,
+            "memory_id": e.memory_id,
+            "action": e.action,
+            "level_granted": e.level_granted.value,
+            "granted_at": e.granted_at,
+        }
+        for e in entries
+    ]
+
+
+# ── Communication API (Phase 8) ──────────────────────────────────
+
+
+@app.post("/messages")
+async def send_message(req: SendMessageRequest) -> dict:
+    """Send a message between agents."""
+    msg = AgentMessage(
+        sender_id=req.sender_id,
+        recipient_id=req.recipient_id,
+        session_id=req.session_id,
+        workspace_id=req.workspace_id,
+        content=req.content,
+        message_type=MessageType(req.message_type),
+        priority=MessagePriority(req.priority),
+    )
+
+    if req.recipient_id:
+        msg_id = await _communication_bus.send(msg)
+    else:
+        ids = await _communication_bus.broadcast(msg, session_id=req.session_id)
+        return {"broadcast": True, "delivered_ids": ids, "count": len(ids)}
+
+    return {"id": msg_id, "status": "delivered"}
+
+
+@app.get("/messages")
+async def list_messages(
+    agent_id: str = "",
+    session_id: str = "",
+    limit: int = 50,
+) -> list[dict]:
+    """Get message history for an agent or session."""
+    if agent_id:
+        history = _communication_bus.get_history(agent_id, limit=limit)
+        return [m.to_dict() for m in history]
+    return []
+
+
+# ── Knowledge Graph API (Phase 9) ────────────────────────────────
+
+
+@app.get("/kg/entities")
+async def search_entities(q: str = "", entity_type: str = "", limit: int = 20) -> list[dict]:
+    """Search entities in the knowledge graph."""
+    if q:
+        return _knowledge_graph.search_entities(q, entity_type=entity_type or None, limit=limit)
+    return []
+
+
+@app.get("/kg/expand")
+async def expand_entity(name: str, depth: int = 2) -> dict:
+    """Expand the neighbourhood around an entity."""
+    return _knowledge_graph.expand(name, depth=depth)
+
+
+@app.get("/kg/stats")
+async def kg_stats() -> dict:
+    """Knowledge graph statistics."""
+    return _knowledge_graph.stats()
+
+
+# ── Debug API (Phase 9) ──────────────────────────────────────────
+
+
+@app.get("/debug/history")
+async def debug_history(
+    agent_id: str = "",
+    session_id: str = "",
+    limit: int = 50,
+) -> list[dict]:
+    """Get execution history for debugging and replay."""
+    # In production this would query a persistent store.
+    # For MVP, return recent checkpoint data.
+    return []
+
+
+@app.get("/debug/status")
+async def debug_status() -> dict:
+    """Get overall system debug status."""
+    return {
+        "agents": len(_agents),
+        "concurrency": _concurrency_controller.get_status(),
+        "kg_stats": _knowledge_graph.stats(),
+    }
+
+
 # ── Node handler functions (used by FunctionNode) ────────────────
 
 
@@ -162,14 +401,12 @@ async def _node_llm(state: GraphState) -> GraphState:
         top_k=3,
     )
 
-    # Build message list for the LLM
     llm_messages: list[dict[str, Any]] = []
     if memories:
         memory_ctx = "\n".join(f"- {m.content}" for m in memories[:3])
         llm_messages.append({"role": "system", "content": f"Relevant context from memory:\n{memory_ctx}"})
 
     user_input = state.input
-    # Include prior conversation history
     llm_messages.extend(state.messages)
     llm_messages.append({"role": "user", "content": user_input})
 
@@ -189,7 +426,12 @@ async def _node_llm(state: GraphState) -> GraphState:
     )
     state.memory_refs.append(ref.id)
 
-    # Flag whether a tool call is needed (checked by conditional edge)
+    # Extract entities for knowledge graph
+    _knowledge_graph.extract_and_ingest(
+        f"{user_input} {response}",
+        memory_id=ref.id,
+    )
+
     if "search" in response.lower() or "tool_call" in state.context:
         state.context["needs_tool"] = True
     else:
@@ -245,17 +487,14 @@ def _build_execution_graph() -> StateGraph:
     graph = StateGraph("exec-graph")
     graph.set_checkpoint_store(InMemoryCheckpointStore())
 
-    # Register nodes
     graph.add_node("start", FunctionNode("start", _node_start))
     graph.add_node("llm", FunctionNode("llm", _node_llm))
     graph.add_node("tool", FunctionNode("tool", _node_tool))
     graph.add_node("llm_synthesize", FunctionNode("llm_synthesize", _node_llm_synthesize))
 
-    # Unconditional edges
     graph.add_edge("start", "llm")
     graph.add_edge("tool", "llm_synthesize")
 
-    # Conditional edge: llm → tool (if needed) or end
     graph.add_conditional_edge(
         source="llm",
         targets={
@@ -292,11 +531,10 @@ async def execute(req: ExecuteRequest) -> StreamingResponse:
         session_id=session_id,
     )
 
-    # Queue for SSE events produced by the graph callback
     event_queue: asyncio.Queue[str | None] = asyncio.Queue()
 
     async def on_node_complete(node_name: str, state: GraphState) -> None:
-        """Callback fired after each graph node completes — pushes SSE events."""
+        """Callback fired after each graph node completes."""
         if node_name == "start":
             await event_queue.put(_sse("node_start", {"node": "start", "status": "running"}))
             await event_queue.put(_sse("node_complete", {
@@ -323,7 +561,6 @@ async def execute(req: ExecuteRequest) -> StreamingResponse:
         agent["status"] = "running"
         yield _sse("agent_status", {"agent_id": req.agent_id, "status": "running"})
 
-        # Run graph in background, feeding SSE via the queue
         async def run_graph():
             try:
                 final_state = await graph.run(initial_state, on_node_complete=on_node_complete)
@@ -337,11 +574,10 @@ async def execute(req: ExecuteRequest) -> StreamingResponse:
                 agent["status"] = "idle"
                 await event_queue.put(_sse("error", {"message": str(exc)}))
             finally:
-                await event_queue.put(None)  # sentinel
+                await event_queue.put(None)
 
         task = asyncio.create_task(run_graph())
 
-        # Drain queue → SSE stream
         while True:
             item = await event_queue.get()
             if item is None:
@@ -390,6 +626,7 @@ def main() -> None:
             query="", agent_id="cli", session_id="cli-session", top_k=10,
         )
         print(f"\n=== {len(memories)} memories stored ===")
+        print(f"=== KG stats: {_knowledge_graph.stats()} ===")
 
     asyncio.run(run_demo())
 

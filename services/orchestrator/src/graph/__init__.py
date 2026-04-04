@@ -4,24 +4,40 @@ Exports:
     - :class:`StateGraph` — the main graph orchestrator.
     - :class:`GraphState` — runtime state dataclass.
     - :class:`GraphNode` — abstract node base class.
+    - :class:`SubgraphNode` — node wrapping a nested StateGraph.
+    - :class:`ParallelNode` — node executing multiple branches concurrently.
+    - :class:`FanInNode` — node that waits for multiple branches to complete.
     - :class:`Edge` / :class:`ConditionalEdge` — edge types.
     - :class:`InMemoryCheckpointStore` — state checkpoint persistence.
 """
 
-from typing import Awaitable, Callable
+from __future__ import annotations
+
+import asyncio
+import copy
+import logging
+from typing import Any, Awaitable, Callable
 
 from src.graph.state import GraphState
 from src.graph.nodes import GraphNode
 from src.graph.edges import Edge, ConditionalEdge
 
+logger = logging.getLogger(__name__)
+
 __all__ = [
     "GraphState",
     "GraphNode",
+    "SubgraphNode",
+    "ParallelNode",
+    "FanInNode",
     "Edge",
     "ConditionalEdge",
     "StateGraph",
     "InMemoryCheckpointStore",
 ]
+
+
+# ── Checkpoint store ──────────────────────────────────────────────────
 
 
 class InMemoryCheckpointStore:
@@ -61,6 +77,192 @@ class InMemoryCheckpointStore:
         return [k[len(prefix):] for k in sorted(self._checkpoints) if k.startswith(prefix)]
 
 
+# ── Special node types ────────────────────────────────────────────────
+
+
+class SubgraphNode(GraphNode):
+    """A node that wraps a nested StateGraph.
+
+    Executes the sub-graph with a cloned copy of the incoming state,
+    then merges the sub-graph's output back into the parent state.
+
+    Attributes:
+        subgraph: The nested StateGraph to execute.
+        merge_strategy: How to merge results back.
+            ``"replace"`` — sub-graph output replaces parent output.
+            ``"append"`` — sub-graph output appended to messages.
+            ``"context"`` — stored in ``state.subgraph_results[name]``.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        subgraph: "StateGraph",
+        merge_strategy: str = "context",
+    ) -> None:
+        super().__init__(name)
+        self.subgraph = subgraph
+        self.merge_strategy = merge_strategy
+
+    async def execute(self, state: GraphState) -> GraphState:
+        """Execute the sub-graph and merge results back."""
+        child_state = state.clone()
+        child_state.status = "idle"
+
+        result = await self.subgraph.run(child_state)
+
+        if self.merge_strategy == "replace":
+            state.output = result.output
+            state.messages = result.messages
+            state.context.update(result.context)
+        elif self.merge_strategy == "append":
+            if result.messages:
+                state.messages.extend(result.messages)
+            if result.output:
+                state.messages.append({"role": "system", "content": result.output})
+        elif self.merge_strategy == "context":
+            state.subgraph_results[self.name] = result.to_dict()
+
+        state.current_node = self.name
+        return state
+
+
+class ParallelNode(GraphNode):
+    """A node that executes multiple branches concurrently.
+
+    Each branch is a list of GraphNodes executed sequentially.
+    All branches run in parallel via ``asyncio.gather``, and
+    results are collected into ``state.parallel_results[name]``.
+
+    Attributes:
+        branches: Mapping of branch name to list of nodes.
+        max_concurrency: Optional limit on parallel branches.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        branches: dict[str, list[GraphNode]],
+        max_concurrency: int | None = None,
+    ) -> None:
+        super().__init__(name)
+        self.branches = branches
+        self.max_concurrency = max_concurrency
+
+    async def execute(self, state: GraphState) -> GraphState:
+        """Execute all branches in parallel and collect results."""
+        semaphore = (
+            asyncio.Semaphore(self.max_concurrency)
+            if self.max_concurrency
+            else None
+        )
+
+        async def _run_branch(
+            branch_name: str, nodes: list[GraphNode],
+        ) -> tuple[str, dict[str, Any]]:
+            branch_state = state.clone()
+            branch_state.status = "running"
+
+            if semaphore:
+                await semaphore.acquire()
+            try:
+                for node in nodes:
+                    branch_state = await node.execute(branch_state)
+            finally:
+                if semaphore:
+                    semaphore.release()
+
+            return branch_name, {
+                "output": branch_state.output,
+                "status": branch_state.status,
+                "errors": branch_state.errors,
+                "tool_results": branch_state.tool_results,
+            }
+
+        tasks = [
+            asyncio.create_task(_run_branch(name, nodes))
+            for name, nodes in self.branches.items()
+        ]
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        branch_outputs: list[dict[str, Any]] = []
+        for item in results:
+            if isinstance(item, Exception):
+                branch_outputs.append({"output": "", "status": "error", "error": str(item)})
+            else:
+                branch_name, branch_data = item
+                branch_data["branch"] = branch_name
+                branch_outputs.append(branch_data)
+
+        state.parallel_results[self.name] = branch_outputs
+        state.current_node = self.name
+        return state
+
+
+class FanInNode(GraphNode):
+    """A node that waits for parallel branches to complete and merges results.
+
+    Reads ``state.parallel_results[source_name]`` and combines
+    them into a single unified output.
+
+    Attributes:
+        source_name: Name of the ParallelNode whose results to merge.
+        merge_mode: How to combine branch results.
+            ``"concat"`` — concatenate all outputs.
+            ``"best"`` — pick the longest/most substantial output.
+            ``"aggregate"`` — structured aggregation of all results.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        source_name: str,
+        merge_mode: str = "aggregate",
+    ) -> None:
+        super().__init__(name)
+        self.source_name = source_name
+        self.merge_mode = merge_mode
+
+    async def execute(self, state: GraphState) -> GraphState:
+        """Merge parallel branch results into a unified output."""
+        branch_results = state.parallel_results.get(self.source_name, [])
+
+        if not branch_results:
+            state.output = "[no parallel results to merge]"
+            state.current_node = self.name
+            return state
+
+        if self.merge_mode == "concat":
+            parts = [
+                r.get("output", "") for r in branch_results if r.get("output")
+            ]
+            state.output = "\n---\n".join(parts)
+
+        elif self.merge_mode == "best":
+            best = max(
+                branch_results,
+                key=lambda r: len(r.get("output", "")),
+            )
+            state.output = best.get("output", "")
+
+        elif self.merge_mode == "aggregate":
+            outputs = []
+            for r in branch_results:
+                branch_name = r.get("branch", "unknown")
+                output = r.get("output", "")
+                if output:
+                    outputs.append(f"[{branch_name}] {output}")
+            state.output = "\n".join(outputs) if outputs else "[all branches completed]"
+            state.context["fan_in_count"] = len(branch_results)
+
+        state.current_node = self.name
+        return state
+
+
+# ── StateGraph ────────────────────────────────────────────────────────
+
+
 class StateGraph:
     """Directed graph orchestrator that executes nodes in sequence.
 
@@ -79,6 +281,9 @@ class StateGraph:
     Supports:
     - Unconditional edges (fixed source -> target).
     - Conditional edges (source -> target based on state field).
+    - Subgraph nodes (nested StateGraph execution).
+    - Parallel nodes (concurrent branch execution).
+    - Fan-in nodes (merge parallel results).
     - Automatic checkpointing after each node execution.
     - Resume from last checkpoint.
     """
@@ -138,6 +343,8 @@ class StateGraph:
         """Attach a checkpoint store for state persistence."""
         self._checkpoint_store = store
         return self
+
+    # ── Execution ─────────────────────────────────────────────────
 
     async def run(
         self,
@@ -223,6 +430,35 @@ class StateGraph:
 
         state.status = "done"
         return state
+
+    # ── Graph introspection ───────────────────────────────────────
+
+    def get_node(self, name: str) -> GraphNode | None:
+        """Return a node by name, or None if not found."""
+        return self._nodes.get(name)
+
+    def list_nodes(self) -> list[str]:
+        """Return all registered node names."""
+        return list(self._nodes.keys())
+
+    def list_edges(self) -> list[dict[str, Any]]:
+        """Return all edges as structured dictionaries."""
+        result: list[dict[str, Any]] = []
+        for source, edges in self._edges.items():
+            for edge in edges:
+                if isinstance(edge, ConditionalEdge):
+                    result.append({
+                        "source": source,
+                        "type": "conditional",
+                        "targets": edge.targets,
+                    })
+                else:
+                    result.append({
+                        "source": source,
+                        "target": edge.target,
+                        "type": "unconditional",
+                    })
+        return result
 
     def _resolve_next(self, current: str, state: GraphState) -> str:
         """Determine the next node after *current* based on edges and state."""

@@ -24,6 +24,8 @@ class GraphState:
         tool_results: Results from tool executions.
         errors: Accumulated error messages.
         metadata: Extra metadata.
+        subgraph_results: Results from completed subgraph executions.
+        parallel_results: Results from parallel branch executions.
     """
 
     messages: list[dict[str, Any]] = field(default_factory=list)
@@ -39,6 +41,8 @@ class GraphState:
     tool_results: list[dict[str, Any]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    subgraph_results: dict[str, Any] = field(default_factory=dict)
+    parallel_results: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize state to a plain dictionary."""
@@ -47,4 +51,11 @@ class GraphState:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "GraphState":
         """Deserialize state from a plain dictionary."""
-        return cls(**data)
+        # Handle missing fields gracefully for backward compatibility
+        known_fields = {f.name for f in cls.__dataclass_fields__.values()}
+        filtered = {k: v for k, v in data.items() if k in known_fields}
+        return cls(**filtered)
+
+    def clone(self) -> "GraphState":
+        """Create an independent deep copy of this state."""
+        return GraphState.from_dict(self.to_dict())

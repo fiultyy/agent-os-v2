@@ -12,6 +12,11 @@ dependencies = [
     "sentence-transformers>=3.0",
     "faiss-cpu>=1.7",
     "numpy>=1.26",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.30",
+    "alembic>=1.14",
+    "greenlet>=3.0",
+    "networkx>=3.3",
 ]
 
 [build-system]

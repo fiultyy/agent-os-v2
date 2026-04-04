@@ -11,6 +11,12 @@ from src.memory.types import (
     MemoryScope,
     RecallMode,
 )
+from src.memory.permissions import (
+    PermissionManager,
+    PermissionLevel,
+    AccessGrant,
+    AccessLogEntry,
+)
 
 __all__ = [
     "MemoryService",
@@ -22,4 +28,8 @@ __all__ = [
     "MemoryType",
     "MemoryScope",
     "RecallMode",
+    "PermissionManager",
+    "PermissionLevel",
+    "AccessGrant",
+    "AccessLogEntry",
 ]

@@ -5,6 +5,8 @@ Provides the main API used by the orchestrator and graph nodes:
 - :meth:`recall` — keyword or semantic memory retrieval.
 - Block management for persona and user profile.
 - Session lifecycle management.
+- Cross-agent shared memory with permission control.
+- Access logging for audit trail.
 """
 
 import uuid
@@ -21,6 +23,13 @@ from src.memory.types import (
 )
 from src.memory.store import InMemoryStore
 from src.memory.vector import VectorStore
+from src.memory.permissions import (
+    PermissionManager,
+    PermissionLevel,
+    ACTION_READ,
+    ACTION_WRITE,
+    ACTION_DELETE,
+)
 
 
 class MemoryService:
@@ -28,20 +37,24 @@ class MemoryService:
 
     Wraps an :class:`InMemoryStore` (and optional :class:`VectorStore`)
     and provides domain-level operations including keyword/semantic recall,
-    block management, and session lifecycle.
+    block management, session lifecycle, and cross-agent permission-controlled
+    access.
 
     Attributes:
         store: The underlying persistence layer.
         vector_store: Optional vector store for semantic retrieval.
+        permissions: Permission manager for cross-agent access control.
     """
 
     def __init__(
         self,
         store: InMemoryStore | None = None,
         vector_store: VectorStore | None = None,
+        permission_manager: PermissionManager | None = None,
     ) -> None:
         self._store = store or InMemoryStore()
         self._vector_store = vector_store
+        self._permissions = permission_manager or PermissionManager()
 
     @property
     def store(self) -> InMemoryStore:
@@ -52,6 +65,11 @@ class MemoryService:
     def vector_store(self) -> VectorStore | None:
         """Access the optional vector store."""
         return self._vector_store
+
+    @property
+    def permissions(self) -> PermissionManager:
+        """Access the permission manager."""
+        return self._permissions
 
     # ── Memory Item Operations ────────────────────────────────────
 
@@ -97,25 +115,110 @@ class MemoryService:
 
         return MemoryRef(id=item_id, memory_type=memory_type, scope=scope)
 
-    async def get(self, memory_id: str) -> MemoryItem | None:
-        """Retrieve a memory item by ID."""
-        return await self._store.get(memory_id)
+    async def get(
+        self,
+        memory_id: str,
+        accessor_id: str = "",
+    ) -> MemoryItem | None:
+        """Retrieve a memory item by ID.
+
+        If *accessor_id* is provided and differs from the item's owner,
+        content is filtered by the effective permission level and the
+        access is logged.
+
+        Args:
+            memory_id: ID of the memory to retrieve.
+            accessor_id: Agent requesting access (for permission filtering).
+
+        Returns:
+            The memory item (possibly content-filtered), or None.
+        """
+        item = await self._store.get(memory_id)
+        if item is None:
+            return None
+
+        if accessor_id and accessor_id != item.agent_id:
+            # Apply permission filtering
+            level = self._permissions.check_permission(
+                accessor_id, item.agent_id, ACTION_READ,
+            )
+            self._permissions.log_access(
+                accessor_id, item.agent_id, memory_id,
+                ACTION_READ, level,
+            )
+            item.content = self._permissions.filter_content(
+                accessor_id, item.agent_id, item.content,
+            )
+
+        return item
 
     async def update(
         self,
         memory_id: str,
         content: str | None = None,
+        accessor_id: str = "",
         **kwargs: Any,
     ) -> MemoryItem | None:
-        """Update a memory item's content and/or fields."""
+        """Update a memory item's content and/or fields.
+
+        Args:
+            memory_id: ID of the item to update.
+            content: New content text (optional).
+            accessor_id: Agent performing the update (for permission check).
+            **kwargs: Additional fields to update.
+
+        Returns:
+            The updated item, or None if not found or access denied.
+        """
+        item = await self._store.get(memory_id)
+        if item is None:
+            return None
+
+        # Permission check for write access
+        if accessor_id and accessor_id != item.agent_id:
+            level = self._permissions.check_permission(
+                accessor_id, item.agent_id, ACTION_WRITE,
+            )
+            self._permissions.log_access(
+                accessor_id, item.agent_id, memory_id,
+                ACTION_WRITE, level,
+            )
+            if level < PermissionLevel.ADMIN:
+                return None  # Access denied
+
         item = await self._store.update(memory_id, content=content, **kwargs)
         # Re-index in vector store if content changed
         if item and content and self._vector_store is not None:
             await self._vector_store.add(memory_id, content)
         return item
 
-    async def delete(self, memory_id: str) -> bool:
-        """Delete a memory item."""
+    async def delete(
+        self,
+        memory_id: str,
+        accessor_id: str = "",
+    ) -> bool:
+        """Delete a memory item.
+
+        Args:
+            memory_id: ID to delete.
+            accessor_id: Agent performing the deletion (for permission check).
+
+        Returns:
+            True if deleted, False if not found or access denied.
+        """
+        if accessor_id:
+            item = await self._store.get(memory_id)
+            if item and accessor_id != item.agent_id:
+                level = self._permissions.check_permission(
+                    accessor_id, item.agent_id, ACTION_DELETE,
+                )
+                self._permissions.log_access(
+                    accessor_id, item.agent_id, memory_id,
+                    ACTION_DELETE, level,
+                )
+                if level < PermissionLevel.ADMIN:
+                    return False
+
         if self._vector_store is not None:
             await self._vector_store.delete(memory_id)
         return await self._store.delete(memory_id)
@@ -131,12 +234,16 @@ class MemoryService:
         scope: MemoryScope | None = None,
         top_k: int = 10,
         mode: RecallMode = RecallMode.KEYWORD,
+        include_shared: bool = False,
     ) -> list[MemoryItem]:
         """Recall memories matching a query.
 
         Supports two modes:
         - **KEYWORD**: Case-insensitive keyword matching (MVP default).
         - **SEMANTIC**: Vector similarity search + keyword rerank.
+
+        When *include_shared* is True, also searches shared/workspace-scope
+        memories and applies permission filtering to cross-agent results.
 
         Args:
             query: Search query text.
@@ -146,17 +253,25 @@ class MemoryService:
             scope: Optional trust-domain filter.
             top_k: Maximum results to return.
             mode: Retrieval strategy.
+            include_shared: Whether to include cross-agent shared memories.
 
         Returns:
-            List of matching memory items.
+            List of matching memory items (content may be filtered).
         """
         if mode == RecallMode.SEMANTIC and self._vector_store is not None:
-            return await self._recall_semantic(
+            results = await self._recall_semantic(
                 query, agent_id, session_id, memory_type, scope, top_k,
             )
-        return await self._recall_keyword(
-            query, agent_id, session_id, memory_type, scope, top_k,
-        )
+        else:
+            results = await self._recall_keyword(
+                query, agent_id, session_id, memory_type, scope, top_k,
+            )
+
+        if include_shared and agent_id:
+            shared = await self._recall_shared(query, agent_id, top_k)
+            results.extend(shared)
+
+        return results[:top_k]
 
     async def _recall_keyword(
         self,
@@ -201,11 +316,9 @@ class MemoryService:
         top_k: int,
     ) -> list[MemoryItem]:
         """Semantic recall: vector search top-k, then keyword rerank."""
-        # Over-fetch to allow room for filtering
         fetch_k = min(top_k * 3, 50)
         vector_results = await self._vector_store.search(query, top_k=fetch_k)
 
-        # Load items and apply structural filters
         candidates: list[MemoryItem] = []
         for mid, score in vector_results:
             item = await self._store.get(mid)
@@ -219,11 +332,9 @@ class MemoryService:
                 continue
             if scope and item.scope != scope:
                 continue
-            # Store vector score in metadata for downstream use
             item.metadata["_vector_score"] = score
             candidates.append(item)
 
-        # Rerank: boost items that also match keywords
         if query.strip():
             keywords = query.lower().split()
             for item in candidates:
@@ -232,7 +343,6 @@ class MemoryService:
                     1 for kw in keywords if kw in content_lower
                 )
                 vec_score = item.metadata.get("_vector_score", 0.0)
-                # Combine: 70% vector + 30% keyword match ratio
                 keyword_ratio = keyword_matches / len(keywords) if keywords else 0
                 item.metadata["_combined_score"] = (
                     0.7 * vec_score + 0.3 * keyword_ratio
@@ -243,6 +353,42 @@ class MemoryService:
             )
 
         return candidates[:top_k]
+
+    async def _recall_shared(
+        self,
+        query: str,
+        accessor_id: str,
+        top_k: int,
+    ) -> list[MemoryItem]:
+        """Recall shared memories from other agents with permission filtering."""
+        f = MemoryFilter(scope=MemoryScope.WORKSPACE)
+        shared_items = await self._store.search(f)
+
+        keywords = query.lower().split() if query.strip() else []
+        results: list[MemoryItem] = []
+
+        for item in shared_items:
+            if item.agent_id == accessor_id:
+                continue
+            if item.archived:
+                continue
+
+            # Keyword match
+            if keywords:
+                content_lower = item.content.lower()
+                if not any(kw in content_lower for kw in keywords):
+                    continue
+
+            # Apply permission filtering
+            filtered_content = self._permissions.filter_content(
+                accessor_id, item.agent_id, item.content,
+            )
+            item.content = filtered_content
+            results.append(item)
+            if len(results) >= top_k:
+                break
+
+        return results
 
     # ── Block Management ───────────────────────────────────────────
 
@@ -295,3 +441,40 @@ class MemoryService:
     async def destroy_session(self, session_id: str) -> bool:
         """Destroy a session and all its memory items."""
         return await self._store.destroy_session(session_id)
+
+    # ── Permission shortcuts ──────────────────────────────────────
+
+    def grant_access(
+        self,
+        grantor_id: str,
+        grantee_id: str,
+        target_agent_id: str,
+        level: int = 2,
+        expires_at: str | None = None,
+    ) -> str:
+        """Grant memory access from one agent to another.
+
+        Convenience wrapper around PermissionManager.grant.
+
+        Args:
+            grantor_id: Agent issuing the grant.
+            grantee_id: Agent receiving access.
+            target_agent_id: Agent whose memories are shared.
+            level: Permission level (0-4).
+            expires_at: Optional ISO-8601 expiry.
+
+        Returns:
+            Grant ID.
+        """
+        grant = self._permissions.grant(
+            grantor_id=grantor_id,
+            grantee_id=grantee_id,
+            target_agent_id=target_agent_id,
+            level=PermissionLevel(level),
+            expires_at=expires_at,
+        )
+        return grant.id
+
+    def get_access_log(self, **kwargs: Any) -> list:
+        """Get the memory access log. See PermissionManager.get_access_log."""
+        return self._permissions.get_access_log(**kwargs)
