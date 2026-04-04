@@ -7,10 +7,12 @@ Provides:
 
 import asyncio
 import json
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator
 
+import httpx
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -18,6 +20,47 @@ from pydantic import BaseModel
 from src.graph import StateGraph, GraphState, InMemoryCheckpointStore
 from src.graph.nodes import FunctionNode
 from src.memory import MemoryService, InMemoryStore, MemoryType, MemoryScope
+
+
+# ── LLM Client ────────────────────────────────────────────────────
+
+
+class LLMClient:
+    """Lightweight LLM client using OpenAI-compatible chat completions API."""
+
+    def __init__(self) -> None:
+        self.base_url = os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1")
+        self.api_key = os.environ.get("LLM_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
+        self.default_model = os.environ.get("LLM_MODEL", "gpt-4o-mini")
+
+    async def chat(self, messages: list[dict[str, Any]], model: str | None = None, **kwargs: Any) -> str:
+        """Send messages and return the assistant content string."""
+        if not self.api_key:
+            return "[LLM fallback] No API key configured"
+
+        url = f"{self.base_url}/chat/completions"
+        payload: dict[str, Any] = {
+            "model": model or self.default_model,
+            "messages": messages,
+            "temperature": kwargs.get("temperature", 0.7),
+            "max_tokens": kwargs.get("max_tokens", 1024),
+        }
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            try:
+                resp = await client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    json=payload,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                return data["choices"][0]["message"]["content"]
+            except Exception as exc:
+                return f"[LLM error] {exc}"
+
+
+_llm_client = LLMClient()
 
 app = FastAPI(title="Agent OS — Orchestrator", version="0.1.0", redirect_slashes=False)
 
@@ -104,7 +147,7 @@ async def _node_start(state: GraphState) -> GraphState:
 
 
 async def _node_llm(state: GraphState) -> GraphState:
-    """Simulate LLM processing with memory integration."""
+    """LLM processing with real API call and memory integration."""
     agent_id = state.agent_id
     session_id = state.session_id
 
@@ -114,15 +157,19 @@ async def _node_llm(state: GraphState) -> GraphState:
         session_id=session_id,
         top_k=3,
     )
-    memory_ctx = ""
+
+    # Build message list for the LLM
+    llm_messages: list[dict[str, Any]] = []
     if memories:
         memory_ctx = "\n".join(f"- {m.content}" for m in memories[:3])
+        llm_messages.append({"role": "system", "content": f"Relevant context from memory:\n{memory_ctx}"})
 
     user_input = state.input
-    if memory_ctx:
-        response = f"[LLM] Based on previous context:\n{memory_ctx}\n\nProcessing: {user_input}"
-    else:
-        response = f"[LLM] Processed: {user_input}"
+    # Include prior conversation history
+    llm_messages.extend(state.messages)
+    llm_messages.append({"role": "user", "content": user_input})
+
+    response = await _llm_client.chat(llm_messages)
 
     state.messages.append({"role": "user", "content": user_input})
     state.messages.append({"role": "assistant", "content": response})
@@ -160,7 +207,11 @@ async def _node_tool(state: GraphState) -> GraphState:
 async def _node_llm_synthesize(state: GraphState) -> GraphState:
     """LLM synthesizes tool results into final answer."""
     tool_result = state.context.get("tool_result", "")
-    response = f"[LLM] Based on tool results: {tool_result}\n\nFinal answer for: {state.input}"
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": "Synthesize the tool results into a final answer for the user."},
+        {"role": "user", "content": f"Original question: {state.input}\n\nTool results: {tool_result}"},
+    ]
+    response = await _llm_client.chat(messages)
     state.messages.append({"role": "assistant", "content": response})
     state.output = response
     state.current_node = "llm_synthesize"

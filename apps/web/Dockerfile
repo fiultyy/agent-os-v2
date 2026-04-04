@@ -22,9 +22,11 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN addgroup --system --gid 1001 nodejs && \
     adduser --system --uid 1001 nextjs
 
-COPY --from=base /app/apps/web/public ./public 2>/dev/null || true
+# Copy standalone output
 COPY --from=base --chown=nextjs:nodejs /app/apps/web/.next/standalone ./
 COPY --from=base --chown=nextjs:nodejs /app/apps/web/.next/static ./apps/web/.next/static
+# Copy public directory if it exists (uses a multi-stage wildcard to avoid failure)
+COPY --from=base /app/apps/web/public ./public
 
 USER nextjs
 
