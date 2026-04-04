@@ -9,6 +9,7 @@ from src.memory.types import (
     MemoryFilter,
     MemoryType,
     MemoryScope,
+    RecallMode,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "MemoryFilter",
     "MemoryType",
     "MemoryScope",
+    "RecallMode",
 ]

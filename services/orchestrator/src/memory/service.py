@@ -2,7 +2,7 @@
 
 Provides the main API used by the orchestrator and graph nodes:
 - :meth:`store` / :meth:`get` / :meth:`update` — CRUD on memory items.
-- :meth:`recall` — keyword-based memory retrieval (MVP).
+- :meth:`recall` — keyword or semantic memory retrieval.
 - Block management for persona and user profile.
 - Session lifecycle management.
 """
@@ -17,28 +17,41 @@ from src.memory.types import (
     MemoryFilter,
     MemoryType,
     MemoryScope,
+    RecallMode,
 )
 from src.memory.store import InMemoryStore
+from src.memory.vector import VectorStore
 
 
 class MemoryService:
     """High-level memory management service for agents.
 
-    Wraps an :class:`InMemoryStore` and provides domain-level
-    operations including keyword-based recall, block management,
-    and session lifecycle.
+    Wraps an :class:`InMemoryStore` (and optional :class:`VectorStore`)
+    and provides domain-level operations including keyword/semantic recall,
+    block management, and session lifecycle.
 
     Attributes:
         store: The underlying persistence layer.
+        vector_store: Optional vector store for semantic retrieval.
     """
 
-    def __init__(self, store: InMemoryStore | None = None) -> None:
+    def __init__(
+        self,
+        store: InMemoryStore | None = None,
+        vector_store: VectorStore | None = None,
+    ) -> None:
         self._store = store or InMemoryStore()
+        self._vector_store = vector_store
 
     @property
     def store(self) -> InMemoryStore:
         """Access the underlying persistence layer."""
         return self._store
+
+    @property
+    def vector_store(self) -> VectorStore | None:
+        """Access the optional vector store."""
+        return self._vector_store
 
     # ── Memory Item Operations ────────────────────────────────────
 
@@ -77,6 +90,11 @@ class MemoryService:
             metadata=metadata or {},
         )
         item_id = await self._store.store(item)
+
+        # Index in vector store for semantic search
+        if self._vector_store is not None:
+            await self._vector_store.add(item_id, content)
+
         return MemoryRef(id=item_id, memory_type=memory_type, scope=scope)
 
     async def get(self, memory_id: str) -> MemoryItem | None:
@@ -90,13 +108,19 @@ class MemoryService:
         **kwargs: Any,
     ) -> MemoryItem | None:
         """Update a memory item's content and/or fields."""
-        return await self._store.update(memory_id, content=content, **kwargs)
+        item = await self._store.update(memory_id, content=content, **kwargs)
+        # Re-index in vector store if content changed
+        if item and content and self._vector_store is not None:
+            await self._vector_store.add(memory_id, content)
+        return item
 
     async def delete(self, memory_id: str) -> bool:
         """Delete a memory item."""
+        if self._vector_store is not None:
+            await self._vector_store.delete(memory_id)
         return await self._store.delete(memory_id)
 
-    # ── Recall (keyword matching) ──────────────────────────────────
+    # ── Recall ──────────────────────────────────────────────────────
 
     async def recall(
         self,
@@ -106,24 +130,44 @@ class MemoryService:
         memory_type: MemoryType | None = None,
         scope: MemoryScope | None = None,
         top_k: int = 10,
+        mode: RecallMode = RecallMode.KEYWORD,
     ) -> list[MemoryItem]:
-        """Recall memories matching a keyword query.
+        """Recall memories matching a query.
 
-        MVP implementation uses simple case-insensitive keyword
-        matching against memory content. Returns items sorted by
-        creation time (newest first).
+        Supports two modes:
+        - **KEYWORD**: Case-insensitive keyword matching (MVP default).
+        - **SEMANTIC**: Vector similarity search + keyword rerank.
 
         Args:
-            query: Keyword(s) to search for.
+            query: Search query text.
             agent_id: Optional agent filter.
             session_id: Optional session filter.
             memory_type: Optional memory tier filter.
             scope: Optional trust-domain filter.
             top_k: Maximum results to return.
+            mode: Retrieval strategy.
 
         Returns:
             List of matching memory items.
         """
+        if mode == RecallMode.SEMANTIC and self._vector_store is not None:
+            return await self._recall_semantic(
+                query, agent_id, session_id, memory_type, scope, top_k,
+            )
+        return await self._recall_keyword(
+            query, agent_id, session_id, memory_type, scope, top_k,
+        )
+
+    async def _recall_keyword(
+        self,
+        query: str,
+        agent_id: str,
+        session_id: str,
+        memory_type: MemoryType | None,
+        scope: MemoryScope | None,
+        top_k: int,
+    ) -> list[MemoryItem]:
+        """Keyword-based recall (original MVP implementation)."""
         f = MemoryFilter(
             agent_id=agent_id,
             session_id=session_id,
@@ -133,7 +177,6 @@ class MemoryService:
 
         all_items = await self._store.search(f)
 
-        # Empty query returns all items (limited by top_k)
         if not query.strip():
             return all_items[:top_k]
 
@@ -147,6 +190,59 @@ class MemoryService:
                     break
 
         return results
+
+    async def _recall_semantic(
+        self,
+        query: str,
+        agent_id: str,
+        session_id: str,
+        memory_type: MemoryType | None,
+        scope: MemoryScope | None,
+        top_k: int,
+    ) -> list[MemoryItem]:
+        """Semantic recall: vector search top-k, then keyword rerank."""
+        # Over-fetch to allow room for filtering
+        fetch_k = min(top_k * 3, 50)
+        vector_results = await self._vector_store.search(query, top_k=fetch_k)
+
+        # Load items and apply structural filters
+        candidates: list[MemoryItem] = []
+        for mid, score in vector_results:
+            item = await self._store.get(mid)
+            if item is None or item.archived:
+                continue
+            if agent_id and item.agent_id != agent_id:
+                continue
+            if session_id and item.session_id != session_id:
+                continue
+            if memory_type and item.memory_type != memory_type:
+                continue
+            if scope and item.scope != scope:
+                continue
+            # Store vector score in metadata for downstream use
+            item.metadata["_vector_score"] = score
+            candidates.append(item)
+
+        # Rerank: boost items that also match keywords
+        if query.strip():
+            keywords = query.lower().split()
+            for item in candidates:
+                content_lower = item.content.lower()
+                keyword_matches = sum(
+                    1 for kw in keywords if kw in content_lower
+                )
+                vec_score = item.metadata.get("_vector_score", 0.0)
+                # Combine: 70% vector + 30% keyword match ratio
+                keyword_ratio = keyword_matches / len(keywords) if keywords else 0
+                item.metadata["_combined_score"] = (
+                    0.7 * vec_score + 0.3 * keyword_ratio
+                )
+            candidates.sort(
+                key=lambda i: i.metadata.get("_combined_score", 0.0),
+                reverse=True,
+            )
+
+        return candidates[:top_k]
 
     # ── Block Management ───────────────────────────────────────────
 

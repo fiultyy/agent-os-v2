@@ -9,6 +9,9 @@ dependencies = [
     "pydantic>=2.10",
     "grpcio>=1.71",
     "grpcio-tools>=1.71",
+    "sentence-transformers>=3.0",
+    "faiss-cpu>=1.7",
+    "numpy>=1.26",
 ]
 
 [build-system]

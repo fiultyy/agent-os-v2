@@ -15,6 +15,13 @@ from typing import Any
 from datetime import datetime, timezone
 
 
+class RecallMode(str, Enum):
+    """Strategy used by :meth:`MemoryService.recall`."""
+
+    KEYWORD = "keyword"        # Simple case-insensitive keyword matching
+    SEMANTIC = "semantic"      # Vector similarity search + optional rerank
+
+
 class MemoryScope(str, Enum):
     """Trust-domain isolation levels for memory access control."""
 
