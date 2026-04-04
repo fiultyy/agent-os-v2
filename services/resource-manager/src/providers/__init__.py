@@ -1,9 +1,48 @@
 """Provider adapters — unified interface to LLM providers."""
 
+import asyncio
+import json
+import logging
 import os
 from typing import Any, AsyncGenerator
 
 import httpx
+
+logger = logging.getLogger(__name__)
+
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+MAX_RETRIES = 3
+BACKOFF_BASE = 1.0  # seconds
+
+
+async def _request_with_retry(
+    client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    **kwargs: Any,
+) -> httpx.Response:
+    """Execute an HTTP request with exponential-backoff retry on transient errors."""
+    last_exc: Exception | None = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            resp = await client.request(method, url, **kwargs)
+            if resp.status_code not in RETRYABLE_STATUS_CODES:
+                return resp
+            last_exc = httpx.HTTPStatusError(
+                f"Retryable HTTP {resp.status_code}",
+                request=resp.request,
+                response=resp,
+            )
+            logger.warning("HTTP %d on attempt %d/%d for %s", resp.status_code, attempt + 1, MAX_RETRIES, url)
+        except httpx.TransportError as exc:
+            last_exc = exc
+            logger.warning("Transport error on attempt %d/%d for %s: %s", attempt + 1, MAX_RETRIES, url, exc)
+
+        if attempt < MAX_RETRIES - 1:
+            delay = BACKOFF_BASE * (2 ** attempt)
+            await asyncio.sleep(delay)
+
+    raise last_exc or httpx.TransportError("All retries exhausted")
 
 
 class BaseProvider:
@@ -42,7 +81,9 @@ class OpenAIProvider(BaseProvider):
         max_tokens = kwargs.get("max_tokens", 1024)
 
         async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
+            resp = await _request_with_retry(
+                client,
+                "POST",
                 f"{self.base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {self._get_api_key()}"},
                 json={
@@ -80,7 +121,6 @@ class OpenAIProvider(BaseProvider):
                     payload = line[6:]
                     if payload.strip() == "[DONE]":
                         break
-                    import json
                     chunk = json.loads(payload)
                     delta = chunk.get("choices", [{}])[0].get("delta", {})
                     content = delta.get("content", "")
@@ -120,7 +160,9 @@ class AnthropicProvider(BaseProvider):
             body["temperature"] = temperature
 
         async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
+            resp = await _request_with_retry(
+                client,
+                "POST",
                 f"{self.base_url}/messages",
                 headers={
                     "x-api-key": self._get_api_key(),
@@ -168,7 +210,6 @@ class AnthropicProvider(BaseProvider):
                 json=body,
             ) as resp:
                 resp.raise_for_status()
-                import json
                 async for line in resp.aiter_lines():
                     if not line.startswith("data: "):
                         continue
@@ -196,7 +237,9 @@ class ZhipuProvider(BaseProvider):
         max_tokens = kwargs.get("max_tokens", 1024)
 
         async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
+            resp = await _request_with_retry(
+                client,
+                "POST",
                 f"{self.base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {self._get_api_key()}"},
                 json={
@@ -234,7 +277,6 @@ class ZhipuProvider(BaseProvider):
                     payload = line[6:]
                     if payload.strip() == "[DONE]":
                         break
-                    import json
                     chunk = json.loads(payload)
                     delta = chunk.get("choices", [{}])[0].get("delta", {})
                     content = delta.get("content", "")

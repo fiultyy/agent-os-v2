@@ -20,6 +20,9 @@ from pydantic import BaseModel
 from src.graph import StateGraph, GraphState, InMemoryCheckpointStore
 from src.graph.nodes import FunctionNode
 from src.memory import MemoryService, InMemoryStore, MemoryType, MemoryScope
+from src.tools.executor import ToolExecutor
+from src.tools.registry import ToolRegistry
+from src.tools.guardrail import Guardrail
 
 
 # ── LLM Client ────────────────────────────────────────────────────
@@ -68,6 +71,7 @@ app = FastAPI(title="Agent OS — Orchestrator", version="0.1.0", redirect_slash
 
 _agents: dict[str, dict[str, Any]] = {}
 _memory_service = MemoryService(InMemoryStore())
+_tool_executor = ToolExecutor(ToolRegistry())
 
 
 class CreateAgentRequest(BaseModel):
@@ -195,11 +199,19 @@ async def _node_llm(state: GraphState) -> GraphState:
 
 
 async def _node_tool(state: GraphState) -> GraphState:
-    """Simulate tool execution."""
+    """Execute a tool call via ToolExecutor."""
     tool_name = state.context.get("tool_call", "web_search")
-    result = f"[Tool] {tool_name} returned: Simulated result for '{state.input}'"
-    state.tool_results.append({"tool": tool_name, "result": result})
-    state.context["tool_result"] = result
+    tool_args = state.context.get("tool_args", {"query": state.input})
+
+    result = await _tool_executor.execute(tool_name, tool_args)
+
+    if result["status"] != "success":
+        error_msg = result.get("error", "Unknown error")
+        state.context["tool_result"] = f"[Tool error] {tool_name}: {error_msg}"
+    else:
+        state.context["tool_result"] = str(result["output"])
+
+    state.tool_results.append({"tool": tool_name, "result": state.context["tool_result"]})
     state.current_node = "tool"
     return state
 
