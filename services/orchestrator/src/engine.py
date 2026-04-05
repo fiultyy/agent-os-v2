@@ -663,13 +663,27 @@ async def _node_llm(state: GraphState) -> GraphState:
             items = await _memory_service.recall(
                 query="", agent_id=agent_id, session_id=session_id, top_k=50
             )
-            result = await asyncio.wait_for(
-                _sync_compressor.compress(items),
-                timeout=2.0,
-            )
-            # Store summary items
-            for sid in result.summary_ids:
-                state.memory_refs.append(sid)
+            result = await _sync_compressor.compress(items)
+            # Persist summary items and record their refs
+            for summary_item in result.summaries:
+                await _memory_service.store(
+                    content=summary_item.content,
+                    agent_id=summary_item.agent_id,
+                    session_id=summary_item.session_id,
+                    memory_type=summary_item.memory_type,
+                    scope=summary_item.scope,
+                    importance=summary_item.importance,
+                    metadata=summary_item.metadata,
+                )
+                state.memory_refs.append(summary_item.id)
+            # Archive source items that were replaced by summaries
+            if result.summaries:
+                retained_ids = {r.id for r in result.retained}
+                for item in items:
+                    if item.id not in retained_ids:
+                        await _memory_service.update(
+                            item.id, accessor_id=agent_id, archived=True,
+                        )
         except asyncio.TimeoutError:
             pass  # Skip compression if timeout
     elif trigger_level == CompressionLevel.ASYNC:
@@ -677,7 +691,27 @@ async def _node_llm(state: GraphState) -> GraphState:
         items = await _memory_service.recall(
             query="", agent_id=agent_id, session_id=session_id, top_k=50
         )
-        await _async_compressor.trigger(items)
+
+        async def _on_compressed(retained: list, summaries: list) -> None:
+            """Callback: persist summaries and archive replaced sources."""
+            for summary_item in summaries:
+                await _memory_service.store(
+                    content=summary_item.content,
+                    agent_id=summary_item.agent_id,
+                    session_id=summary_item.session_id,
+                    memory_type=summary_item.memory_type,
+                    scope=summary_item.scope,
+                    importance=summary_item.importance,
+                    metadata=summary_item.metadata,
+                )
+            retained_ids = {r.id for r in retained}
+            for item in items:
+                if item.id not in retained_ids:
+                    await _memory_service.update(
+                        item.id, accessor_id=agent_id, archived=True,
+                    )
+
+        await _async_compressor.trigger(items, on_compressed=_on_compressed)
 
     # Determine if tool use is needed:
     # 1. Explicit tool_call in context (set by upstream)
