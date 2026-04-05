@@ -1,9 +1,9 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import Link from "next/link";
-import { Bot, Send, Loader2, Layout, MessageSquare } from "lucide-react";
+import { Bot, Send, Loader2, MessageSquare } from "lucide-react";
 import { executeWithSSE } from "@/lib/api";
+import { Header } from "@/components/layout/Header";
 
 interface Agent {
   id: string;
@@ -113,67 +113,9 @@ export default function Home() {
   };
 
   return (
-    <div className="flex h-screen bg-gray-50">
-      {/* Sidebar */}
-      <aside className="flex w-64 flex-col border-r bg-white">
-        <div className="border-b p-4">
-          <h1 className="flex items-center gap-2 text-lg font-bold">
-            <Bot className="h-5 w-5 text-blue-600" />
-            Agent OS
-          </h1>
-        </div>
-
-        {/* Agent card */}
-        <div className="border-b p-4">
-          <div className="rounded-lg bg-blue-50 p-3">
-            <div className="flex items-center gap-2">
-              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-blue-600 text-sm text-white">
-                AI
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-sm font-medium">
-                  {agent?.name ?? "Loading..."}
-                </div>
-                <div className="truncate text-xs text-gray-500">
-                  {agent?.model ?? "—"}
-                </div>
-              </div>
-            </div>
-            <div className="mt-2 flex items-center gap-1">
-              <span
-                className={`inline-block h-2 w-2 rounded-full ${
-                  agent?.status === "idle" ? "bg-green-500" : "bg-gray-300"
-                }`}
-              />
-              <span className="text-xs text-gray-500">
-                {agent?.status === "idle" ? "Online" : agent ? "Busy" : "—"}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* Nav links */}
-        <nav className="flex-1 space-y-1 p-3">
-          <Link
-            href="/canvas"
-            className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-gray-600 hover:bg-gray-100"
-          >
-            <Layout className="h-4 w-4" />
-            流程画布
-          </Link>
-          <Link
-            href="/agents"
-            className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-gray-600 hover:bg-gray-100"
-          >
-            <Bot className="h-4 w-4" />
-            Agent 管理
-          </Link>
-        </nav>
-
-        <div className="border-t p-3">
-          <p className="text-center text-xs text-gray-400">Agent OS v0.1</p>
-        </div>
-      </aside>
+    <div className="flex h-screen flex-col bg-gray-50">
+      <Header />
+      <div className="flex flex-1 overflow-hidden">
 
       {/* Chat area */}
       <main className="flex flex-1 flex-col">
@@ -246,6 +188,7 @@ export default function Home() {
           </div>
         </div>
       </main>
+      </div>
     </div>
   );
 }
