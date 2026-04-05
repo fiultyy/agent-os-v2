@@ -109,6 +109,33 @@ if _database_url:
         _pg_store = None
 
 
+@app.on_event("startup")
+async def _init_default_agent() -> None:
+    """Auto-create a default agent if none exist."""
+    if _agents:
+        return
+    agent_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    default_agent = {
+        "id": agent_id,
+        "name": "默认助手",
+        "description": "Agent OS 默认智能助手，开箱即用",
+        "status": "idle",
+        "model": os.environ.get("LLM_MODEL", "glm-4-flash"),
+        "system_prompt": "你是 Agent OS 的默认助手。你善于用中文回答各类问题，提供有帮助的建议。回答要简洁明了。",
+        "tools": [],
+        "temperature": 0.7,
+        "max_tokens": 4096,
+        "created_at": now,
+        "updated_at": now,
+    }
+    _agents[agent_id] = default_agent
+    if _pg_store is not None:
+        await _pg_store.store_agent(default_agent)
+    await _memory_service.init_agent_blocks(agent_id)
+    print(f"Default agent initialized: {agent_id}")
+
+
 @app.on_event("shutdown")
 async def _shutdown() -> None:
     """Graceful shutdown: close database connections and release resources."""
@@ -155,6 +182,12 @@ class StoreMemoryRequest(BaseModel):
     importance: float = 0.5
 
 
+class ChatRequest(BaseModel):
+    message: str
+    agent_id: str = ""
+    session_id: str = ""
+
+
 class SendMessageRequest(BaseModel):
     sender_id: str
     recipient_id: str | None = None
@@ -179,6 +212,54 @@ class GrantPermissionRequest(BaseModel):
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
+
+
+# ── Simple Chat ──────────────────────────────────────────────────
+
+
+@app.post("/chat")
+async def chat(req: ChatRequest) -> dict:
+    """Simple chat endpoint — auto-picks the first agent if none specified."""
+    from fastapi.responses import JSONResponse
+
+    agent_id = req.agent_id
+    if not agent_id:
+        if not _agents:
+            return JSONResponse({"error": "No agents available"}, status_code=404)
+        agent_id = next(iter(_agents))
+
+    agent = _agents.get(agent_id)
+    if not agent:
+        return JSONResponse({"error": "Agent not found"}, status_code=404)
+
+    session_id = req.session_id or str(uuid.uuid4())
+    system_prompt = agent.get("system_prompt") or "You are a helpful assistant."
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": req.message},
+    ]
+
+    try:
+        response = await _llm_client.chat(
+            messages,
+            model=agent.get("model"),
+            temperature=agent.get("temperature", 0.7),
+            max_tokens=agent.get("max_tokens", 4096),
+        )
+    except LLMError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+
+    # Store as session memory
+    await _memory_service.store(
+        content=f"User: {req.message}\nAssistant: {response}",
+        agent_id=agent_id,
+        session_id=session_id,
+        memory_type=MemoryType.SESSION,
+        scope=MemoryScope.AGENT,
+    )
+
+    return {"response": response, "agent_id": agent_id, "session_id": session_id}
 
 
 # ── Agent CRUD ───────────────────────────────────────────────────
