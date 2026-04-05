@@ -73,24 +73,25 @@ def _extract_key_sentences(text: str, max_sentences: int = 3) -> list[str]:
 
 
 def _is_reasoning_chain(content: str) -> bool:
-    """Detect if content is part of a reasoning chain.
+    """Detect if content is part of a multi-step reasoning chain.
 
-    Reasoning chains contain step-by-step logic, numbered points,
-    or explicit thinking patterns.
+    Only matches structured reasoning patterns — not isolated sentences
+    that happen to contain "because" or a number.
     """
+    content_lower = content.lower()
+    # Must have at least 2 distinct reasoning markers to qualify
     reasoning_markers = [
         r'step\s+\d',
-        r'\d+\.\s',
-        r'therefore',
-        r'because',
-        r'if.*then',
-        r'假设',
-        r'推理',
-        r'结论',
-        r'步骤',
+        r'firstly|secondly|finally',  # ordered transition words
+        r'假设.*因此',                  # Chinese causal chain
+        r'推理.*结论',                  # Chinese reasoning chain
+        r'步骤\s*[一二三\d]',           # Chinese numbered steps
     ]
-    content_lower = content.lower()
-    return any(re.search(p, content_lower) for p in reasoning_markers)
+    marker_hits = sum(1 for p in reasoning_markers if re.search(p, content_lower))
+    # Also count explicit multi-step patterns (e.g. "Step 1... Step 2...")
+    if re.search(r'step\s+\d', content_lower) and re.search(r'step\s+\d', content_lower[content_lower.index('step') + 4:] if 'step' in content_lower else ''):
+        marker_hits += 1
+    return marker_hits >= 2
 
 
 class CompressionEngine:
@@ -134,25 +135,26 @@ class CompressionEngine:
         # Reasoning items count against the target
         remaining_slots = max(0, target_count - len(reasoning))
 
-        if remaining_slots >= len(regular):
-            # All items fit, no compression needed
+        if not regular or remaining_slots >= len(regular):
+            # All regular items fit within slots, no compression needed
             return items, []
 
-        # Group regular items into batches and summarize
-        group_size = max(2, len(regular) // max(1, remaining_slots))
-        summaries: list[MemoryItem] = []
-        retained_regular: list[MemoryItem] = []
+        # Must compress: keep `remaining_slots` best regular items,
+        # summarize the rest in groups
+        regular_sorted = sorted(regular, key=lambda g: g.importance, reverse=True)
+        retained_regular = regular_sorted[:remaining_slots]
+        to_compress = regular_sorted[remaining_slots:]
 
-        for i in range(0, len(regular), group_size):
-            group = regular[i:i + group_size]
-            if len(retained_regular) < remaining_slots:
-                # Keep the most important item from the group
-                best = max(group, key=lambda g: g.importance)
-                retained_regular.append(best)
-            else:
-                # Compress the group into a summary
-                summary = self._summarize_group(group)
-                summaries.append(summary)
+        if not to_compress:
+            return reasoning + retained_regular, []
+
+        # Group items to compress into batches of ~3 and summarize each batch
+        group_size = max(2, 3)
+        summaries: list[MemoryItem] = []
+        for i in range(0, len(to_compress), group_size):
+            group = to_compress[i:i + group_size]
+            summary = self._summarize_group(group)
+            summaries.append(summary)
 
         return reasoning + retained_regular, summaries
 
