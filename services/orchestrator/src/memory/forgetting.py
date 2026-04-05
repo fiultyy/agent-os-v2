@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from src.memory.types import MemoryItem, MemoryType, MemoryFilter
@@ -154,7 +155,6 @@ class ActiveForgetting:
 
     def _get_age_hours(self, item: MemoryItem) -> float:
         """Get the age of a memory item in hours."""
-        from datetime import datetime, timezone
         try:
             now = datetime.now(timezone.utc)
             created = datetime.fromisoformat(item.created_at)

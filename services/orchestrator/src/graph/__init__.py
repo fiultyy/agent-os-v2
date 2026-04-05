@@ -350,6 +350,7 @@ class StateGraph:
         self,
         initial_state: GraphState,
         on_node_complete: Callable[[str, GraphState], Awaitable[None]] | None = None,
+        max_steps: int = 100,
     ) -> GraphState:
         """Execute the graph starting from the entry point.
 
@@ -370,8 +371,19 @@ class StateGraph:
         state = initial_state
         state.status = "running"
         current_node_name: str | None = self._entry_point
+        steps = 0
 
         while current_node_name:
+            steps += 1
+            if steps > max_steps:
+                state.errors.append(
+                    f"Graph execution exceeded max_steps={max_steps}, possible cycle detected"
+                )
+                logger.warning(
+                    "Graph %s exceeded max_steps=%d at node %s",
+                    self.graph_id, max_steps, current_node_name,
+                )
+                break
             node = self._nodes.get(current_node_name)
             if node is None:
                 state.errors.append(f"Node {current_node_name!r} not found")

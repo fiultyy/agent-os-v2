@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+from abc import ABC, abstractmethod
 from typing import Any, AsyncGenerator
 
 import httpx
@@ -45,7 +46,7 @@ async def _request_with_retry(
     raise last_exc or httpx.TransportError("All retries exhausted")
 
 
-class BaseProvider:
+class BaseProvider(ABC):
     """Base class for LLM provider adapters."""
 
     name: str = "base"
@@ -58,14 +59,13 @@ class BaseProvider:
             raise ValueError(f"Missing API key: set {self.api_key_env}")
         return key
 
+    @abstractmethod
     async def complete(self, messages: list[dict[str, Any]], **kwargs: Any) -> dict[str, Any]:
         """Send a completion request."""
-        raise NotImplementedError
 
+    @abstractmethod
     async def stream(self, messages: list[dict[str, Any]], **kwargs: Any) -> AsyncGenerator[str, None]:
         """Stream a completion request."""
-        raise NotImplementedError
-        yield  # make it an async generator  # noqa: unreachable
 
 
 class OpenAIProvider(BaseProvider):
@@ -101,31 +101,46 @@ class OpenAIProvider(BaseProvider):
         temperature = kwargs.get("temperature", 0.7)
         max_tokens = kwargs.get("max_tokens", 1024)
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            async with client.stream(
-                "POST",
-                f"{self.base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {self._get_api_key()}"},
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                    "stream": True,
-                },
-            ) as resp:
-                resp.raise_for_status()
-                async for line in resp.aiter_lines():
-                    if not line.startswith("data: "):
-                        continue
-                    payload = line[6:]
-                    if payload.strip() == "[DONE]":
-                        break
-                    chunk = json.loads(payload)
-                    delta = chunk.get("choices", [{}])[0].get("delta", {})
-                    content = delta.get("content", "")
-                    if content:
-                        yield content
+        # Retry connection establishment for stream (not individual chunks)
+        last_exc: Exception | None = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    async with client.stream(
+                        "POST",
+                        f"{self.base_url}/chat/completions",
+                        headers={"Authorization": f"Bearer {self._get_api_key()}"},
+                        json={
+                            "model": model,
+                            "messages": messages,
+                            "temperature": temperature,
+                            "max_tokens": max_tokens,
+                            "stream": True,
+                        },
+                    ) as resp:
+                        resp.raise_for_status()
+                        async for line in resp.aiter_lines():
+                            if not line.startswith("data: "):
+                                continue
+                            payload = line[6:]
+                            if payload.strip() == "[DONE]":
+                                break
+                            chunk = json.loads(payload)
+                            delta = chunk.get("choices", [{}])[0].get("delta", {})
+                            content = delta.get("content", "")
+                            if content:
+                                yield content
+                    return  # success, exit retry loop
+            except (httpx.HTTPStatusError, httpx.TransportError) as exc:
+                last_exc = exc
+                if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code not in RETRYABLE_STATUS_CODES:
+                    raise
+                logger.warning("Stream attempt %d/%d failed: %s", attempt + 1, MAX_RETRIES, exc)
+                if attempt < MAX_RETRIES - 1:
+                    delay = BACKOFF_BASE * (2 ** attempt)
+                    await asyncio.sleep(delay)
+
+        raise last_exc or httpx.TransportError("Stream retries exhausted")
 
 
 class AnthropicProvider(BaseProvider):

@@ -1,4 +1,20 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: agentos
+      POSTGRES_PASSWORD: agentos_dev
+      POSTGRES_DB: agentos
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentos"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   web:
     build:
       context: .
@@ -50,6 +66,10 @@ services:
       - ./services/orchestrator/src:/app/src
     environment:
       - GATEWAY_URL=http://gateway:8000
+      - DATABASE_URL=postgresql+asyncpg://agentos:agentos_dev@postgres:5432/agentos
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
       interval: 10s
@@ -97,3 +117,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+volumes:
+  pgdata:

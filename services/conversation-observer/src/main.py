@@ -51,32 +51,23 @@ async def health() -> dict:
 @app.post("/conversations")
 async def create_conversation(req: CreateConversationRequest) -> dict:
     conv_id = str(uuid.uuid4())
-    conv = {
-        "id": conv_id,
-        "agent_id": req.agent_id,
-        "turns": [],
-        "metadata": req.metadata,
-        "status": "active",
-        "context_summary": "",
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
-    _monitor._conversations[conv_id] = conv
+    conv = _monitor.create_conversation(
+        conversation_id=conv_id,
+        agent_id=req.agent_id,
+        metadata=req.metadata,
+    )
     _analytics.record_event("conversation_created", {"conversation_id": conv_id})
     return conv
 
 
 @app.get("/conversations")
 async def list_conversations(agent_id: str = "") -> list[dict]:
-    convs = list(_monitor._conversations.values())
-    if agent_id:
-        convs = [c for c in convs if c["agent_id"] == agent_id]
-    return convs
+    return _monitor.list_conversations(agent_id=agent_id)
 
 
 @app.get("/conversations/{conversation_id}")
 async def get_conversation(conversation_id: str) -> dict:
-    conv = _monitor._conversations.get(conversation_id)
+    conv = _monitor.get_conversation(conversation_id)
     if not conv:
         return {"error": "Conversation not found"}
     return conv
@@ -84,8 +75,8 @@ async def get_conversation(conversation_id: str) -> dict:
 
 @app.delete("/conversations/{conversation_id}")
 async def delete_conversation(conversation_id: str) -> dict:
-    if conversation_id in _monitor._conversations:
-        del _monitor._conversations[conversation_id]
+    deleted = _monitor.delete_conversation(conversation_id)
+    if deleted:
         _analytics.record_event("conversation_deleted", {"conversation_id": conversation_id})
         return {"deleted": True}
     return {"error": "Conversation not found"}
@@ -96,31 +87,28 @@ async def delete_conversation(conversation_id: str) -> dict:
 
 @app.post("/conversations/{conversation_id}/turns")
 async def add_turn(conversation_id: str, req: AddTurnRequest) -> dict:
-    conv = _monitor._conversations.get(conversation_id)
-    if not conv:
+    turn = _monitor.add_turn(
+        conversation_id=conversation_id,
+        role=req.role,
+        content=req.content,
+        metadata=req.metadata,
+    )
+    if turn is None:
         return {"error": "Conversation not found"}
-
-    turn = {
-        "id": str(uuid.uuid4()),
-        "role": req.role,
-        "content": req.content,
-        "metadata": req.metadata,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-    conv["turns"].append(turn)
-    conv["updated_at"] = datetime.now(timezone.utc).isoformat()
 
     await _monitor.on_message(conversation_id, turn)
 
     # Anomaly detection: flag conversations with excessive errors
-    error_count = sum(1 for t in conv["turns"] if t["role"] == "error")
-    if error_count > 3:
-        conv["status"] = "degraded"
-        _analytics.record_event("anomaly_detected", {
-            "conversation_id": conversation_id,
-            "type": "error_spike",
-            "error_count": error_count,
-        })
+    raw_conv = _monitor.get_raw_conversation(conversation_id)
+    if raw_conv:
+        error_count = sum(1 for t in raw_conv.get("turns", []) if t.get("role") == "error")
+        if error_count > 3:
+            raw_conv["status"] = "degraded"
+            _analytics.record_event("anomaly_detected", {
+                "conversation_id": conversation_id,
+                "type": "error_spike",
+                "error_count": error_count,
+            })
 
     _analytics.record_event("turn_added", {"conversation_id": conversation_id, "role": req.role})
     return turn

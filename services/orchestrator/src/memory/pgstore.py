@@ -73,6 +73,19 @@ sessions = sa.Table(
     sa.Column("created_at", sa.String(40), nullable=False),
 )
 
+agents = sa.Table(
+    "agents",
+    metadata,
+    sa.Column("id", sa.String(36), primary_key=True),
+    sa.Column("name", sa.String(200), nullable=False, server_default="New Agent"),
+    sa.Column("description", sa.Text, nullable=False, server_default=""),
+    sa.Column("status", sa.String(20), nullable=False, server_default="idle"),
+    sa.Column("model", sa.String(100), nullable=False, server_default="gpt-4o-mini"),
+    sa.Column("tools_json", sa.Text, nullable=False, server_default="[]"),
+    sa.Column("created_at", sa.String(40), nullable=False),
+    sa.Column("updated_at", sa.String(40), nullable=False),
+)
+
 
 # ── Helper ─────────────────────────────────────────────────────────────
 
@@ -105,6 +118,22 @@ def _row_to_block(row: sa.Row) -> MemoryBlock:
         char_limit=int(row[memory_blocks.c.char_limit]),
         agent_id=row[memory_blocks.c.agent_id],
     )
+
+
+def _row_to_agent(row: sa.Row) -> dict[str, Any]:
+    """Convert a database row to an agent dictionary."""
+    tools_raw = row[agents.c.tools_json]
+    tools_list: list[str] = json.loads(tools_raw) if isinstance(tools_raw, str) else []
+    return {
+        "id": row[agents.c.id],
+        "name": row[agents.c.name],
+        "description": row[agents.c.description],
+        "status": row[agents.c.status],
+        "model": row[agents.c.model],
+        "tools": tools_list,
+        "created_at": row[agents.c.created_at],
+        "updated_at": row[agents.c.updated_at],
+    }
 
 
 # ── PostgresStore ──────────────────────────────────────────────────────
@@ -253,8 +282,10 @@ class PostgresStore:
         if filter.scope:
             query = query.where(memory_items.c.scope == filter.scope.value)
         if filter.keyword:
+            # Escape SQL LIKE wildcards to prevent unintended pattern matching
+            escaped = filter.keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             query = query.where(
-                memory_items.c.content.ilike(f"%{filter.keyword}%")
+                memory_items.c.content.ilike(f"%{escaped}%", escape="\\")
             )
         if filter.min_importance > 0:
             query = query.where(memory_items.c.importance >= filter.min_importance)
@@ -467,3 +498,68 @@ class PostgresStore:
                 sessions.delete().where(sessions.c.id == session_id)
             )
         return True
+
+    # ── Agent CRUD ──────────────────────────────────────────────────
+
+    async def store_agent(self, agent: dict[str, Any]) -> None:
+        """Persist an agent record."""
+        async with self._engine.begin() as conn:
+            await conn.execute(
+                agents.insert().values(
+                    id=agent["id"],
+                    name=agent.get("name", ""),
+                    description=agent.get("description", ""),
+                    status=agent.get("status", "idle"),
+                    model=agent.get("model", "gpt-4o-mini"),
+                    tools_json=json.dumps(agent.get("tools", [])),
+                    created_at=agent.get("created_at", datetime.now(timezone.utc).isoformat()),
+                    updated_at=agent.get("updated_at", datetime.now(timezone.utc).isoformat()),
+                )
+            )
+
+    async def get_agent(self, agent_id: str) -> dict[str, Any] | None:
+        """Retrieve an agent by ID."""
+        async with self._engine.connect() as conn:
+            result = await conn.execute(
+                agents.select().where(agents.c.id == agent_id)
+            )
+            row = result.fetchone()
+            if row is None:
+                return None
+            return _row_to_agent(row)
+
+    async def list_agents(self) -> list[dict[str, Any]]:
+        """List all agents."""
+        async with self._engine.connect() as conn:
+            result = await conn.execute(agents.select())
+            return [_row_to_agent(row) for row in result.fetchall()]
+
+    async def update_agent(self, agent_id: str, **kwargs: Any) -> bool:
+        """Update an agent's fields."""
+        values: dict[str, Any] = {
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if "name" in kwargs:
+            values["name"] = kwargs["name"]
+        if "description" in kwargs:
+            values["description"] = kwargs["description"]
+        if "status" in kwargs:
+            values["status"] = kwargs["status"]
+        if "model" in kwargs:
+            values["model"] = kwargs["model"]
+        if "tools" in kwargs:
+            values["tools_json"] = json.dumps(kwargs["tools"])
+
+        async with self._engine.begin() as conn:
+            result = await conn.execute(
+                agents.update().where(agents.c.id == agent_id).values(**values)
+            )
+            return result.rowcount > 0
+
+    async def delete_agent(self, agent_id: str) -> bool:
+        """Delete an agent."""
+        async with self._engine.begin() as conn:
+            result = await conn.execute(
+                agents.delete().where(agents.c.id == agent_id)
+            )
+            return result.rowcount > 0

@@ -412,3 +412,14 @@ class CommunicationBus:
         The callback receives (message, recipient_agent_id).
         """
         self._delivery_callbacks.append(callback)
+
+    async def close(self) -> None:
+        """Clear all queues and subscriptions on shutdown."""
+        self._queues.clear()
+        self._session_members.clear()
+        self._workspace_members.clear()
+        self._topic_subscribers.clear()
+        self._pending_responses.clear()
+        self._delivery_callbacks.clear()
+        self._history.clear()
+        logger.info("CommunicationBus closed")

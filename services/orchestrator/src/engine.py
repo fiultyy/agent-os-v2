@@ -10,12 +10,13 @@ Provides:
 import asyncio
 import json
 import os
+import re as _re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -36,6 +37,10 @@ from src.tools.guardrail import Guardrail
 # ── LLM Client ────────────────────────────────────────────────────
 
 
+class LLMError(Exception):
+    """Raised when the LLM call fails."""
+
+
 class LLMClient:
     """Lightweight LLM client using OpenAI-compatible chat completions API."""
 
@@ -45,9 +50,13 @@ class LLMClient:
         self.default_model = os.environ.get("LLM_MODEL", "gpt-4o-mini")
 
     async def chat(self, messages: list[dict[str, Any]], model: str | None = None, **kwargs: Any) -> str:
-        """Send messages and return the assistant content string."""
+        """Send messages and return the assistant content string.
+
+        Raises:
+            LLMError: If the API key is missing or the API call fails.
+        """
         if not self.api_key:
-            return "[LLM fallback] No API key configured"
+            raise LLMError("No API key configured — set LLM_API_KEY or OPENAI_API_KEY")
 
         url = f"{self.base_url}/chat/completions"
         payload: dict[str, Any] = {
@@ -67,8 +76,10 @@ class LLMClient:
                 resp.raise_for_status()
                 data = resp.json()
                 return data["choices"][0]["message"]["content"]
-            except Exception as exc:
-                return f"[LLM error] {exc}"
+            except httpx.HTTPStatusError as exc:
+                raise LLMError(f"HTTP {exc.response.status_code}: {exc.response.text[:200]}") from exc
+            except httpx.RequestError as exc:
+                raise LLMError(f"Request failed: {exc}") from exc
 
 
 _llm_client = LLMClient()
@@ -78,11 +89,41 @@ app = FastAPI(title="Agent OS — Orchestrator", version="0.2.0", redirect_slash
 # ── Global services ──────────────────────────────────────────────
 
 _agents: dict[str, dict[str, Any]] = {}
+
+# Try PostgresStore when DATABASE_URL is set, fall back to InMemoryStore
+_pg_store: Any | None = None
+_database_url = os.environ.get("DATABASE_URL", "")
+if _database_url:
+    try:
+        from src.memory.pgstore import PostgresStore
+        _pg_store = PostgresStore(_database_url)
+
+        @app.on_event("startup")
+        async def _init_pg_store() -> None:
+            await _pg_store.initialize()  # type: ignore[union-attr]
+            for agent in await _pg_store.list_agents():  # type: ignore[union-attr]
+                _agents[agent["id"]] = agent
+
+    except Exception:
+        _pg_store = None
+
+
+@app.on_event("shutdown")
+async def _shutdown() -> None:
+    """Graceful shutdown: close database connections and release resources."""
+    if _pg_store is not None:
+        await _pg_store.close()
+    await _communication_bus.close()
+
 _memory_service = MemoryService(InMemoryStore())
 _tool_executor = ToolExecutor(ToolRegistry())
 _communication_bus = CommunicationBus()
 _concurrency_controller = ConcurrencyController()
 _knowledge_graph = KnowledgeGraph()
+
+# Execution log for debug/replay (in-memory, capped)
+_execution_log: list[dict[str, Any]] = []
+_MAX_EXECUTION_LOG = 1000
 
 
 # ── Request models ───────────────────────────────────────────────
@@ -154,6 +195,8 @@ async def create_agent(req: CreateAgentRequest) -> dict:
         "updated_at": now,
     }
     _agents[agent_id] = agent
+    if _pg_store is not None:
+        await _pg_store.store_agent(agent)
     await _memory_service.init_agent_blocks(agent_id)
     return agent
 
@@ -175,6 +218,8 @@ async def get_agent(agent_id: str) -> dict:
 async def delete_agent(agent_id: str) -> dict:
     if agent_id in _agents:
         del _agents[agent_id]
+        if _pg_store is not None:
+            await _pg_store.delete_agent(agent_id)
         return {"deleted": True}
     return {"error": "Agent not found"}
 
@@ -201,7 +246,7 @@ async def list_memories(
     agent_id: str = "",
     session_id: str = "",
     memory_type: str = "",
-    limit: int = 100,
+    limit: int = Query(default=100, le=500),
 ) -> list[dict]:
     """List memories with optional filters."""
     items = await _memory_service.recall(
@@ -269,7 +314,7 @@ async def grant_permission(req: GrantPermissionRequest) -> dict:
 async def permission_log(
     accessor_id: str = "",
     target_agent_id: str = "",
-    limit: int = 50,
+    limit: int = Query(default=50, le=500),
 ) -> list[dict]:
     """Get memory access log."""
     entries = _memory_service.get_access_log(
@@ -320,7 +365,7 @@ async def send_message(req: SendMessageRequest) -> dict:
 async def list_messages(
     agent_id: str = "",
     session_id: str = "",
-    limit: int = 50,
+    limit: int = Query(default=50, le=500),
 ) -> list[dict]:
     """Get message history for an agent or session."""
     if agent_id:
@@ -333,7 +378,7 @@ async def list_messages(
 
 
 @app.get("/kg/entities")
-async def search_entities(q: str = "", entity_type: str = "", limit: int = 20) -> list[dict]:
+async def search_entities(q: str = "", entity_type: str = "", limit: int = Query(default=20, le=500)) -> list[dict]:
     """Search entities in the knowledge graph."""
     if q:
         return _knowledge_graph.search_entities(q, entity_type=entity_type or None, limit=limit)
@@ -359,12 +404,15 @@ async def kg_stats() -> dict:
 async def debug_history(
     agent_id: str = "",
     session_id: str = "",
-    limit: int = 50,
+    limit: int = Query(default=50, le=500),
 ) -> list[dict]:
     """Get execution history for debugging and replay."""
-    # In production this would query a persistent store.
-    # For MVP, return recent checkpoint data.
-    return []
+    entries = _execution_log
+    if agent_id:
+        entries = [e for e in entries if e.get("agent_id") == agent_id]
+    if session_id:
+        entries = [e for e in entries if e.get("session_id") == session_id]
+    return list(reversed(entries[-limit:]))
 
 
 @app.get("/debug/status")
@@ -379,6 +427,38 @@ async def debug_status() -> dict:
 
 # ── Node handler functions (used by FunctionNode) ────────────────
 
+# Pattern to detect structured tool invocations in LLM output.
+_TOOL_INVOCATION_RE = _re.compile(
+    r'\b(?:tool_call|function_call|action)\s*[:=]\s*["\']?(\w+)',
+    _re.IGNORECASE,
+)
+
+
+def _has_tool_invocation(text: str) -> bool:
+    """Check if the LLM response contains a structured tool invocation."""
+    return bool(_TOOL_INVOCATION_RE.search(text))
+
+
+def _log_execution_step(
+    node_name: str,
+    state: GraphState,
+    status: str = "done",
+) -> None:
+    """Append a step to the execution log (capped at _MAX_EXECUTION_LOG)."""
+    entry = {
+        "id": str(uuid.uuid4()),
+        "node_id": node_name,
+        "agent_id": state.agent_id,
+        "session_id": state.session_id,
+        "status": status,
+        "input": state.input[:200],
+        "output": (state.output or "")[:200],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    _execution_log.append(entry)
+    if len(_execution_log) > _MAX_EXECUTION_LOG:
+        del _execution_log[: len(_execution_log) - _MAX_EXECUTION_LOG]
+
 
 async def _node_start(state: GraphState) -> GraphState:
     """Initialize the execution pipeline."""
@@ -386,6 +466,7 @@ async def _node_start(state: GraphState) -> GraphState:
     state.context["original_input"] = state.input
     state.current_node = "start"
     state.output = "started"
+    _log_execution_step("start", state)
     return state
 
 
@@ -410,7 +491,14 @@ async def _node_llm(state: GraphState) -> GraphState:
     llm_messages.extend(state.messages)
     llm_messages.append({"role": "user", "content": user_input})
 
-    response = await _llm_client.chat(llm_messages)
+    try:
+        response = await _llm_client.chat(llm_messages)
+    except LLMError as exc:
+        state.errors.append(f"LLM error: {exc}")
+        state.output = f"[LLM unavailable] {exc}"
+        state.current_node = "llm"
+        _log_execution_step("llm", state, status="error")
+        return state
 
     state.messages.append({"role": "user", "content": user_input})
     state.messages.append({"role": "assistant", "content": response})
@@ -432,11 +520,15 @@ async def _node_llm(state: GraphState) -> GraphState:
         memory_id=ref.id,
     )
 
-    if "search" in response.lower() or "tool_call" in state.context:
+    # Determine if tool use is needed:
+    # 1. Explicit tool_call in context (set by upstream)
+    # 2. LLM response contains structured tool invocation pattern
+    if state.context.get("tool_call") or _has_tool_invocation(response):
         state.context["needs_tool"] = True
     else:
         state.context["needs_tool"] = False
 
+    _log_execution_step("llm", state)
     return state
 
 
@@ -455,6 +547,7 @@ async def _node_tool(state: GraphState) -> GraphState:
 
     state.tool_results.append({"tool": tool_name, "result": state.context["tool_result"]})
     state.current_node = "tool"
+    _log_execution_step("tool", state)
     return state
 
 
@@ -465,10 +558,19 @@ async def _node_llm_synthesize(state: GraphState) -> GraphState:
         {"role": "system", "content": "Synthesize the tool results into a final answer for the user."},
         {"role": "user", "content": f"Original question: {state.input}\n\nTool results: {tool_result}"},
     ]
-    response = await _llm_client.chat(messages)
+    try:
+        response = await _llm_client.chat(messages)
+    except LLMError as exc:
+        state.errors.append(f"LLM synthesize error: {exc}")
+        state.output = state.context.get("tool_result", "[no result]")
+        state.current_node = "llm_synthesize"
+        _log_execution_step("llm_synthesize", state, status="error")
+        return state
+
     state.messages.append({"role": "assistant", "content": response})
     state.output = response
     state.current_node = "llm_synthesize"
+    _log_execution_step("llm_synthesize", state)
     return state
 
 
@@ -516,10 +618,8 @@ async def execute(req: ExecuteRequest) -> StreamingResponse:
     """Execute an agent graph and stream node status via SSE."""
     agent = _agents.get(req.agent_id)
     if not agent:
-        return StreamingResponse(
-            _sse_error("Agent not found"),
-            media_type="text/event-stream",
-        )
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"error": "Agent not found"}, status_code=404)
 
     session_id = req.session_id or str(uuid.uuid4())
     await _memory_service.create_session(session_id, req.agent_id)
@@ -534,7 +634,24 @@ async def execute(req: ExecuteRequest) -> StreamingResponse:
     event_queue: asyncio.Queue[str | None] = asyncio.Queue()
 
     async def on_node_complete(node_name: str, state: GraphState) -> None:
-        """Callback fired after each graph node completes."""
+        """Callback fired after each graph node completes.
+
+        Publishes node status to the CommunicationBus so other agents
+        in the same session can observe execution progress.
+        """
+        # Publish to communication bus for multi-agent awareness
+        try:
+            msg = AgentMessage(
+                sender_id=req.agent_id,
+                recipient_id=None,  # broadcast
+                session_id=session_id,
+                content=f"Node {node_name} completed: {state.output[:100] if state.output else ''}",
+                message_type=MessageType.NOTIFICATION,
+            )
+            await _communication_bus.broadcast(msg, session_id=session_id)
+        except Exception:
+            pass  # Don't let bus errors break execution
+
         if node_name == "start":
             await event_queue.put(_sse("node_start", {"node": "start", "status": "running"}))
             await event_queue.put(_sse("node_complete", {
@@ -558,6 +675,7 @@ async def execute(req: ExecuteRequest) -> StreamingResponse:
             }))
 
     async def event_stream() -> AsyncGenerator[str, None]:
+        await _concurrency_controller.acquire_agent_slot(req.agent_id)
         agent["status"] = "running"
         yield _sse("agent_status", {"agent_id": req.agent_id, "status": "running"})
 
@@ -574,6 +692,7 @@ async def execute(req: ExecuteRequest) -> StreamingResponse:
                 agent["status"] = "idle"
                 await event_queue.put(_sse("error", {"message": str(exc)}))
             finally:
+                await _concurrency_controller.release_agent_slot(req.agent_id)
                 await event_queue.put(None)
 
         task = asyncio.create_task(run_graph())

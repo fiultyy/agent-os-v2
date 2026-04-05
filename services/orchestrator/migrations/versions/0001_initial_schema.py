@@ -17,6 +17,20 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # ── Agent registry ──────────────────────────────────────────────
+    op.create_table(
+        "agents",
+        sa.Column("id", sa.String(36), primary_key=True),
+        sa.Column("name", sa.String(200), nullable=False, server_default="New Agent"),
+        sa.Column("description", sa.Text, nullable=False, server_default=""),
+        sa.Column("status", sa.String(20), nullable=False, server_default="idle"),
+        sa.Column("model", sa.String(100), nullable=False, server_default="gpt-4o-mini"),
+        sa.Column("tools_json", sa.Text, nullable=False, server_default="[]"),
+        sa.Column("created_at", sa.String(40), nullable=False),
+        sa.Column("updated_at", sa.String(40), nullable=False),
+    )
+
+    # ── Memory items ────────────────────────────────────────────────
     op.create_table(
         "memory_items",
         sa.Column("id", sa.String(36), primary_key=True),
@@ -81,3 +95,4 @@ def downgrade() -> None:
     op.drop_table("sessions")
     op.drop_table("memory_blocks")
     op.drop_table("memory_items")
+    op.drop_table("agents")

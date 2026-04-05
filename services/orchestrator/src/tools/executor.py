@@ -116,7 +116,6 @@ class ToolExecutor:
         arguments: dict[str, Any],
     ) -> Any:
         """Invoke a tool handler, supporting both sync and async callables."""
-        import asyncio
         result = handler(**arguments)
         if asyncio.iscoroutine(result):
             result = await result
