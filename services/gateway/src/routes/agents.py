@@ -7,7 +7,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
 from src.config import ORCHESTRATOR_URL
-from src.main import http_client
+from src.config import http_client
 
 router = APIRouter()
 

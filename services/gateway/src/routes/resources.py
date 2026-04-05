@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 
 from src.config import RESOURCE_MANAGER_URL
-from src.main import http_client
+from src.config import http_client
 
 router = APIRouter()
 

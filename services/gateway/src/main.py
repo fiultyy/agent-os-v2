@@ -2,16 +2,13 @@
 
 import os
 
-import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from src.config import http_client
 from src.routes import agents, prompts, conversations, resources
 
 app = FastAPI(title="Agent OS — API Gateway", version="0.1.0", redirect_slashes=False)
-
-# Shared httpx client for connection pool reuse across all routes
-http_client = httpx.AsyncClient(timeout=60.0)
 
 
 @app.on_event("shutdown")
