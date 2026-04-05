@@ -6,6 +6,7 @@ in-memory rate limiting.
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -67,7 +68,7 @@ async def exchange_token(
             detail="Invalid API key",
         )
 
-    sub = f"apikey:{hash(body.api_key)}"
+    sub = f"apikey:{hashlib.sha256(body.api_key.encode()).hexdigest()}"
     access = create_access_token(sub)
     refresh = create_refresh_token(sub)
 

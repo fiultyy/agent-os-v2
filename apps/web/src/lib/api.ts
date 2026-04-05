@@ -151,11 +151,33 @@ export async function executeWithSSE(
   sessionId?: string,
   onEvent?: (event: SSEEvent) => void
 ): Promise<void> {
-  const res = await fetch(`${API_BASE}/execute`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify({ agent_id: agentId, input, session_id: sessionId || "" }),
-  });
+  const doFetch = async (headers: Record<string, string>): Promise<Response> => {
+    return fetch(`${API_BASE}/execute`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers },
+      body: JSON.stringify({ agent_id: agentId, input, session_id: sessionId || "" }),
+    });
+  };
+
+  let res = await doFetch(authHeaders());
+
+  // Auto-refresh on 401 — mirror the logic in request().
+  if (res.status === 401) {
+    if (!_refreshPromise) {
+      _refreshPromise = refreshTokens().then((r) => r?.access_token ?? null);
+    }
+    const newToken = await _refreshPromise.catch(() => null);
+    _refreshPromise = null;
+
+    if (newToken) {
+      res = await doFetch({ Authorization: `Bearer ${newToken}` });
+    } else {
+      if (typeof window !== "undefined") {
+        window.location.href = "/login";
+      }
+      throw new Error("Authentication required");
+    }
+  }
 
   if (!res.ok || !res.body) {
     throw new Error(`Execute failed: ${res.status}`);
