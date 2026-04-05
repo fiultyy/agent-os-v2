@@ -170,24 +170,19 @@ class ActiveForgetting:
     async def _has_related_memories(self, item: MemoryItem) -> bool:
         """Check if a memory has related items that depend on it.
 
-        A memory is considered to have relations if:
-        1. Other memories reference its ID in their metadata.
-        2. Other memories share the same session_id and have higher importance.
-        3. It contains entities that appear in other memories.
+        Uses the store's filter to find items whose metadata references
+        this item's ID, rather than relying on semantic search with
+        truncated UUIDs.
         """
-        # Check for references in other items' metadata
-        related = await self._memory.recall(
-            query=item.id[:8],  # Use first 8 chars of ID as query
-            agent_id=item.agent_id,
-            top_k=5,
-        )
-        for other in related:
+        # Search via store filter (exact match on metadata.source_ids)
+        f = MemoryFilter(agent_id=item.agent_id)
+        candidates = await self._memory._store.search(f)
+        for other in candidates:
             if other.id == item.id:
                 continue
             source_ids = other.metadata.get("source_ids", [])
             if item.id in source_ids:
                 return True
-
         return False
 
     async def _archive(self, item: MemoryItem) -> None:

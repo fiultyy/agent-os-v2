@@ -633,19 +633,22 @@ async def _node_llm(state: GraphState) -> GraphState:
     state.output = response
     state.current_node = "llm"
 
-    ref = await _memory_service.store(
+    # Store via migration (avoids duplicate — migrate stores once internally)
+    from src.memory.types import MemoryItem
+    working_item = MemoryItem(
         content=f"User: {user_input}\nAssistant: {response}",
         agent_id=agent_id,
         session_id=session_id,
-        memory_type=MemoryType.SESSION,
+        memory_type=MemoryType.WORKING,
         scope=MemoryScope.AGENT,
     )
-    state.memory_refs.append(ref.id)
+    await _memory_migrator.migrate_working_to_session(working_item, session_id, agent_id)
+    state.memory_refs.append(working_item.id)
 
     # Extract entities for knowledge graph
     _knowledge_graph.extract_and_ingest(
         f"{user_input} {response}",
-        memory_id=ref.id,
+        memory_id=working_item.id,
     )
 
     # Estimate context token usage and trigger compression if needed
@@ -673,17 +676,6 @@ async def _node_llm(state: GraphState) -> GraphState:
             query="", agent_id=agent_id, session_id=session_id, top_k=50
         )
         await _async_compressor.trigger(items)
-
-    # Migrate working memory to session memory (auto-batch)
-    from src.memory.types import MemoryItem
-    working_item = MemoryItem(
-        content=f"User: {user_input}\nAssistant: {response}",
-        agent_id=agent_id,
-        session_id=session_id,
-        memory_type=MemoryType.WORKING,
-        scope=MemoryScope.AGENT,
-    )
-    await _memory_migrator.migrate_working_to_session(working_item, session_id, agent_id)
 
     # Determine if tool use is needed:
     # 1. Explicit tool_call in context (set by upstream)
@@ -868,6 +860,7 @@ async def execute(req: ExecuteRequest) -> StreamingResponse:
                 await event_queue.put(_sse("agent_status", {"agent_id": req.agent_id, "status": "idle"}))
                 await event_queue.put(_sse("execution_complete", {
                     "output": final_state.output,
+                    "session_id": final_state.session_id,
                     "memory_count": len(final_state.memory_refs),
                 }))
             except Exception as exc:

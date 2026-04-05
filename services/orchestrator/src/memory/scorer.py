@@ -119,17 +119,21 @@ def score_relevance(item: MemoryItem, query: str = "") -> float:
 
 
 # Emotional weight markers
+# Note: \b only works for ASCII word boundaries; Chinese words must be
+# matched without \b (or with a separate non-\b group).
 _EMOTIONAL_POSITIVE = re.compile(
-    r'\b(important|critical|urgent|essential|vital|crucial|breakthrough|love|hate'
-    r'|fear|angry|happy|sad|surprised|amazing|terrible|wonderful|awful'
-    r'|重要|关键|紧急|必须|危险|惊讶|失望|兴奋|愤怒|恐惧)\b',
+    r'(?:\b(?:important|critical|urgent|essential|vital|crucial|breakthrough|love|hate'
+    r'|fear|angry|happy|sad|surprised|amazing|terrible|wonderful|awful)\b'
+    r'|(?:重要|关键|紧急|必须|危险|惊讶|失望|兴奋|愤怒|恐惧'
+    r'|决定|发现|成功|失败))',
     re.IGNORECASE,
 )
 
 _ACTIONABLE = re.compile(
-    r'\b(should|must|need to|todo|fix|implement|deploy|create|update|delete'
-    r'|add|remove|change|configure|setup|install|run|execute|test'
-    r'|应该|必须|需要|修复|部署|创建|更新|删除|执行|测试)\b',
+    r'(?:\b(?:should|must|need to|todo|fix|implement|deploy|create|update|delete'
+    r'|add|remove|change|configure|setup|install|run|execute|test)\b'
+    r'|(?:应该|必须|需要|修复|部署|创建|更新|删除|执行|测试'
+    r'|优化|重构|迁移|验证|监控|排查))',
     re.IGNORECASE,
 )
 

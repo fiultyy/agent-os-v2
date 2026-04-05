@@ -130,7 +130,10 @@ class FAISSVectorStore(VectorStore):
         for score, idx in zip(scores[0], indices[0]):
             if idx < 0:
                 continue
-            results.append((self._ids[idx], float(score)))
+            mid = self._ids[idx]
+            if not mid:  # skip tombstoned entries
+                continue
+            results.append((mid, float(score)))
         return results
 
     async def delete(self, memory_id: str) -> bool:
