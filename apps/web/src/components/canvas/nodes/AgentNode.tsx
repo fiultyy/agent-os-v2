@@ -5,6 +5,7 @@ import { Bot } from "lucide-react";
 export function AgentNode({ data }: NodeProps) {
   const status = String(data.status ?? "idle");
   const memoryCount = Number(data.memoryCount ?? 0);
+  const workingMemoryCount = Number(data.workingMemoryCount ?? 0);
 
   const statusColor: Record<string, string> = {
     idle: "bg-gray-400",
@@ -24,11 +25,11 @@ export function AgentNode({ data }: NodeProps) {
         <span className="text-xs text-gray-500">Memory: {memoryCount} items</span>
         {data.workingMemoryCount != null && (
           <span className={`text-[10px] font-medium ${
-            data.workingMemoryCount < 5 ? "text-green-600" :
-            data.workingMemoryCount < 15 ? "text-yellow-600" :
+            workingMemoryCount < 5 ? "text-green-600" :
+            workingMemoryCount < 15 ? "text-yellow-600" :
             "text-red-600"
           }`}>
-            WM: {String(data.workingMemoryCount)}
+            WM: {workingMemoryCount}
           </span>
         )}
       </div>
