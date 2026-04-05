@@ -2,13 +2,22 @@
 
 import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 
-from src.config import http_client
+from src.auth import init_keys
+from src.config import AUTH_ENABLED, http_client
+from src.middleware import require_auth
 from src.routes import agents, prompts, conversations, resources, memories, messages, debug, kg, chat, execute
+from src.routes import auth as auth_routes
 
 app = FastAPI(title="Agent OS — API Gateway", version="0.1.0", redirect_slashes=True)
+
+
+@app.on_event("startup")
+async def _startup() -> None:
+    """Initialise auth keys on startup."""
+    init_keys()
 
 
 @app.on_event("shutdown")
@@ -38,16 +47,70 @@ else:
         allow_headers=["*"],
     )
 
-app.include_router(agents.router, prefix="/agents", tags=["agents"])
-app.include_router(prompts.router, prefix="/prompts", tags=["prompts"])
-app.include_router(conversations.router, prefix="/conversations", tags=["conversations"])
-app.include_router(resources.router, prefix="/resources", tags=["resources"])
-app.include_router(memories.router, prefix="/memories", tags=["memories"])
-app.include_router(messages.router, prefix="/messages", tags=["messages"])
-app.include_router(debug.router, prefix="/debug", tags=["debug"])
-app.include_router(kg.router, prefix="/kg", tags=["kg"])
-app.include_router(chat.router, prefix="/chat", tags=["chat"])
-app.include_router(execute.router, prefix="/execute", tags=["execute"])
+# ── Auth routes (always mounted, rate-limited) ────────────────────────────────
+app.include_router(auth_routes.router, prefix="/auth", tags=["auth"])
+
+# ── Application routes (protected when AUTH_ENABLED=true) ─────────────────────
+app.include_router(
+    agents.router,
+    prefix="/agents",
+    tags=["agents"],
+    dependencies=[Depends(require_auth)],
+)
+app.include_router(
+    prompts.router,
+    prefix="/prompts",
+    tags=["prompts"],
+    dependencies=[Depends(require_auth)],
+)
+app.include_router(
+    conversations.router,
+    prefix="/conversations",
+    tags=["conversations"],
+    dependencies=[Depends(require_auth)],
+)
+app.include_router(
+    resources.router,
+    prefix="/resources",
+    tags=["resources"],
+    dependencies=[Depends(require_auth)],
+)
+app.include_router(
+    memories.router,
+    prefix="/memories",
+    tags=["memories"],
+    dependencies=[Depends(require_auth)],
+)
+app.include_router(
+    messages.router,
+    prefix="/messages",
+    tags=["messages"],
+    dependencies=[Depends(require_auth)],
+)
+app.include_router(
+    debug.router,
+    prefix="/debug",
+    tags=["debug"],
+    dependencies=[Depends(require_auth)],
+)
+app.include_router(
+    kg.router,
+    prefix="/kg",
+    tags=["kg"],
+    dependencies=[Depends(require_auth)],
+)
+app.include_router(
+    chat.router,
+    prefix="/chat",
+    tags=["chat"],
+    dependencies=[Depends(require_auth)],
+)
+app.include_router(
+    execute.router,
+    prefix="/execute",
+    tags=["execute"],
+    dependencies=[Depends(require_auth)],
+)
 
 
 @app.get("/health")

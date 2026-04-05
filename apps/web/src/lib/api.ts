@@ -1,14 +1,59 @@
 import type { AgentItem } from "@/stores/agentStore";
 import type { MemoryItem } from "@/stores/memoryStore";
 import type { CommMessage, ExecutionEvent } from "@/stores/debugStore";
+import { getAccessToken, refresh as refreshTokens } from "@/lib/auth";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "/api";
 
+/** Whether a token refresh is currently in-flight (prevents concurrent refreshes). */
+let _refreshPromise: Promise<string | null> | null = null;
+
+function authHeaders(): Record<string, string> {
+  const token = getAccessToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: { "Content-Type": "application/json", ...options?.headers },
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(),
+      ...options?.headers,
+    },
     ...options,
   });
+
+  // Auto-refresh on 401.
+  if (res.status === 401) {
+    if (!_refreshPromise) {
+      _refreshPromise = refreshTokens().then((r) => r?.access_token ?? null);
+    }
+    const newToken = await _refreshPromise.catch(() => null);
+    _refreshPromise = null;
+
+    if (newToken) {
+      const retry = await fetch(`${API_BASE}${path}`, {
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${newToken}`,
+          ...options?.headers,
+        },
+        ...options,
+      });
+      if (!retry.ok) {
+        const text = await retry.text();
+        throw new Error(`API ${retry.status}: ${text}`);
+      }
+      return retry.json();
+    }
+
+    // Refresh failed — redirect to login if in browser.
+    if (typeof window !== "undefined") {
+      window.location.href = "/login";
+    }
+    throw new Error("Authentication required");
+  }
+
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`API ${res.status}: ${text}`);
@@ -108,7 +153,7 @@ export async function executeWithSSE(
 ): Promise<void> {
   const res = await fetch(`${API_BASE}/execute`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ agent_id: agentId, input, session_id: sessionId || "" }),
   });
 

@@ -8,6 +8,7 @@ dependencies = [
     "uvicorn[standard]>=0.34",
     "httpx>=0.28",
     "pydantic>=2.10",
+    "python-jose[cryptography]>=3.3",
 ]
 
 [build-system]
