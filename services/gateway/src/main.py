@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.config import http_client
 from src.routes import agents, prompts, conversations, resources
 
-app = FastAPI(title="Agent OS — API Gateway", version="0.1.0", redirect_slashes=False)
+app = FastAPI(title="Agent OS — API Gateway", version="0.1.0", redirect_slashes=True)
 
 
 @app.on_event("shutdown")
