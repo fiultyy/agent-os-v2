@@ -106,10 +106,10 @@ export async function executeWithSSE(
   sessionId?: string,
   onEvent?: (event: SSEEvent) => void
 ): Promise<void> {
-  const res = await fetch(`${API_BASE}/agents/${agentId}/run`, {
+  const res = await fetch(`${API_BASE}/execute`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ input, session_id: sessionId || "" }),
+    body: JSON.stringify({ agent_id: agentId, input, session_id: sessionId || "" }),
   });
 
   if (!res.ok || !res.body) {

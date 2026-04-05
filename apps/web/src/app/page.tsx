@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import Link from "next/link";
 import { Bot, Send, Loader2, Layout, MessageSquare } from "lucide-react";
+import { executeWithSSE } from "@/lib/api";
 
 interface Agent {
   id: string;
@@ -41,26 +42,52 @@ export default function Home() {
 
   const send = useCallback(async () => {
     const text = input.trim();
-    if (!text || loading) return;
+    if (!text || loading || !agent) return;
     setMessages((prev) => [...prev, { role: "user", content: text }]);
     setInput("");
     setLoading(true);
     if (textareaRef.current) textareaRef.current.style.height = "auto";
 
+    // Track intermediate output from SSE events
+    let assistantContent = "";
+
     try {
-      const resp = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: text,
-          agent_id: agent?.id || "",
-          session_id: sessionId,
-        }),
-      });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error || "Request failed");
-      if (!sessionId && data.session_id) setSessionId(data.session_id);
-      setMessages((prev) => [...prev, { role: "assistant", content: data.response }]);
+      await executeWithSSE(
+        agent.id,
+        text,
+        sessionId || undefined,
+        (event) => {
+          if (event.event === "node_start") {
+            // Could show "thinking..." indicator for specific nodes
+            const node = event.data.node as string;
+            if (node === "llm" || node === "llm_synthesize") {
+              // AI is generating response
+            } else if (node === "tool") {
+              // Tool is executing
+            }
+          } else if (event.event === "node_complete") {
+            const node = event.data.node as string;
+            const output = event.data.output as string;
+            if (node === "llm" || node === "llm_synthesize") {
+              assistantContent = output || "";
+            }
+          } else if (event.event === "execution_complete") {
+            const finalOutput = (event.data.output as string) || assistantContent;
+            if (!sessionId && event.data.session_id) {
+              setSessionId(event.data.session_id as string);
+            }
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: finalOutput },
+            ]);
+          } else if (event.event === "error") {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: `[Error] ${event.data.message}` },
+            ]);
+          }
+        }
+      );
     } catch (err) {
       setMessages((prev) => [
         ...prev,

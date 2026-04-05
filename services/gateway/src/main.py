@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.config import http_client
-from src.routes import agents, prompts, conversations, resources, memories, messages, debug, kg, chat
+from src.routes import agents, prompts, conversations, resources, memories, messages, debug, kg, chat, execute
 
 app = FastAPI(title="Agent OS — API Gateway", version="0.1.0", redirect_slashes=True)
 
@@ -47,6 +47,7 @@ app.include_router(messages.router, prefix="/messages", tags=["messages"])
 app.include_router(debug.router, prefix="/debug", tags=["debug"])
 app.include_router(kg.router, prefix="/kg", tags=["kg"])
 app.include_router(chat.router, prefix="/chat", tags=["chat"])
+app.include_router(execute.router, prefix="/execute", tags=["execute"])
 
 
 @app.get("/health")
