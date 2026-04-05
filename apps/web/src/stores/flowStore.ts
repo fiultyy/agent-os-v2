@@ -54,7 +54,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
     // If it's an agent node, create via API and sync stores
     if (node.type === "agent" && addAgent) {
       const label = String(node.data?.label ?? "New Agent");
-      createAgent({ name: label, model: "gpt-4o-mini" })
+      createAgent({ name: label, model: "glm-4-flash" })
         .then((remote) => {
           get().updateNodeData(node.id, { agentId: remote.id, label: remote.name });
           addAgent({
@@ -62,7 +62,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
             name: remote.name,
             description: remote.description ?? "",
             status: remote.status ?? "idle",
-            model: remote.model ?? "gpt-4o-mini",
+            model: remote.model ?? "glm-4-flash",
             tools: remote.tools ?? [],
             createdAt: remote.createdAt ?? new Date().toISOString(),
             updatedAt: remote.updatedAt ?? new Date().toISOString(),
@@ -75,7 +75,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
             name: label,
             description: "",
             status: "idle",
-            model: "gpt-4o-mini",
+            model: "glm-4-flash",
             tools: [],
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),

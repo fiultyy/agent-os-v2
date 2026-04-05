@@ -1,6 +1,6 @@
 "use client";
 
-import { Bot, Wrench, FileText, GripVertical, Brain, Bug } from "lucide-react";
+import { Bot, Wrench, FileText, GripVertical, Brain, Users } from "lucide-react";
 import Link from "next/link";
 import type { FlowNodeType } from "@/types/flow";
 
@@ -44,8 +44,15 @@ export function Sidebar() {
         <div className="mt-4 border-t pt-3">
           <p className="mb-2 text-xs text-gray-400">快捷面板</p>
           <Link
-            href="/memory"
+            href="/agents"
             className="flex items-center gap-2 rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-600 transition-colors hover:bg-white hover:text-gray-900"
+          >
+            <Users className="h-4 w-4 text-blue-500" />
+            <span className="font-medium">Agent 管理</span>
+          </Link>
+          <Link
+            href="/memory"
+            className="mt-1 flex items-center gap-2 rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-600 transition-colors hover:bg-white hover:text-gray-900"
           >
             <Brain className="h-4 w-4 text-purple-500" />
             <span className="font-medium">记忆 & 调试</span>

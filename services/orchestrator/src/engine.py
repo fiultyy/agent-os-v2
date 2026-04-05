@@ -135,7 +135,8 @@ _MAX_EXECUTION_LOG = 1000
 class CreateAgentRequest(BaseModel):
     name: str = "New Agent"
     description: str = ""
-    model: str = "gpt-4o-mini"
+    model: str = "glm-4-flash"
+    system_prompt: str = ""
     tools: list[str] = []
 
 
@@ -193,6 +194,7 @@ async def create_agent(req: CreateAgentRequest) -> dict:
         "description": req.description,
         "status": "idle",
         "model": req.model,
+        "system_prompt": req.system_prompt,
         "tools": req.tools,
         "created_at": now,
         "updated_at": now,
@@ -481,17 +483,22 @@ async def _node_llm(state: GraphState) -> GraphState:
     session_id = state.session_id
     user_input = state.input
 
+    # Resolve model: agent config > env default
+    agent = _agents.get(agent_id)
+    agent_model = agent.get("model") if agent else None
+
     # Use ContextCompiler to assemble messages (memory, tools, conversation)
     conversation = list(state.messages) + [{"role": "user", "content": user_input}]
+    system_prompt = (agent.get("system_prompt") if agent else None) or "You are a helpful assistant."
     llm_messages = await _context_compiler.compile(
-        system_prompt="You are a helpful assistant.",
+        system_prompt=system_prompt,
         conversation=conversation,
         agent_id=agent_id,
         session_id=session_id,
     )
 
     try:
-        response = await _llm_client.chat(llm_messages)
+        response = await _llm_client.chat(llm_messages, model=agent_model)
     except LLMError as exc:
         state.errors.append(f"LLM error: {exc}")
         state.output = f"[LLM unavailable] {exc}"
@@ -553,12 +560,17 @@ async def _node_tool(state: GraphState) -> GraphState:
 async def _node_llm_synthesize(state: GraphState) -> GraphState:
     """LLM synthesizes tool results into final answer."""
     tool_result = state.context.get("tool_result", "")
+
+    # Resolve model: agent config > env default
+    agent = _agents.get(state.agent_id)
+    agent_model = agent.get("model") if agent else None
+
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": "Synthesize the tool results into a final answer for the user."},
         {"role": "user", "content": f"Original question: {state.input}\n\nTool results: {tool_result}"},
     ]
     try:
-        response = await _llm_client.chat(messages)
+        response = await _llm_client.chat(messages, model=agent_model)
     except LLMError as exc:
         state.errors.append(f"LLM synthesize error: {exc}")
         state.output = state.context.get("tool_result", "[no result]")

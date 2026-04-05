@@ -98,9 +98,19 @@ export function FlowCanvas() {
     [addNode, addAgent]
   );
 
-  const onNodeDoubleClick = useCallback(
+  const onNodeClick = useCallback(
     (_: React.MouseEvent, node: Node) => {
       setSelectedNodeId(node.id);
+    },
+    [setSelectedNodeId]
+  );
+
+  const onNodeDoubleClick = useCallback(
+    (_: React.MouseEvent, node: Node) => {
+      if (node.type === "agent") {
+        setSelectedNodeId(node.id);
+        // Auto-focus execute input — handled by ExecutePanel visibility
+      }
     },
     [setSelectedNodeId]
   );
@@ -122,6 +132,7 @@ export function FlowCanvas() {
         onInit={onInit}
         onDrop={onDrop}
         onDragOver={onDragOver}
+        onNodeClick={onNodeClick}
         onNodeDoubleClick={onNodeDoubleClick}
         onPaneClick={onPaneClick}
         fitView
