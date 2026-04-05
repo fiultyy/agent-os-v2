@@ -13,6 +13,34 @@ import {
 import { createAgent } from "@/lib/api";
 import type { AgentItem } from "./agentStore";
 
+// ── LocalStorage persistence ──────────────────────────────────
+
+const STORAGE_KEY = "agent-os-flow-state";
+let _saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+function loadFromStorage(): { nodes: Node[]; edges: Edge[] } {
+  if (typeof window === "undefined") return { nodes: [], edges: [] };
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return { nodes: [], edges: [] };
+    return JSON.parse(raw);
+  } catch {
+    return { nodes: [], edges: [] };
+  }
+}
+
+function saveToStorage(nodes: Node[], edges: Edge[]) {
+  if (typeof window === "undefined") return;
+  if (_saveTimer) clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ nodes, edges }));
+    } catch {
+      // localStorage full or unavailable — silently ignore
+    }
+  }, 500);
+}
+
 export interface FlowState {
   nodes: Node[];
   edges: Edge[];
@@ -28,28 +56,38 @@ export interface FlowState {
   setSelectedNodeId: (id: string | null) => void;
 }
 
-export const useFlowStore = create<FlowState>((set, get) => ({
-  nodes: [],
-  edges: [],
+export const useFlowStore = create<FlowState>((set, get) => {
+  const saved = loadFromStorage();
+  return {
+  nodes: saved.nodes,
+  edges: saved.edges,
   selectedNodeId: null,
 
   onNodesChange: (changes) => {
-    set({ nodes: applyNodeChanges(changes, get().nodes) });
+    const nodes = applyNodeChanges(changes, get().nodes);
+    set({ nodes });
+    saveToStorage(nodes, get().edges);
   },
 
   onEdgesChange: (changes) => {
-    set({ edges: applyEdgeChanges(changes, get().edges) });
+    const edges = applyEdgeChanges(changes, get().edges);
+    set({ edges });
+    saveToStorage(get().nodes, edges);
   },
 
   onConnect: (connection: Connection) => {
-    set({ edges: rfAddEdge(connection, get().edges) });
+    const edges = rfAddEdge(connection, get().edges);
+    set({ edges });
+    saveToStorage(get().nodes, edges);
   },
 
-  setNodes: (nodes) => set({ nodes }),
-  setEdges: (edges) => set({ edges }),
+  setNodes: (nodes) => { set({ nodes }); saveToStorage(nodes, get().edges); },
+  setEdges: (edges) => { set({ edges }); saveToStorage(get().nodes, edges); },
 
   addNode: (node, addAgent) => {
-    set((s) => ({ nodes: [...s.nodes, node] }));
+    const nodes = [...get().nodes, node];
+    set({ nodes });
+    saveToStorage(nodes, get().edges);
 
     // If it's an agent node, create via API and sync stores
     if (node.type === "agent" && addAgent) {
@@ -84,18 +122,21 @@ export const useFlowStore = create<FlowState>((set, get) => ({
     }
   },
 
-  removeNode: (id) =>
-    set((s) => ({
-      nodes: s.nodes.filter((n) => n.id !== id),
-      edges: s.edges.filter((e) => e.source !== id && e.target !== id),
-    })),
+  removeNode: (id) => {
+    const nodes = get().nodes.filter((n) => n.id !== id);
+    const edges = get().edges.filter((e) => e.source !== id && e.target !== id);
+    set({ nodes, edges });
+    saveToStorage(nodes, edges);
+  },
 
-  updateNodeData: (id, data) =>
-    set((s) => ({
-      nodes: s.nodes.map((n) =>
-        n.id === id ? { ...n, data: { ...n.data, ...data } } : n
-      ),
-    })),
+  updateNodeData: (id, data) => {
+    const nodes = get().nodes.map((n) =>
+      n.id === id ? { ...n, data: { ...n.data, ...data } } : n
+    );
+    set({ nodes });
+    saveToStorage(nodes, get().edges);
+  },
 
   setSelectedNodeId: (id) => set({ selectedNodeId: id }),
-}));
+  };
+});
