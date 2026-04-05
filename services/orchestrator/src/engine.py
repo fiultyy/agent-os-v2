@@ -32,6 +32,7 @@ from src.concurrency.controller import ConcurrencyController
 from src.tools.executor import ToolExecutor
 from src.tools.registry import ToolRegistry
 from src.tools.guardrail import Guardrail
+from src.context import ContextManager, ContextCompiler
 
 
 # ── LLM Client ────────────────────────────────────────────────────
@@ -116,6 +117,8 @@ async def _shutdown() -> None:
     await _communication_bus.close()
 
 _memory_service = MemoryService(InMemoryStore())
+_context_manager = ContextManager(_memory_service)
+_context_compiler = ContextCompiler(_context_manager)
 _tool_executor = ToolExecutor(ToolRegistry())
 _communication_bus = CommunicationBus()
 _concurrency_controller = ConcurrencyController()
@@ -210,18 +213,20 @@ async def list_agents() -> list[dict]:
 async def get_agent(agent_id: str) -> dict:
     agent = _agents.get(agent_id)
     if not agent:
-        return {"error": "Agent not found"}
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"error": "Agent not found"}, status_code=404)
     return agent
 
 
 @app.delete("/agents/{agent_id}")
 async def delete_agent(agent_id: str) -> dict:
-    if agent_id in _agents:
-        del _agents[agent_id]
-        if _pg_store is not None:
-            await _pg_store.delete_agent(agent_id)
-        return {"deleted": True}
-    return {"error": "Agent not found"}
+    if agent_id not in _agents:
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"error": "Agent not found"}, status_code=404)
+    del _agents[agent_id]
+    if _pg_store is not None:
+        await _pg_store.delete_agent(agent_id)
+    return {"deleted": True}
 
 
 # ── Memory API (Phase 9) ─────────────────────────────────────────
@@ -474,22 +479,16 @@ async def _node_llm(state: GraphState) -> GraphState:
     """LLM processing with real API call and memory integration."""
     agent_id = state.agent_id
     session_id = state.session_id
+    user_input = state.input
 
-    memories = await _memory_service.recall(
-        query=state.input,
+    # Use ContextCompiler to assemble messages (memory, tools, conversation)
+    conversation = list(state.messages) + [{"role": "user", "content": user_input}]
+    llm_messages = await _context_compiler.compile(
+        system_prompt="You are a helpful assistant.",
+        conversation=conversation,
         agent_id=agent_id,
         session_id=session_id,
-        top_k=3,
     )
-
-    llm_messages: list[dict[str, Any]] = []
-    if memories:
-        memory_ctx = "\n".join(f"- {m.content}" for m in memories[:3])
-        llm_messages.append({"role": "system", "content": f"Relevant context from memory:\n{memory_ctx}"})
-
-    user_input = state.input
-    llm_messages.extend(state.messages)
-    llm_messages.append({"role": "user", "content": user_input})
 
     try:
         response = await _llm_client.chat(llm_messages)

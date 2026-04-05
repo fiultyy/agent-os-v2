@@ -213,30 +213,44 @@ class AnthropicProvider(BaseProvider):
         if temperature is not None:
             body["temperature"] = temperature
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            async with client.stream(
-                "POST",
-                f"{self.base_url}/messages",
-                headers={
-                    "x-api-key": self._get_api_key(),
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json=body,
-            ) as resp:
-                resp.raise_for_status()
-                async for line in resp.aiter_lines():
-                    if not line.startswith("data: "):
-                        continue
-                    payload = line[6:]
-                    try:
-                        chunk = json.loads(payload)
-                    except json.JSONDecodeError:
-                        continue
-                    if chunk.get("type") == "content_block_delta":
-                        text = chunk.get("delta", {}).get("text", "")
-                        if text:
-                            yield text
+        last_exc: Exception | None = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    async with client.stream(
+                        "POST",
+                        f"{self.base_url}/messages",
+                        headers={
+                            "x-api-key": self._get_api_key(),
+                            "anthropic-version": "2023-06-01",
+                            "content-type": "application/json",
+                        },
+                        json=body,
+                    ) as resp:
+                        resp.raise_for_status()
+                        async for line in resp.aiter_lines():
+                            if not line.startswith("data: "):
+                                continue
+                            payload = line[6:]
+                            try:
+                                chunk = json.loads(payload)
+                            except json.JSONDecodeError:
+                                continue
+                            if chunk.get("type") == "content_block_delta":
+                                text = chunk.get("delta", {}).get("text", "")
+                                if text:
+                                    yield text
+                return  # success, exit retry loop
+            except (httpx.HTTPStatusError, httpx.TransportError) as exc:
+                last_exc = exc
+                if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code not in RETRYABLE_STATUS_CODES:
+                    raise
+                logger.warning("Stream attempt %d/%d failed: %s", attempt + 1, MAX_RETRIES, exc)
+                if attempt < MAX_RETRIES - 1:
+                    delay = BACKOFF_BASE * (2 ** attempt)
+                    await asyncio.sleep(delay)
+
+        raise last_exc or httpx.TransportError("Stream retries exhausted")
 
 
 class ZhipuProvider(BaseProvider):
@@ -272,28 +286,42 @@ class ZhipuProvider(BaseProvider):
         temperature = kwargs.get("temperature", 0.7)
         max_tokens = kwargs.get("max_tokens", 1024)
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            async with client.stream(
-                "POST",
-                f"{self.base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {self._get_api_key()}"},
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                    "stream": True,
-                },
-            ) as resp:
-                resp.raise_for_status()
-                async for line in resp.aiter_lines():
-                    if not line.startswith("data: "):
-                        continue
-                    payload = line[6:]
-                    if payload.strip() == "[DONE]":
-                        break
-                    chunk = json.loads(payload)
-                    delta = chunk.get("choices", [{}])[0].get("delta", {})
-                    content = delta.get("content", "")
-                    if content:
-                        yield content
+        last_exc: Exception | None = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    async with client.stream(
+                        "POST",
+                        f"{self.base_url}/chat/completions",
+                        headers={"Authorization": f"Bearer {self._get_api_key()}"},
+                        json={
+                            "model": model,
+                            "messages": messages,
+                            "temperature": temperature,
+                            "max_tokens": max_tokens,
+                            "stream": True,
+                        },
+                    ) as resp:
+                        resp.raise_for_status()
+                        async for line in resp.aiter_lines():
+                            if not line.startswith("data: "):
+                                continue
+                            payload = line[6:]
+                            if payload.strip() == "[DONE]":
+                                break
+                            chunk = json.loads(payload)
+                            delta = chunk.get("choices", [{}])[0].get("delta", {})
+                            content = delta.get("content", "")
+                            if content:
+                                yield content
+                return  # success, exit retry loop
+            except (httpx.HTTPStatusError, httpx.TransportError) as exc:
+                last_exc = exc
+                if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code not in RETRYABLE_STATUS_CODES:
+                    raise
+                logger.warning("Stream attempt %d/%d failed: %s", attempt + 1, MAX_RETRIES, exc)
+                if attempt < MAX_RETRIES - 1:
+                    delay = BACKOFF_BASE * (2 ** attempt)
+                    await asyncio.sleep(delay)
+
+        raise last_exc or httpx.TransportError("Stream retries exhausted")

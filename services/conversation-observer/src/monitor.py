@@ -1,5 +1,7 @@
 """Conversation monitor — real-time conversation tracking."""
 
+import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -17,7 +19,6 @@ class ConversationMonitor:
         self, conversation_id: str, agent_id: str = "", metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Create and store a new conversation. Returns the conversation dict."""
-        from datetime import datetime, timezone
         conv = {
             "id": conversation_id,
             "agent_id": agent_id,
@@ -35,8 +36,6 @@ class ConversationMonitor:
         self, conversation_id: str, role: str, content: str, metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Add a turn to a conversation. Returns the turn dict or None."""
-        import uuid
-        from datetime import datetime, timezone
         conv = self._conversations.get(conversation_id)
         if conv is None:
             return None
