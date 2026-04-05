@@ -153,6 +153,8 @@ async def _start_forgetting_sweep() -> None:
             try:
                 for agent_id in list(_agents.keys()):
                     await _active_forgetting.run_sweep(agent_id=agent_id)
+                    # Episodic → Semantic migration on each sweep
+                    await _memory_migrator.migrate_episodic_to_semantic(agent_id)
             except Exception:
                 pass  # Don't crash the loop
 
