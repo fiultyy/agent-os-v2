@@ -108,6 +108,9 @@ class ToolExecutor:
             "status": "success",
             "output": result,
             "error": None,
+            "metadata": {
+                "safety_deadline": True,  # Mark for safety period in forgetting
+            },
         }
 
     async def _invoke_handler(

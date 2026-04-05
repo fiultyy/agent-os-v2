@@ -25,6 +25,13 @@ from src.graph.nodes import FunctionNode
 from src.memory import MemoryService, InMemoryStore, MemoryType, MemoryScope
 from src.memory.permissions import PermissionManager, PermissionLevel
 from src.memory.knowledge_graph import KnowledgeGraph
+from src.memory.vector import FAISSVectorStore
+from src.memory.embedding import SentenceTransformerProvider
+from src.memory.compressor import (
+    AsyncCompressor, SyncCompressor, ContextMonitor, CompressionLevel,
+)
+from src.memory.migrator import MemoryMigrator
+from src.memory.forgetting import ActiveForgetting
 from src.communication.bus import CommunicationBus
 from src.communication.message import AgentMessage, MessageType, MessagePriority
 from src.communication.scope import ScopeManager, ScopeLevel
@@ -136,6 +143,22 @@ async def _init_default_agent() -> None:
     print(f"Default agent initialized: {agent_id}")
 
 
+@app.on_event("startup")
+async def _start_forgetting_sweep() -> None:
+    """Run forgetting sweep periodically (daily)."""
+
+    async def _sweep_loop():
+        while True:
+            await asyncio.sleep(86400)  # 24 hours
+            try:
+                for agent_id in list(_agents.keys()):
+                    await _active_forgetting.run_sweep(agent_id=agent_id)
+            except Exception:
+                pass  # Don't crash the loop
+
+    asyncio.create_task(_sweep_loop())
+
+
 @app.on_event("shutdown")
 async def _shutdown() -> None:
     """Graceful shutdown: close database connections and release resources."""
@@ -143,7 +166,22 @@ async def _shutdown() -> None:
         await _pg_store.close()
     await _communication_bus.close()
 
-_memory_service = MemoryService(InMemoryStore())
+# Embedding provider and vector store for semantic search
+_embedding_provider = SentenceTransformerProvider()
+_vector_store = FAISSVectorStore(provider=_embedding_provider)
+
+# Memory service with vector store enabled
+_memory_service = MemoryService(InMemoryStore(), vector_store=_vector_store)
+
+# Context compression components
+_context_monitor = ContextMonitor()
+_async_compressor = AsyncCompressor(monitor=_context_monitor)
+_sync_compressor = SyncCompressor(monitor=_context_monitor)
+
+# Memory migration and active forgetting
+_memory_migrator = MemoryMigrator(_memory_service)
+_active_forgetting = ActiveForgetting(_memory_service)
+
 _context_manager = ContextManager(_memory_service)
 _context_compiler = ContextCompiler(_context_manager)
 _tool_executor = ToolExecutor(ToolRegistry())
@@ -258,6 +296,9 @@ async def chat(req: ChatRequest) -> dict:
         memory_type=MemoryType.SESSION,
         scope=MemoryScope.AGENT,
     )
+
+    # Trigger Session→Episodic migration in background
+    asyncio.create_task(_memory_migrator.migrate_session_to_episodic(session_id, agent_id))
 
     return {"response": response, "agent_id": agent_id, "session_id": session_id}
 
@@ -607,6 +648,43 @@ async def _node_llm(state: GraphState) -> GraphState:
         memory_id=ref.id,
     )
 
+    # Estimate context token usage and trigger compression if needed
+    total_tokens = sum(len(m.get("content", "")) // 4 for m in state.messages)
+    trigger_level = _context_monitor.check_trigger(total_tokens)
+
+    if trigger_level == CompressionLevel.SYNC:
+        # Synchronous compression with 2s timeout
+        try:
+            items = await _memory_service.recall(
+                query="", agent_id=agent_id, session_id=session_id, top_k=50
+            )
+            result = await asyncio.wait_for(
+                _sync_compressor.compress(items),
+                timeout=2.0,
+            )
+            # Store summary items
+            for sid in result.summary_ids:
+                state.memory_refs.append(sid)
+        except asyncio.TimeoutError:
+            pass  # Skip compression if timeout
+    elif trigger_level == CompressionLevel.ASYNC:
+        # Asynchronous compression - non-blocking
+        items = await _memory_service.recall(
+            query="", agent_id=agent_id, session_id=session_id, top_k=50
+        )
+        await _async_compressor.trigger(items)
+
+    # Migrate working memory to session memory (auto-batch)
+    from src.memory.types import MemoryItem
+    working_item = MemoryItem(
+        content=f"User: {user_input}\nAssistant: {response}",
+        agent_id=agent_id,
+        session_id=session_id,
+        memory_type=MemoryType.WORKING,
+        scope=MemoryScope.AGENT,
+    )
+    await _memory_migrator.migrate_working_to_session(working_item, session_id, agent_id)
+
     # Determine if tool use is needed:
     # 1. Explicit tool_call in context (set by upstream)
     # 2. LLM response contains structured tool invocation pattern
@@ -633,6 +711,18 @@ async def _node_tool(state: GraphState) -> GraphState:
         state.context["tool_result"] = str(result["output"])
 
     state.tool_results.append({"tool": tool_name, "result": state.context["tool_result"]})
+
+    # Store tool result with safety deadline
+    result_preview = str(result["output"])[:200] if result["status"] == "success" else error_msg
+    await _memory_service.store(
+        content=f"Tool {tool_name} result: {result_preview}",
+        agent_id=state.agent_id,
+        session_id=state.session_id,
+        memory_type=MemoryType.WORKING,
+        scope=MemoryScope.AGENT,
+        metadata={"safety_deadline": True, "tool_result": True},
+    )
+
     state.current_node = "tool"
     _log_execution_step("tool", state)
     return state

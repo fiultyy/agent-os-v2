@@ -20,8 +20,17 @@ export function AgentNode({ data }: NodeProps) {
         <span className="text-sm font-semibold">{String(data.label ?? "Agent")}</span>
         <span className={`ml-auto h-2.5 w-2.5 rounded-full ${statusColor[status] ?? statusColor.idle}`} />
       </div>
-      <div className="mt-1 text-xs text-gray-500">
-        Memory: {memoryCount} items
+      <div className="mt-1 flex items-center gap-2">
+        <span className="text-xs text-gray-500">Memory: {memoryCount} items</span>
+        {data.workingMemoryCount != null && (
+          <span className={`text-[10px] font-medium ${
+            data.workingMemoryCount < 5 ? "text-green-600" :
+            data.workingMemoryCount < 15 ? "text-yellow-600" :
+            "text-red-600"
+          }`}>
+            WM: {String(data.workingMemoryCount)}
+          </span>
+        )}
       </div>
       <Handle type="source" position={Position.Bottom} />
     </div>

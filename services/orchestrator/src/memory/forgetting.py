@@ -86,6 +86,11 @@ class ActiveForgetting:
             if item.archived:
                 continue
 
+            # Check safety deadline - skip recently created tool results
+            if item.metadata.get("safety_deadline"):
+                result.skipped_above_threshold += 1
+                continue
+
             # Check importance score
             score = self._scorer.score(item)
             if score.total >= self._forget_threshold:

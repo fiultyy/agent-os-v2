@@ -3,8 +3,20 @@
 import { useState, useEffect } from "react";
 import { useFlowStore } from "@/stores/flowStore";
 import { useAgentStore } from "@/stores/agentStore";
-import { createAgent } from "@/lib/api";
+import { createAgent, getMemories } from "@/lib/api";
+import { type MemoryItem } from "@/stores/memoryStore";
 import { X, Save, Loader2 } from "lucide-react";
+
+const IMPORTANCE_COLORS = [
+  { max: 0.3, color: "bg-gray-300" },
+  { max: 0.6, color: "bg-yellow-400" },
+  { max: 0.8, color: "bg-blue-500" },
+  { max: 1.01, color: "bg-green-500" },
+];
+
+function importanceColor(value: number) {
+  return IMPORTANCE_COLORS.find((c) => value < c.max)?.color ?? "bg-gray-300";
+}
 
 const MODEL_OPTIONS = [
   { value: "glm-4-flash", label: "GLM-4-Flash" },
@@ -26,6 +38,21 @@ export function PropertyPanel() {
 
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
+  const [recentMemories, setRecentMemories] = useState<MemoryItem[]>([]);
+
+  // Load recent memories when an agent node is selected
+  useEffect(() => {
+    if (selectedNodeId) {
+      const node = nodes.find((n) => n.id === selectedNodeId);
+      if (node?.type === "agent" && node.data.agentId) {
+        getMemories(node.data.agentId as string, undefined, undefined, 5)
+          .then(setRecentMemories)
+          .catch(() => setRecentMemories([]));
+      } else {
+        setRecentMemories([]);
+      }
+    }
+  }, [selectedNodeId, nodes]);
 
   const node = nodes.find((n) => n.id === selectedNodeId);
   if (!node) return null;
@@ -43,6 +70,9 @@ export function PropertyPanel() {
 
   async function handleSave() {
     if (!isAgent) return;
+    // Re-fetch node to avoid TypeScript closure issue
+    const currentNode = nodes.find((n) => n.id === selectedNodeId);
+    if (!currentNode) return;
     setSaving(true);
     setSaveMsg(null);
 
@@ -62,7 +92,7 @@ export function PropertyPanel() {
           description: description || undefined,
           model,
         });
-        updateNodeData(node.id, { agentId: remote.id, label: remote.name });
+        updateNodeData(currentNode.id, { agentId: remote.id, label: remote.name });
         addAgent({
           id: remote.id,
           name: remote.name,
@@ -160,6 +190,27 @@ export function PropertyPanel() {
               <div className="rounded bg-gray-50 px-2 py-1.5 text-xs">
                 {memoryCount}
               </div>
+            </div>
+
+            {/* Recent Memories */}
+            <div className="border-t pt-4">
+              <h3 className="mb-2 text-sm font-semibold text-gray-700">Recent Memories</h3>
+              {recentMemories.length === 0 ? (
+                <p className="text-xs text-gray-400">No memories yet</p>
+              ) : (
+                <div className="space-y-2">
+                  {recentMemories.slice(0, 3).map((m) => (
+                    <div key={m.id} className="rounded border bg-gray-50 p-2">
+                      <p className="text-xs text-gray-600 line-clamp-2">{m.content.slice(0, 80)}</p>
+                      <div className="mt-1 flex items-center gap-2 text-[10px] text-gray-400">
+                        <span className={`inline-block h-1 w-6 rounded-full ${importanceColor(m.importance)}`} />
+                        <span>{m.importance.toFixed(2)}</span>
+                        <span>{m.memoryType}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* Save button */}

@@ -30,6 +30,7 @@ from src.memory.permissions import (
     ACTION_WRITE,
     ACTION_DELETE,
 )
+from src.memory.scorer import ImportanceScorer
 
 
 class MemoryService:
@@ -51,10 +52,13 @@ class MemoryService:
         store: InMemoryStore | None = None,
         vector_store: VectorStore | None = None,
         permission_manager: PermissionManager | None = None,
+        auto_score: bool = True,
     ) -> None:
         self._store = store or InMemoryStore()
         self._vector_store = vector_store
         self._permissions = permission_manager or PermissionManager()
+        self._auto_score = auto_score
+        self._scorer = ImportanceScorer() if auto_score else None
 
     @property
     def store(self) -> InMemoryStore:
@@ -107,6 +111,12 @@ class MemoryService:
             importance=importance,
             metadata=metadata or {},
         )
+
+        # Auto-score if importance is default and auto-scoring is enabled
+        if self._auto_score and importance == 0.5 and self._scorer is not None:
+            scored = self._scorer.score(item)
+            item.importance = scored.total
+
         item_id = await self._store.store(item)
 
         # Index in vector store for semantic search
