@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Bot, Send, Loader2, MessageSquare } from "lucide-react";
 import { executeWithSSE } from "@/lib/api";
+import { useDebugStore } from "@/stores/debugStore";
 import { Header } from "@/components/layout/Header";
 
 interface Agent {
@@ -26,6 +27,7 @@ export default function Home() {
   const [sessionId, setSessionId] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const addMemoryEvent = useDebugStore((s) => s.addMemoryEvent);
 
   useEffect(() => {
     fetch("/api/agents")
@@ -85,6 +87,9 @@ export default function Home() {
               ...prev,
               { role: "assistant", content: `[Error] ${event.data.message}` },
             ]);
+          } else if (event.event === "memory_event") {
+            // Forward memory lifecycle events to the debug store
+            addMemoryEvent(event.data as unknown as import("@/stores/debugStore").MemoryEvent);
           }
         }
       );

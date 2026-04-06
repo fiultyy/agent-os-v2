@@ -9,12 +9,15 @@ Provides:
 
 import asyncio
 import json
+import logging
 import os
 import re as _re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncGenerator
+
+logger = logging.getLogger(__name__)
 
 import httpx
 from fastapi import FastAPI, Query
@@ -153,9 +156,23 @@ async def _start_forgetting_sweep() -> None:
             await asyncio.sleep(86400)  # 24 hours
             try:
                 for agent_id in list(_agents.keys()):
-                    await _active_forgetting.run_sweep(agent_id=agent_id)
+                    forget_result = await _active_forgetting.run_sweep(agent_id=agent_id)
+                    # Issue 2: Emit forget event
+                    _emit_memory_event("forget", {
+                        "agent_id": agent_id,
+                        "scanned": forget_result.scanned,
+                        "archived": forget_result.archived,
+                        "archived_ids": forget_result.archived_ids[:10],  # cap for SSE
+                    })
                     # Episodic → Semantic migration on each sweep
-                    await _memory_migrator.migrate_episodic_to_semantic(agent_id)
+                    migrate_ids = await _memory_migrator.migrate_episodic_to_semantic(agent_id)
+                    # Issue 2: Emit migrate event
+                    _emit_memory_event("migrate", {
+                        "agent_id": agent_id,
+                        "path": "episodic_to_semantic",
+                        "count": len(migrate_ids),
+                        "ids": migrate_ids[:10],
+                    })
             except Exception:
                 pass  # Don't crash the loop
 
@@ -170,12 +187,22 @@ async def _shutdown() -> None:
         await _pg_store.close()
     await _communication_bus.close()
 
+# Ensure data directory exists for SQLite databases
+Path("data").mkdir(exist_ok=True)
+
+# ── Global services (ordered to satisfy dependencies) ────────────
+
+# Knowledge graph must be created first — MemoryService depends on it.
+_knowledge_graph = KnowledgeGraph()
+
 # Embedding provider and vector store for semantic search
 _embedding_provider = SentenceTransformerProvider()
 _vector_store = FAISSVectorStore(provider=_embedding_provider)
 
 # Memory service with SQLiteStore for persistence
-_memory_service = MemoryService(SQLiteStore(), vector_store=_vector_store)
+_memory_service = MemoryService(
+    SQLiteStore(), vector_store=_vector_store, knowledge_graph=_knowledge_graph
+)
 
 # Context compression components
 _context_monitor = ContextMonitor()
@@ -191,10 +218,49 @@ _context_compiler = ContextCompiler(_context_manager)
 _tool_executor = ToolExecutor(ToolRegistry())
 _communication_bus = CommunicationBus()
 _concurrency_controller = ConcurrencyController()
-# Ensure data directory exists for SQLite databases
-Path("data").mkdir(exist_ok=True)
 
-_knowledge_graph = KnowledgeGraph()
+# ── Memory Event Bus (Issue 2: debug event stream) ───────────────
+# A lightweight pub/sub so memory subsystems (compress, forget, migrate)
+# can emit events that are pushed to the frontend via SSE.
+_memory_event_subscribers: list[asyncio.Queue[str]] = []
+
+
+def _emit_memory_event(event: str, details: dict[str, Any]) -> None:
+    """Broadcast a memory lifecycle event to all SSE subscribers.
+
+    Non-blocking: puts into each subscriber's queue. Queues that are
+    full are silently skipped to avoid back-pressure issues.
+
+    Args:
+        event: Event type — ``"compress"``, ``"forget"``, or ``"migrate"``.
+        details: Arbitrary payload describing the event.
+    """
+    sse_msg = _sse("memory_event", {"event": event, **details})
+    dead: list[asyncio.Queue[str]] = []
+    for q in _memory_event_subscribers:
+        try:
+            q.put_nowait(sse_msg)
+        except asyncio.QueueFull:
+            dead.append(q)
+    for q in dead:
+        _memory_event_subscribers.remove(q)
+
+
+def subscribe_memory_events() -> asyncio.Queue[str]:
+    """Register a queue to receive memory lifecycle SSE events.
+
+    Returns:
+        An :class:`asyncio.Queue` that will receive SSE-formatted strings.
+    """
+    q: asyncio.Queue[str] = asyncio.Queue(maxsize=200)
+    _memory_event_subscribers.append(q)
+    return q
+
+
+def unsubscribe_memory_events(q: asyncio.Queue[str]) -> None:
+    """Remove a previously subscribed event queue."""
+    if q in _memory_event_subscribers:
+        _memory_event_subscribers.remove(q)
 
 # Execution log for debug/replay (in-memory, capped)
 _execution_log: list[dict[str, Any]] = []
@@ -305,7 +371,24 @@ async def chat(req: ChatRequest) -> dict:
     )
 
     # Trigger Session→Episodic migration in background
-    asyncio.create_task(_memory_migrator.migrate_session_to_episodic(session_id, agent_id))
+    async def _migrate_and_emit() -> None:
+        ids = await _memory_migrator.migrate_session_to_episodic(session_id, agent_id)
+        if ids:
+            _emit_memory_event("migrate", {
+                "agent_id": agent_id,
+                "path": "session_to_episodic",
+                "count": len(ids),
+                "ids": ids[:10],
+            })
+
+    asyncio.create_task(_migrate_and_emit())
+
+    # Fire-and-forget KG entity extraction (non-blocking)
+    _trigger_kg_extraction(
+        user_message=req.message,
+        assistant_response=response,
+        session_id=session_id,
+    )
 
     return {"response": response, "agent_id": agent_id, "session_id": session_id}
 
@@ -596,6 +679,36 @@ def _log_execution_step(
         del _execution_log[: len(_execution_log) - _MAX_EXECUTION_LOG]
 
 
+def _trigger_kg_extraction(
+    user_message: str,
+    assistant_response: str,
+    session_id: str = "",
+) -> None:
+    """Fire-and-forget KG entity extraction for a completed turn.
+
+    Runs via ``asyncio.create_task`` so it never blocks the response.
+    Exceptions are logged and silently swallowed.
+
+    Args:
+        user_message: The user's original input text.
+        assistant_response: The assistant's reply text.
+        session_id: Session identifier for provenance.
+    """
+    try:
+        if _knowledge_graph is not None and hasattr(_knowledge_graph, "extract_and_ingest"):
+            text = f"User: {user_message}\nAssistant: {assistant_response}"
+            # Synchronous method — offload to thread to avoid blocking
+            asyncio.create_task(
+                asyncio.to_thread(
+                    _knowledge_graph.extract_and_ingest,
+                    text=text,
+                    memory_id=session_id,
+                )
+            )
+    except Exception:
+        logger.warning("KG extraction failed", exc_info=True)
+
+
 async def _node_start(state: GraphState) -> GraphState:
     """Initialize the execution pipeline."""
     state.messages.append({"role": "system", "content": "Processing started"})
@@ -652,10 +765,11 @@ async def _node_llm(state: GraphState) -> GraphState:
     await _memory_migrator.migrate_working_to_session(working_item, session_id, agent_id)
     state.memory_refs.append(working_item.id)
 
-    # Extract entities for knowledge graph
-    _knowledge_graph.extract_and_ingest(
-        f"{user_input} {response}",
-        memory_id=working_item.id,
+    # Extract entities for knowledge graph (non-blocking)
+    _trigger_kg_extraction(
+        user_message=user_input,
+        assistant_response=response,
+        session_id=working_item.id,
     )
 
     # Estimate context token usage and trigger compression if needed
@@ -691,6 +805,15 @@ async def _node_llm(state: GraphState) -> GraphState:
                         )
         except asyncio.TimeoutError:
             pass  # Skip compression if timeout
+        else:
+            # Issue 2: Emit compress event after sync compression
+            _emit_memory_event("compress", {
+                "agent_id": agent_id,
+                "level": "sync",
+                "original_count": result.original_count,
+                "retained_count": result.compressed_count,
+                "summary_count": len(result.summaries),
+            })
     elif trigger_level == CompressionLevel.ASYNC:
         # Asynchronous compression - non-blocking
         items = await _memory_service.recall(
@@ -698,7 +821,7 @@ async def _node_llm(state: GraphState) -> GraphState:
         )
 
         async def _on_compressed(retained: list, summaries: list) -> None:
-            """Callback: persist summaries and archive replaced sources."""
+            """Callback: persist summaries, archive replaced sources, emit event."""
             for summary_item in summaries:
                 await _memory_service.store(
                     content=summary_item.content,
@@ -715,6 +838,14 @@ async def _node_llm(state: GraphState) -> GraphState:
                     await _memory_service.update(
                         item.id, accessor_id=agent_id, archived=True,
                     )
+            # Issue 2: Emit compress event after async compression
+            _emit_memory_event("compress", {
+                "agent_id": agent_id,
+                "level": "async",
+                "original_count": len(items),
+                "retained_count": len(retained),
+                "summary_count": len(summaries),
+            })
 
         await _async_compressor.trigger(items, on_compressed=_on_compressed)
 
@@ -762,17 +893,41 @@ async def _node_tool(state: GraphState) -> GraphState:
 
 
 async def _node_llm_synthesize(state: GraphState) -> GraphState:
-    """LLM synthesizes tool results into final answer."""
+    """LLM synthesizes tool results into final answer.
+
+    Uses ContextCompiler when available for richer context assembly.
+    Falls back to direct prompt construction when ContextCompiler
+    is unavailable (graceful degradation).
+
+    After synthesis, triggers async KG entity extraction so entities
+    from the tool-result synthesis flow are captured.
+    """
     tool_result = state.context.get("tool_result", "")
 
     # Resolve model: agent config > env default
     agent = _agents.get(state.agent_id)
     agent_model = agent.get("model") if agent else None
+    system_prompt = (agent.get("system_prompt") if agent else None) or "You are a helpful assistant."
 
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": "Synthesize the tool results into a final answer for the user."},
-        {"role": "user", "content": f"Original question: {state.input}\n\nTool results: {tool_result}"},
-    ]
+    # ── Issue 4: Use ContextCompiler when available ──────────
+    if _context_compiler is not None:
+        conversation = list(state.messages) + [
+            {"role": "user", "content": state.input},
+            {"role": "system", "content": f"Tool results: {tool_result}"},
+        ]
+        messages = await _context_compiler.compile(
+            system_prompt=f"{system_prompt}\n\nSynthesize the tool results into a final answer for the user.",
+            conversation=conversation,
+            agent_id=state.agent_id,
+            session_id=state.session_id,
+        )
+    else:
+        # Fallback: direct prompt construction
+        messages = [
+            {"role": "system", "content": "Synthesize the tool results into a final answer for the user."},
+            {"role": "user", "content": f"Original question: {state.input}\n\nTool results: {tool_result}"},
+        ]
+
     try:
         response = await _llm_client.chat(messages, model=agent_model)
     except LLMError as exc:
@@ -785,6 +940,14 @@ async def _node_llm_synthesize(state: GraphState) -> GraphState:
     state.messages.append({"role": "assistant", "content": response})
     state.output = response
     state.current_node = "llm_synthesize"
+
+    # ── Issue 1: Async KG extraction from synthesis path ─────
+    _trigger_kg_extraction(
+        user_message=state.input,
+        assistant_response=response,
+        session_id=state.session_id,
+    )
+
     _log_execution_step("llm_synthesize", state)
     return state
 
@@ -894,6 +1057,9 @@ async def execute(req: ExecuteRequest) -> StreamingResponse:
         agent["status"] = "running"
         yield _sse("agent_status", {"agent_id": req.agent_id, "status": "running"})
 
+        # Subscribe to memory events (compress/forget/migrate) for this SSE stream
+        mem_event_q = subscribe_memory_events()
+
         async def run_graph():
             try:
                 final_state = await graph.run(initial_state, on_node_complete=on_node_complete)
@@ -909,11 +1075,18 @@ async def execute(req: ExecuteRequest) -> StreamingResponse:
                 await event_queue.put(_sse("error", {"message": str(exc)}))
             finally:
                 await _concurrency_controller.release_agent_slot(req.agent_id)
+                unsubscribe_memory_events(mem_event_q)
                 await event_queue.put(None)
 
         task = asyncio.create_task(run_graph())
 
         while True:
+            # Forward any pending memory events into the main SSE queue
+            while not mem_event_q.empty():
+                try:
+                    await event_queue.put(mem_event_q.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
             item = await event_queue.get()
             if item is None:
                 break

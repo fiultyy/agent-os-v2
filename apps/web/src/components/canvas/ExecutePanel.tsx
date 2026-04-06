@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useFlowStore } from "@/stores/flowStore";
 import { useAgentStore } from "@/stores/agentStore";
+import { useDebugStore } from "@/stores/debugStore";
 import { executeWithSSE } from "@/lib/api";
 import { Play, Loader2 } from "lucide-react";
 
@@ -14,6 +15,7 @@ export function ExecutePanel() {
   const [input, setInput] = useState("");
   const [executing, setExecuting] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
+  const addMemoryEvent = useDebugStore((s) => s.addMemoryEvent);
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId);
 
@@ -43,6 +45,10 @@ export function ExecutePanel() {
             : null;
           if (msg) {
             setLogs((prev) => [...prev, msg]);
+          }
+          // Forward memory lifecycle events to the debug store
+          if (type === "memory_event") {
+            addMemoryEvent(data as unknown as import("@/stores/debugStore").MemoryEvent);
           }
           // Update memory count
           if (type === "execution_complete") {
