@@ -2,14 +2,22 @@
 
 Provides:
 - :class:`VectorStore` — abstract add/embed/search/delete interface.
-- :class:`FAISSVectorStore` — local FAISS-based implementation.
+- :class:`FAISSVectorStore` — local FAISS-based implementation with file persistence.
+
+Persistence:
+- FAISS index saved to ``data/memory.faiss`` (debounced, 5 s).
+- ID mapping stored in SQLite at ``data/vector_meta.db``.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import sqlite3
+import threading
 from abc import ABC, abstractmethod
-from typing import Protocol
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -53,21 +61,129 @@ class VectorStore(ABC):
 
 
 class FAISSVectorStore(VectorStore):
-    """FAISS-backed vector store using an IVF-flat index.
+    """FAISS-backed vector store with file persistence.
 
     Falls back to a flat L2 index when the corpus is small (< 100 vectors).
-    Vectors are L2-normalised so inner-product ≈ cosine similarity.
+    Vectors are L2-normalised so inner-product = cosine similarity.
+
+    Args:
+        provider: Embedding provider. Defaults to SentenceTransformerProvider.
+        persist_path: Path for the FAISS index file. Defaults to
+            ``"data/memory.faiss"``. Set to ``""`` to disable persistence.
     """
 
     def __init__(
         self,
         provider: EmbeddingProvider | None = None,
+        persist_path: str = "data/memory.faiss",
     ) -> None:
         self._provider = provider or SentenceTransformerProvider()
+        self._persist_path = persist_path
         self._ids: list[str] = []
         self._id_to_idx: dict[str, int] = {}
-        self._index = None
+        self._index: Any = None
         self._dimension: int | None = None
+        self._dirty: bool = False
+        self._save_timer: threading.Timer | None = None
+        self._lock = threading.Lock()
+
+        # SQLite for id mapping
+        self._meta_db: sqlite3.Connection | None = None
+        if persist_path:
+            meta_path = Path(persist_path).with_suffix(".meta.db")
+            Path(meta_path).parent.mkdir(parents=True, exist_ok=True)
+            self._meta_db = sqlite3.connect(
+                str(meta_path), check_same_thread=False
+            )
+            self._meta_db.execute("PRAGMA journal_mode=WAL")
+            self._meta_db.execute(
+                """CREATE TABLE IF NOT EXISTS id_mapping (
+                    faiss_idx INTEGER PRIMARY KEY,
+                    memory_id TEXT NOT NULL
+                )"""
+            )
+            self._meta_db.commit()
+            self._load_from_disk()
+
+    # ── Persistence ──────────────────────────────────────────────────
+
+    def _load_from_disk(self) -> None:
+        """Load FAISS index and id mapping from disk if they exist."""
+        if not self._persist_path:
+            return
+
+        # Load id mapping from SQLite
+        if self._meta_db:
+            rows = self._meta_db.execute(
+                "SELECT faiss_idx, memory_id FROM id_mapping ORDER BY faiss_idx"
+            ).fetchall()
+            for idx, mid in rows:
+                if idx >= len(self._ids):
+                    self._ids.extend([""] * (idx - len(self._ids) + 1))
+                self._ids[idx] = mid
+                self._id_to_idx[mid] = idx
+
+        # Load FAISS index
+        if os.path.exists(self._persist_path):
+            try:
+                import faiss
+
+                self._index = faiss.read_index(self._persist_path)
+                self._dimension = self._index.d
+                logger.info(
+                    "FAISS index loaded from %s (%d vectors, dim=%d)",
+                    self._persist_path,
+                    self._index.ntotal,
+                    self._dimension,
+                )
+            except Exception as exc:
+                logger.warning("Failed to load FAISS index: %s", exc)
+                self._index = None
+
+    def _schedule_save(self) -> None:
+        """Mark dirty and schedule a debounced save (5 seconds)."""
+        self._dirty = True
+        if self._save_timer is not None:
+            self._save_timer.cancel()
+        self._save_timer = threading.Timer(5.0, self._do_save)
+        self._save_timer.daemon = True
+        self._save_timer.start()
+
+    def _do_save(self) -> None:
+        """Persist the index and id mapping to disk."""
+        with self._lock:
+            if not self._dirty:
+                return
+            self._dirty = False
+
+        if self._index is not None and self._persist_path:
+            try:
+                import faiss
+
+                Path(self._persist_path).parent.mkdir(parents=True, exist_ok=True)
+                faiss.write_index(self._index, self._persist_path)
+            except Exception as exc:
+                logger.warning("Failed to save FAISS index: %s", exc)
+
+        if self._meta_db:
+            try:
+                with self._meta_db:
+                    self._meta_db.execute("DELETE FROM id_mapping")
+                    self._meta_db.executemany(
+                        "INSERT INTO id_mapping (faiss_idx, memory_id) VALUES (?, ?)",
+                        enumerate(self._ids),
+                    )
+            except Exception as exc:
+                logger.warning("Failed to save id mapping: %s", exc)
+
+        logger.info("FAISS index and id mapping saved to disk")
+
+    def save(self) -> None:
+        """Force-save the index and id mapping (call on shutdown)."""
+        if self._save_timer is not None:
+            self._save_timer.cancel()
+            self._save_timer = None
+        self._do_save()
 
     def _ensure_index(self, dim: int) -> None:
         """Create the FAISS index lazily once we know the dimensionality."""
@@ -80,7 +196,7 @@ class FAISSVectorStore(VectorStore):
         self._index = faiss.IndexFlatIP(dim)
         logger.info("FAISS index created (dim=%d)", dim)
 
-    # ── Interface implementation ─────────────────────────────────
+    # ── Interface implementation ─────────────────────────────────────
 
     async def add(self, memory_id: str, text: str) -> None:
         vec = self._provider.embed(text)
@@ -94,6 +210,7 @@ class FAISSVectorStore(VectorStore):
         self._ids.append(memory_id)
         self._id_to_idx[memory_id] = idx
         self._index.add(vec.reshape(1, -1))
+        self._schedule_save()
 
     async def add_batch(self, items: list[tuple[str, str]]) -> None:
         if not items:
@@ -106,8 +223,6 @@ class FAISSVectorStore(VectorStore):
             if mid in self._id_to_idx:
                 await self.delete(mid)
 
-        import faiss
-
         start = len(self._ids)
         for i, (mid, _) in enumerate(items):
             self._ids.append(mid)
@@ -115,6 +230,7 @@ class FAISSVectorStore(VectorStore):
 
         mat = np.stack(vecs)
         self._index.add(mat)
+        self._schedule_save()
 
     async def search(
         self, query: str, top_k: int = 10,
@@ -149,6 +265,7 @@ class FAISSVectorStore(VectorStore):
         if tombstones > max(50, active // 5):
             await self.compact()
 
+        self._schedule_save()
         return True
 
     async def compact(self) -> int:
@@ -173,15 +290,6 @@ class FAISSVectorStore(VectorStore):
 
         tombstone_count = len(self._ids) - len(active_pairs)
 
-        # Re-embed all active texts and rebuild
-        new_ids: list[str] = []
-        new_id_to_idx: dict[str, int] = {}
-        vecs: list[np.ndarray] = []
-
-        for new_idx, (mid, old_idx) in enumerate(active_pairs):
-            new_ids.append(mid)
-            new_id_to_idx[mid] = new_idx
-
         # Rebuild index from scratch (re-extract vectors from existing index)
         dim = self._dimension or 384
         new_index = faiss.IndexFlatIP(dim)
@@ -203,9 +311,18 @@ class FAISSVectorStore(VectorStore):
                 # Fallback: rebuild with empty index, vectors will be re-added on next add()
                 pass
 
+        # Rebuild id lists
+        new_ids: list[str] = []
+        new_id_to_idx: dict[str, int] = {}
+        for new_idx, (mid, _) in enumerate(active_pairs):
+            new_ids.append(mid)
+            new_id_to_idx[mid] = new_idx
+
         self._ids = new_ids
         self._id_to_idx = new_id_to_idx
         self._index = new_index
+
+        self._schedule_save()
 
         logger.info(
             "FAISS compacted: removed %d tombstones, %d active entries remain",

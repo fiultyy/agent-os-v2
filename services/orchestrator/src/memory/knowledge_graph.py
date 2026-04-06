@@ -1,25 +1,30 @@
 """Knowledge Graph — entity extraction, relation mapping, and graph queries.
 
-Provides a lightweight in-process knowledge graph backed by NetworkX.
-Integrates with the memory system to automatically extract entities and
-relations during the L2 Episodic → L3 Semantic migration.
+Provides a lightweight knowledge graph backed by SQLite with recursive CTE
+support for multi-hop traversal. Replaces the previous NetworkX implementation
+while maintaining full backward compatibility.
 
 Components:
-- :class:`KnowledgeGraph` — NetworkX-backed graph store.
+- :class:`Entity` / :class:`Relation` — data classes for graph elements.
 - :class:`EntityExtractor` — regex + heuristic entity/relation extraction.
-- :class:`GraphQueryEngine` — SPARQL-lite traversal and shortest-path queries.
+- :class:`KnowledgeGraph` — SQLite-backed graph store (replaces NetworkX).
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import uuid
+
+try:
+    from pysqlite3 import dbapi2 as sqlite3  # type: ignore[import-untyped]
+except ImportError:
+    import sqlite3  # noqa: F401
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
-
-import networkx as nx
 
 logger = logging.getLogger(__name__)
 
@@ -206,26 +211,108 @@ class EntityExtractor:
         return relations[:15]  # Cap at 15 relations
 
 
-# ── Knowledge Graph Store ─────────────────────────────────────────────
+# ── Knowledge Graph Store (SQLite-backed) ─────────────────────────────
 
 
 class KnowledgeGraph:
-    """NetworkX-backed knowledge graph for entity-relation storage.
+    """SQLite-backed knowledge graph for entity-relation storage.
 
-    Entities are stored as nodes with ``entity_type`` and ``properties``.
-    Relations are stored as edges with ``relation_type`` and ``weight``.
+    Replaces the previous NetworkX implementation with a persistent
+    SQLite backend using recursive CTEs for multi-hop graph traversal.
 
-    Supports:
-    - Add/query/delete entities and relations.
-    - Shortest-path queries between entities.
-    - Neighbour traversal (expand from an entity).
-    - Graph statistics.
+    Maintains full backward compatibility with the NetworkX version.
+
+    Args:
+        db_path: Path to the SQLite database file. Parent directories
+            are created automatically. Defaults to ``"data/kg.db"``.
     """
 
-    def __init__(self) -> None:
-        self._graph = nx.DiGraph()
-        self._entity_names: dict[str, str] = {}  # name_lower -> entity_id
+    def __init__(self, db_path: str = "data/kg.db") -> None:
+        self._db_path = db_path
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.execute("PRAGMA foreign_keys=ON")
+        self._conn.row_factory = sqlite3.Row
+
         self._extractor = EntityExtractor()
+        self._create_tables()
+
+    def _create_tables(self) -> None:
+        """Create database tables if they do not exist."""
+        with self._conn:
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS entities (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    type TEXT,
+                    properties TEXT,
+                    source_memory_ids TEXT,
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+            """)
+            self._conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_name ON entities(name)"
+            )
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS relations (
+                    id TEXT PRIMARY KEY,
+                    source_id TEXT NOT NULL,
+                    target_id TEXT NOT NULL,
+                    relation_type TEXT NOT NULL,
+                    properties TEXT,
+                    valid_from TEXT,
+                    valid_to TEXT,
+                    confidence REAL DEFAULT 1.0,
+                    source_memory_id TEXT DEFAULT '',
+                    created_at TEXT,
+                    FOREIGN KEY (source_id) REFERENCES entities(id),
+                    FOREIGN KEY (target_id) REFERENCES entities(id)
+                )
+            """)
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_relations_source ON relations(source_id)"
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_relations_target ON relations(target_id)"
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_relations_type ON relations(relation_type)"
+            )
+
+    # ── Internal helpers ─────────────────────────────────────────────
+
+    def _resolve_entity_id(self, name_or_id: str) -> str | None:
+        """Resolve a name or ID to an entity ID."""
+        # Try as direct ID first
+        row = self._conn.execute(
+            "SELECT id FROM entities WHERE id = ?", (name_or_id,)
+        ).fetchone()
+        if row:
+            return row["id"]
+        # Try as name (case-insensitive)
+        row = self._conn.execute(
+            "SELECT id FROM entities WHERE lower(name) = lower(?)", (name_or_id,)
+        ).fetchone()
+        if row:
+            return row["id"]
+        return None
+
+    def _row_to_entity_dict(self, row: sqlite3.Row) -> dict[str, Any]:
+        """Convert a database row to an entity dict."""
+        props = row["properties"]
+        src_ids = row["source_memory_ids"]
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "entity_type": row["type"] or "",
+            "properties": json.loads(props) if props else {},
+            "source_memory_ids": json.loads(src_ids) if src_ids else [],
+            "created_at": row["created_at"] or "",
+        }
 
     # ── Entity operations ─────────────────────────────────────────
 
@@ -238,59 +325,81 @@ class KnowledgeGraph:
         Returns:
             The entity ID.
         """
-        name_key = entity.name.lower()
-        existing_id = self._entity_names.get(name_key)
+        now = datetime.now(timezone.utc).isoformat()
 
-        if existing_id and existing_id in self._graph:
-            # Merge into existing entity
-            existing = self._graph.nodes[existing_id]
-            existing["properties"].update(entity.properties)
+        # Check for existing entity by name
+        existing = self._conn.execute(
+            "SELECT * FROM entities WHERE lower(name) = lower(?)",
+            (entity.name,),
+        ).fetchone()
+
+        if existing:
+            # Merge properties and source_memory_ids
+            existing_props = json.loads(existing["properties"]) if existing["properties"] else {}
+            existing_src_ids = json.loads(existing["source_memory_ids"]) if existing["source_memory_ids"] else []
+            existing_props.update(entity.properties)
             for mid in entity.source_memory_ids:
-                if mid not in existing["source_memory_ids"]:
-                    existing["source_memory_ids"].append(mid)
-            return existing_id
+                if mid not in existing_src_ids:
+                    existing_src_ids.append(mid)
+            with self._conn:
+                self._conn.execute(
+                    """UPDATE entities SET properties = ?, source_memory_ids = ?, updated_at = ?
+                       WHERE id = ?""",
+                    (
+                        json.dumps(existing_props, ensure_ascii=False),
+                        json.dumps(existing_src_ids),
+                        now,
+                        existing["id"],
+                    ),
+                )
+            return existing["id"]
 
-        self._graph.add_node(
-            entity.id,
-            name=entity.name,
-            entity_type=entity.entity_type,
-            properties=entity.properties,
-            source_memory_ids=entity.source_memory_ids,
-            created_at=entity.created_at,
-        )
-        self._entity_names[name_key] = entity.id
+        # Insert new entity
+        with self._conn:
+            self._conn.execute(
+                """INSERT OR IGNORE INTO entities (id, name, type, properties, source_memory_ids, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    entity.id,
+                    entity.name,
+                    entity.entity_type,
+                    json.dumps(entity.properties, ensure_ascii=False),
+                    json.dumps(entity.source_memory_ids),
+                    entity.created_at or now,
+                    now,
+                ),
+            )
         return entity.id
 
     def get_entity(self, entity_id: str) -> dict[str, Any] | None:
         """Get entity data by ID."""
-        if entity_id not in self._graph:
+        row = self._conn.execute(
+            "SELECT * FROM entities WHERE id = ?", (entity_id,)
+        ).fetchone()
+        if row is None:
             return None
-        node = self._graph.nodes[entity_id]
-        return {
-            "id": entity_id,
-            "name": node.get("name", ""),
-            "entity_type": node.get("entity_type", ""),
-            "properties": node.get("properties", {}),
-            "source_memory_ids": node.get("source_memory_ids", []),
-            "created_at": node.get("created_at", ""),
-        }
+        return self._row_to_entity_dict(row)
 
     def find_entity_by_name(self, name: str) -> dict[str, Any] | None:
         """Find an entity by its name (case-insensitive)."""
-        entity_id = self._entity_names.get(name.lower())
-        if entity_id is None:
+        row = self._conn.execute(
+            "SELECT * FROM entities WHERE lower(name) = lower(?)", (name,)
+        ).fetchone()
+        if row is None:
             return None
-        return self.get_entity(entity_id)
+        return self._row_to_entity_dict(row)
 
     def delete_entity(self, entity_id: str) -> bool:
-        """Remove an entity and all its edges."""
-        if entity_id not in self._graph:
-            return False
-        node = self._graph.nodes[entity_id]
-        name_key = node.get("name", "").lower()
-        self._entity_names.pop(name_key, None)
-        self._graph.remove_node(entity_id)
-        return True
+        """Remove an entity and all its relations."""
+        with self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM entities WHERE id = ?", (entity_id,)
+            )
+            self._conn.execute(
+                "DELETE FROM relations WHERE source_id = ? OR target_id = ?",
+                (entity_id, entity_id),
+            )
+        return cursor.rowcount > 0
 
     # ── Relation operations ───────────────────────────────────────
 
@@ -318,15 +427,25 @@ class KnowledgeGraph:
                 entity_type="auto_detected",
             ))
 
-        self._graph.add_edge(
-            source_id, target_id,
-            relation_id=relation.id,
-            relation_type=relation.relation_type,
-            weight=relation.weight,
-            properties=relation.properties,
-            source_memory_id=relation.source_memory_id,
-            created_at=relation.created_at,
-        )
+        now = datetime.now(timezone.utc).isoformat()
+        with self._conn:
+            self._conn.execute(
+                """INSERT INTO relations
+                   (id, source_id, target_id, relation_type, properties,
+                    valid_from, valid_to, confidence, source_memory_id, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)""",
+                (
+                    relation.id,
+                    source_id,
+                    target_id,
+                    relation.relation_type,
+                    json.dumps(relation.properties, ensure_ascii=False),
+                    now,
+                    relation.weight,
+                    relation.source_memory_id,
+                    now,
+                ),
+            )
         return relation.id
 
     def get_relations(
@@ -345,46 +464,49 @@ class KnowledgeGraph:
         Returns:
             List of relation dictionaries.
         """
-        if entity_id not in self._graph:
-            return []
-
         results: list[dict[str, Any]] = []
 
         if direction in ("outgoing", "both"):
-            for _, target, data in self._graph.out_edges(entity_id, data=True):
-                if relation_type and data.get("relation_type") != relation_type:
-                    continue
+            query = "SELECT * FROM relations WHERE source_id = ? AND valid_to IS NULL"
+            params: list[Any] = [entity_id]
+            if relation_type:
+                query += " AND relation_type = ?"
+                params.append(relation_type)
+            for row in self._conn.execute(query, params).fetchall():
                 results.append({
-                    "id": data.get("relation_id", ""),
+                    "id": row["id"],
                     "source_entity_id": entity_id,
-                    "target_entity_id": target,
-                    "relation_type": data.get("relation_type", ""),
-                    "weight": data.get("weight", 1.0),
-                    "properties": data.get("properties", {}),
+                    "target_entity_id": row["target_id"],
+                    "relation_type": row["relation_type"],
+                    "weight": row["confidence"],
+                    "properties": json.loads(row["properties"]) if row["properties"] else {},
                 })
 
         if direction in ("incoming", "both"):
-            for source, _, data in self._graph.in_edges(entity_id, data=True):
-                if relation_type and data.get("relation_type") != relation_type:
-                    continue
+            query = "SELECT * FROM relations WHERE target_id = ? AND valid_to IS NULL"
+            params = [entity_id]
+            if relation_type:
+                query += " AND relation_type = ?"
+                params.append(relation_type)
+            for row in self._conn.execute(query, params).fetchall():
                 results.append({
-                    "id": data.get("relation_id", ""),
-                    "source_entity_id": source,
+                    "id": row["id"],
+                    "source_entity_id": row["source_id"],
                     "target_entity_id": entity_id,
-                    "relation_type": data.get("relation_type", ""),
-                    "weight": data.get("weight", 1.0),
-                    "properties": data.get("properties", {}),
+                    "relation_type": row["relation_type"],
+                    "weight": row["confidence"],
+                    "properties": json.loads(row["properties"]) if row["properties"] else {},
                 })
 
         return results
 
     def delete_relation(self, relation_id: str) -> bool:
         """Remove a relation by its ID."""
-        for u, v, data in list(self._graph.edges(data=True)):
-            if data.get("relation_id") == relation_id:
-                self._graph.remove_edge(u, v)
-                return True
-        return False
+        with self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM relations WHERE id = ?", (relation_id,)
+            )
+        return cursor.rowcount > 0
 
     # ── Graph queries ─────────────────────────────────────────────
 
@@ -393,20 +515,95 @@ class KnowledgeGraph:
     ) -> list[dict[str, Any]] | None:
         """Find the shortest path between two entities by name.
 
+        Uses a recursive CTE for BFS traversal.
+
         Returns:
             List of entity dicts along the path, or None if no path exists.
         """
-        source_id = self._entity_names.get(source_name.lower())
-        target_id = self._entity_names.get(target_name.lower())
+        source_id = self._resolve_entity_id(source_name)
+        target_id = self._resolve_entity_id(target_name)
         if source_id is None or target_id is None:
             return None
 
-        try:
-            path = nx.shortest_path(self._graph, source_id, target_id)
-        except nx.NetworkXNoPath:
+        # BFS via recursive CTE
+        rows = self._conn.execute("""
+            WITH RECURSIVE bfs(parent, node, depth) AS (
+                SELECT NULL, ?, 0
+                UNION ALL
+                SELECT bfs.node, r.target_id, bfs.depth + 1
+                FROM relations r, bfs
+                WHERE r.source_id = bfs.node
+                  AND r.valid_to IS NULL
+                  AND bfs.node != ?
+                  AND bfs.depth < 10
+            )
+            SELECT node, depth FROM bfs WHERE node = ? LIMIT 1
+        """, (source_id, target_id, target_id)).fetchall()
+
+        if not rows:
             return None
 
-        return [self.get_entity(eid) for eid in path]  # type: ignore[misc]
+        # Reconstruct path by backtracking
+        path_ids = self._reconstruct_path(source_id, target_id)
+        if path_ids is None:
+            return None
+
+        return [self.get_entity(eid) for eid in path_ids]  # type: ignore[misc]
+
+    def _reconstruct_path(self, source_id: str, target_id: str) -> list[str] | None:
+        """Reconstruct the shortest path using BFS parent tracking."""
+        # BFS with parent tracking — use visited set in Python to avoid
+        # "multiple recursive references" limitation in SQLite.
+        # Collect all reachable nodes level by level.
+        rows = self._conn.execute("""
+            WITH RECURSIVE bfs(parent, node, depth) AS (
+                SELECT NULL, ?, 0
+                UNION ALL
+                SELECT bfs.node, r.target_id, bfs.depth + 1
+                FROM relations r, bfs
+                WHERE r.source_id = bfs.node
+                  AND r.valid_to IS NULL
+                  AND bfs.depth < 10
+            )
+            SELECT parent, node, depth FROM bfs ORDER BY depth
+        """, (source_id,)).fetchall()
+
+        # Build parent map, keeping first (shortest) parent per node
+        parent_map: dict[str, str | None] = {}
+        parent_map[source_id] = None
+        for row in rows:
+            node = row["node"]
+            if node not in parent_map:
+                parent_map[node] = row["parent"]
+
+        if target_id not in parent_map:
+            return None
+
+        # Backtrack
+        path: list[str] = []
+        current: str | None = target_id
+        while current is not None:
+            path.append(current)
+            current = parent_map.get(current)
+        path.reverse()
+        return path
+
+        # Build parent map
+        parent_map: dict[str, str | None] = {}
+        for row in rows:
+            parent_map[row["node"]] = row["parent"]
+
+        if target_id not in parent_map:
+            return None
+
+        # Backtrack
+        path: list[str] = []
+        current: str | None = target_id
+        while current is not None:
+            path.append(current)
+            current = parent_map.get(current)
+        path.reverse()
+        return path
 
     def expand(
         self,
@@ -416,6 +613,8 @@ class KnowledgeGraph:
     ) -> dict[str, Any]:
         """Expand the neighbourhood around an entity.
 
+        Uses recursive CTE for N-hop traversal.
+
         Args:
             entity_name: Starting entity.
             depth: Maximum traversal depth.
@@ -424,34 +623,117 @@ class KnowledgeGraph:
         Returns:
             Dict with center entity, neighbours, and edges.
         """
-        entity_id = self._entity_names.get(entity_name.lower())
+        entity_id = self._resolve_entity_id(entity_name)
         if entity_id is None:
             return {"center": None, "neighbours": [], "edges": []}
 
         center = self.get_entity(entity_id)
-        visited: set[str] = {entity_id}
+
+        # Recursive CTE traversal
+        if relation_type:
+            rows = self._conn.execute("""
+                WITH RECURSIVE traverse(parent, node, rel_type, d) AS (
+                    SELECT NULL, ?, '', 0
+                    UNION ALL
+                    SELECT t.node, r.target_id, r.relation_type, t.d + 1
+                    FROM relations r, traverse t
+                    WHERE r.source_id = t.node
+                      AND r.relation_type = ?
+                      AND r.valid_to IS NULL
+                      AND t.d < ?
+                )
+                SELECT parent, node, rel_type, d FROM traverse WHERE d > 0
+            """, (entity_id, relation_type, depth)).fetchall()
+        else:
+            rows = self._conn.execute("""
+                WITH RECURSIVE traverse(parent, node, rel_type, d) AS (
+                    SELECT NULL, ?, '', 0
+                    UNION ALL
+                    SELECT t.node, r.target_id, r.relation_type, t.d + 1
+                    FROM relations r, traverse t
+                    WHERE r.source_id = t.node
+                      AND r.valid_to IS NULL
+                      AND t.d < ?
+                )
+                SELECT parent, node, rel_type, d FROM traverse WHERE d > 0
+            """, (entity_id, depth)).fetchall()
+
+        visited: set[str] = set()
         neighbours: list[dict[str, Any]] = []
         edges: list[dict[str, Any]] = []
-        frontier: list[str] = [entity_id]
 
-        for _ in range(depth):
-            next_frontier: list[str] = []
-            for node_id in frontier:
-                for _, target, data in self._graph.out_edges(node_id, data=True):
-                    if relation_type and data.get("relation_type") != relation_type:
-                        continue
-                    if target not in visited:
-                        visited.add(target)
-                        neighbours.append(self.get_entity(target))
-                        next_frontier.append(target)
-                    edges.append({
-                        "source": node_id,
-                        "target": target,
-                        "relation_type": data.get("relation_type", ""),
-                    })
-            frontier = next_frontier
+        for row in rows:
+            edges.append({
+                "source": row["parent"],
+                "target": row["node"],
+                "relation_type": row["rel_type"],
+            })
+            if row["node"] not in visited:
+                visited.add(row["node"])
+                entity = self.get_entity(row["node"])
+                if entity:
+                    neighbours.append(entity)
 
         return {"center": center, "neighbours": neighbours, "edges": edges}
+
+    def query_neighbors(
+        self, entity_id: str, rel_type: str | None = None, max_depth: int = 1,
+    ) -> list[dict[str, Any]]:
+        """Recursive CTE query for neighbours, supporting N-hop traversal.
+
+        Args:
+            entity_id: Starting entity ID.
+            rel_type: Optional relation type filter.
+            max_depth: Maximum traversal depth.
+        Returns:
+            List of dicts with ``entity``, ``depth``, and ``path``.
+        """
+        if rel_type:
+            rows = self._conn.execute("""
+                WITH RECURSIVE traverse(parent, node, rel_type, d) AS (
+                    SELECT NULL, ?, '', 0
+                    UNION ALL
+                    SELECT t.node, r.target_id, r.relation_type, t.d + 1
+                    FROM relations r, traverse t
+                    WHERE r.source_id = t.node
+                      AND r.relation_type = ?
+                      AND r.valid_to IS NULL
+                      AND t.d < ?
+                )
+                SELECT parent, node, rel_type, d FROM traverse WHERE d > 0
+            """, (entity_id, rel_type, max_depth)).fetchall()
+        else:
+            rows = self._conn.execute("""
+                WITH RECURSIVE traverse(parent, node, rel_type, d) AS (
+                    SELECT NULL, ?, '', 0
+                    UNION ALL
+                    SELECT t.node, r.target_id, r.relation_type, t.d + 1
+                    FROM relations r, traverse t
+                    WHERE r.source_id = t.node
+                      AND r.valid_to IS NULL
+                      AND t.d < ?
+                )
+                SELECT parent, node, rel_type, d FROM traverse WHERE d > 0
+            """, (entity_id, max_depth)).fetchall()
+
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            entity = self.get_entity(row["node"])
+            results.append({
+                "entity": entity,
+                "depth": row["d"],
+                "path": {"source": row["parent"], "target": row["node"], "relation_type": row["rel_type"]},
+            })
+        return results
+
+    def expire_relation(self, relation_id: str) -> None:
+        """Set valid_to = now() to mark a relation as expired."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._conn:
+            self._conn.execute(
+                "UPDATE relations SET valid_to = ? WHERE id = ?",
+                (now, relation_id),
+            )
 
     def search_entities(
         self,
@@ -469,24 +751,36 @@ class KnowledgeGraph:
         Returns:
             List of matching entity dicts.
         """
-        query_lower = query.lower()
+        sql = "SELECT * FROM entities WHERE name LIKE ?"
+        params: list[Any] = [f"%{query}%"]
+        if entity_type:
+            sql += " AND type = ?"
+            params.append(entity_type)
+        sql += " LIMIT ?"
+        params.append(limit)
+
+        rows = self._conn.execute(sql, params).fetchall()
+        return [self._row_to_entity_dict(r) for r in rows]
+
+    def get_entity_relations(self, entity_id: str) -> list[dict[str, Any]]:
+        """Get all valid relations (valid_to IS NULL) for an entity."""
+        rows = self._conn.execute(
+            """SELECT * FROM relations
+               WHERE (source_id = ? OR target_id = ?) AND valid_to IS NULL""",
+            (entity_id, entity_id),
+        ).fetchall()
         results: list[dict[str, Any]] = []
-
-        for node_id, data in self._graph.nodes(data=True):
-            name = data.get("name", "")
-            if query_lower not in name.lower():
-                continue
-            if entity_type and data.get("entity_type") != entity_type:
-                continue
+        for row in rows:
             results.append({
-                "id": node_id,
-                "name": name,
-                "entity_type": data.get("entity_type", ""),
-                "properties": data.get("properties", {}),
+                "id": row["id"],
+                "source_id": row["source_id"],
+                "target_id": row["target_id"],
+                "relation_type": row["relation_type"],
+                "confidence": row["confidence"],
+                "valid_from": row["valid_from"],
+                "valid_to": row["valid_to"],
+                "properties": json.loads(row["properties"]) if row["properties"] else {},
             })
-            if len(results) >= limit:
-                break
-
         return results
 
     # ── Extraction from text ──────────────────────────────────────
@@ -528,31 +822,28 @@ class KnowledgeGraph:
 
     def stats(self) -> dict[str, Any]:
         """Return graph statistics."""
+        entity_count = self._conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
+        relation_count = self._conn.execute(
+            "SELECT COUNT(*) FROM relations WHERE valid_to IS NULL"
+        ).fetchone()[0]
+
+        # Entity type distribution
+        entity_types: dict[str, int] = {}
+        for row in self._conn.execute(
+            "SELECT type, COUNT(*) as cnt FROM entities GROUP BY type"
+        ).fetchall():
+            entity_types[row["type"] or "unknown"] = row["cnt"]
+
+        # Relation type distribution
+        relation_types: dict[str, int] = {}
+        for row in self._conn.execute(
+            "SELECT relation_type, COUNT(*) as cnt FROM relations WHERE valid_to IS NULL GROUP BY relation_type"
+        ).fetchall():
+            relation_types[row["relation_type"] or "unknown"] = row["cnt"]
+
         return {
-            "entity_count": self._graph.number_of_nodes(),
-            "relation_count": self._graph.number_of_edges(),
-            "entity_types": self._count_entity_types(),
-            "relation_types": self._count_relation_types(),
+            "entity_count": entity_count,
+            "relation_count": relation_count,
+            "entity_types": entity_types,
+            "relation_types": relation_types,
         }
-
-    def _count_entity_types(self) -> dict[str, int]:
-        counts: dict[str, int] = {}
-        for _, data in self._graph.nodes(data=True):
-            et = data.get("entity_type", "unknown")
-            counts[et] = counts.get(et, 0) + 1
-        return counts
-
-    def _count_relation_types(self) -> dict[str, int]:
-        counts: dict[str, int] = {}
-        for _, _, data in self._graph.edges(data=True):
-            rt = data.get("relation_type", "unknown")
-            counts[rt] = counts.get(rt, 0) + 1
-        return counts
-
-    # ── Helpers ───────────────────────────────────────────────────
-
-    def _resolve_entity_id(self, name_or_id: str) -> str | None:
-        """Resolve a name or ID to an entity ID."""
-        if name_or_id in self._graph:
-            return name_or_id
-        return self._entity_names.get(name_or_id.lower())

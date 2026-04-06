@@ -2,6 +2,7 @@
 
 from src.memory.service import MemoryService
 from src.memory.store import InMemoryStore
+from src.memory.sqlitestore import SQLiteStore
 from src.memory.types import (
     MemoryItem,
     MemoryRef,
@@ -21,6 +22,7 @@ from src.memory.permissions import (
 __all__ = [
     "MemoryService",
     "InMemoryStore",
+    "SQLiteStore",
     "MemoryItem",
     "MemoryRef",
     "MemoryBlock",

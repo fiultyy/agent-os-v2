@@ -13,6 +13,7 @@ import os
 import re as _re
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, AsyncGenerator
 
 import httpx
@@ -22,7 +23,7 @@ from pydantic import BaseModel
 
 from src.graph import StateGraph, GraphState, InMemoryCheckpointStore
 from src.graph.nodes import FunctionNode
-from src.memory import MemoryService, InMemoryStore, MemoryType, MemoryScope
+from src.memory import MemoryService, InMemoryStore, SQLiteStore, MemoryType, MemoryScope
 from src.memory.permissions import PermissionManager, PermissionLevel
 from src.memory.knowledge_graph import KnowledgeGraph
 from src.memory.vector import FAISSVectorStore
@@ -163,7 +164,8 @@ async def _start_forgetting_sweep() -> None:
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
-    """Graceful shutdown: close database connections and release resources."""
+    """Graceful shutdown: persist FAISS index, close database connections."""
+    _vector_store.save()
     if _pg_store is not None:
         await _pg_store.close()
     await _communication_bus.close()
@@ -172,8 +174,8 @@ async def _shutdown() -> None:
 _embedding_provider = SentenceTransformerProvider()
 _vector_store = FAISSVectorStore(provider=_embedding_provider)
 
-# Memory service with vector store enabled
-_memory_service = MemoryService(InMemoryStore(), vector_store=_vector_store)
+# Memory service with SQLiteStore for persistence
+_memory_service = MemoryService(SQLiteStore(), vector_store=_vector_store)
 
 # Context compression components
 _context_monitor = ContextMonitor()
@@ -189,6 +191,9 @@ _context_compiler = ContextCompiler(_context_manager)
 _tool_executor = ToolExecutor(ToolRegistry())
 _communication_bus = CommunicationBus()
 _concurrency_controller = ConcurrencyController()
+# Ensure data directory exists for SQLite databases
+Path("data").mkdir(exist_ok=True)
+
 _knowledge_graph = KnowledgeGraph()
 
 # Execution log for debug/replay (in-memory, capped)
