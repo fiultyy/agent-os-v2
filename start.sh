@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ── Fix miniconda sqlite3 compatibility ─────────────────────
+# miniconda ships sqlite3 3.40 which lacks sqlite3_deserialize;
+# prefer the system library when available.
+if [ -f /lib/x86_64-linux-gnu/libsqlite3.so.0 ]; then
+  export LD_PRELOAD="/lib/x86_64-linux-gnu/libsqlite3.so.0${LD_PRELOAD:+:$LD_PRELOAD}"
+fi
+
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 

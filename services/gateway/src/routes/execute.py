@@ -13,6 +13,13 @@ async def execute(request: Request) -> StreamingResponse:
     """Proxy execute request to orchestrator, streaming SSE events back."""
     body = await request.json()
 
+    # ── Field mapping: accept "message" as "input" ───────────
+    # Frontend/curl may send {"message": "..."} while the
+    # orchestrator expects {"input": "..."}.  Normalise here
+    # (BFF responsibility) so both field names work.
+    if "message" in body and "input" not in body:
+        body["input"] = body["message"]
+
     async def stream_events():
         async with http_client.stream(
             "POST",
