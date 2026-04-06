@@ -299,18 +299,19 @@ Global — 跨项目通用知识（KG）
 - **独立 Memory 面板（完整）**: 四层全可见 + score + 来源 + 压缩/遗忘历史
 - **调试模式**: 开关显示所有状态变化事件流
 
-### D-11: KG 层选型 ✅
-- **决策**: Graphiti + Neo4j
-- **核心价值**: 时序事实追踪（valid_at/invalid_at），事实变化有历史版本
-- **集成**: LangGraph 有官方 `GraphitiMemoryAgent`
-- **Schema**: 通用 Graphiti schema + attributes 扩展（不定制节点类型）
+### D-11: KG 层选型 ✅ (2026-04-06 更新)
+- **决策**: 轻量 SQLite KG（万级节点以下）→ 预留 Neo4j 迁移路径
+- **核心价值**: 时序事实追踪（valid_from/valid_to），事实变化有历史版本
+- **实现**: SQLite 两张表（entities + relations），properties 用 JSON 扩展
+- **查询**: JOIN + 递归 CTE 实现图遍历，支持 N 跳
+- **迁移路径**: 接口抽象化，未来可无缝切换 Neo4j
 
-### D-12: 存储介质演进 ✅
-| 阶段 | 存储 | 向量 | KG | 周期 |
+### D-12: 存储介质演进 ✅ (2026-04-06 更新)
+| 阶段 | 存储 | 向量 | KG | 状态 |
 |------|------|------|-----|------|
-| MVP | SQLite + sqlite-vec | sqlite-vec | 无 | 2-3 周 |
-| V1 | SQLite + sqlite-vec | sqlite-vec | Graphiti + Neo4j | 4-6 周 |
-| V2 | PostgreSQL + pgvector | pgvector | Graphiti + Neo4j | 6-8 周 |
+| MVP ✅ | InMemoryStore + FAISS 内存 | FAISS (faiss-cpu) | 无 | 已完成 |
+| V1 (当前) | SQLiteStore + FAISS 文件持久化 | FAISS (read/write_index) | SQLite KG (entities + relations) | 实施中 |
+| V2 | PostgreSQL + pgvector | pgvector | Neo4j（可选，10万+节点时） | 远期 |
 
 ### 待讨论
 - 记忆版本控制（每条记忆保留 N 个历史版本，支持 rollback）

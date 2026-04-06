@@ -29,6 +29,18 @@
 - **影响**: 无（抽象基类标准模式）
 - **备注**: 可改为 ABC + @abstractmethod 更规范
 
+### TD-005: InMemoryStore 无持久化
+- **文件**: `services/orchestrator/src/memory/store.py`
+- **问题**: 所有数据在内存中，重启丢失
+- **影响**: 无法用于生产
+- **修复**: Phase 9 SQLiteStore 替代
+
+### TD-006: JWT 黑名单内存存储
+- **文件**: `services/gateway/src/routes/auth.py:30`
+- **问题**: `_revoked_jtis` 是内存 set，重启丢失
+- **影响**: 重启后已吊销的 refresh token 可重用
+- **修复**: Phase 9 SQLite 持久化
+
 ## 已解决
 
 ### ✅ TD-R1: engine.py 绕过 StateGraph (已修复 round 1)
