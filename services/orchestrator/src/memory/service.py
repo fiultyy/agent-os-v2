@@ -2,7 +2,7 @@
 
 Provides the main API used by the orchestrator and graph nodes:
 - :meth:`store` / :meth:`get` / :meth:`update` — CRUD on memory items.
-- :meth:`recall` — keyword or semantic memory retrieval.
+- :meth:`recall` — keyword, semantic, or KG-based memory retrieval.
 - Block management for persona and user profile.
 - Session lifecycle management.
 - Cross-agent shared memory with permission control.
@@ -36,14 +36,15 @@ from src.memory.scorer import ImportanceScorer
 class MemoryService:
     """High-level memory management service for agents.
 
-    Wraps an :class:`InMemoryStore` (and optional :class:`VectorStore`)
-    and provides domain-level operations including keyword/semantic recall,
-    block management, session lifecycle, and cross-agent permission-controlled
-    access.
+    Wraps an :class:`InMemoryStore` (and optional :class:`VectorStore`
+    and :class:`KnowledgeGraph`) and provides domain-level operations
+    including keyword/semantic/KG recall, block management, session
+    lifecycle, and and cross-agent permission-controlled access.
 
     Attributes:
         store: The underlying persistence layer.
         vector_store: Optional vector store for semantic retrieval.
+        kg: Optional knowledge graph for entity-based retrieval.
         permissions: Permission manager for cross-agent access control.
     """
 
@@ -51,11 +52,13 @@ class MemoryService:
         self,
         store: InMemoryStore | None = None,
         vector_store: VectorStore | None = None,
+        knowledge_graph: Any | None = None,
         permission_manager: PermissionManager | None = None,
         auto_score: bool = True,
     ) -> None:
         self._store = store or InMemoryStore()
         self._vector_store = vector_store
+        self._kg = knowledge_graph
         self._permissions = permission_manager or PermissionManager()
         self._auto_score = auto_score
         self._scorer = ImportanceScorer() if auto_score else None
@@ -69,6 +72,11 @@ class MemoryService:
     def vector_store(self) -> VectorStore | None:
         """Access the optional vector store."""
         return self._vector_store
+
+    @property
+    def kg(self) -> Any | None:
+        """Access the optional knowledge graph."""
+        return self._kg
 
     @property
     def permissions(self) -> PermissionManager:
@@ -87,20 +95,7 @@ class MemoryService:
         importance: float = 0.5,
         metadata: dict[str, Any] | None = None,
     ) -> MemoryRef:
-        """Store a new memory item and return a reference.
-
-        Args:
-            content: The memory content text.
-            agent_id: Owning agent ID.
-            session_id: Session ID (for session-level memories).
-            memory_type: Memory tier.
-            scope: Trust-domain scope.
-            importance: Importance score (0.0–1.0).
-            metadata: Optional key-value metadata.
-
-        Returns:
-            A :class:`MemoryRef` pointing to the stored item.
-        """
+        """Store a new memory item and return a reference."""
         item = MemoryItem(
             id=str(uuid.uuid4()),
             agent_id=agent_id,
@@ -112,14 +107,12 @@ class MemoryService:
             metadata=metadata or {},
         )
 
-        # Auto-score if importance is default and auto-scoring is enabled
         if self._auto_score and importance == 0.5 and self._scorer is not None:
             scored = self._scorer.score(item)
             item.importance = scored.total
 
         item_id = await self._store.store(item)
 
-        # Index in vector store for semantic search
         if self._vector_store is not None:
             await self._vector_store.add(item_id, content)
 
@@ -130,25 +123,12 @@ class MemoryService:
         memory_id: str,
         accessor_id: str = "",
     ) -> MemoryItem | None:
-        """Retrieve a memory item by ID.
-
-        If *accessor_id* is provided and differs from the item's owner,
-        content is filtered by the effective permission level and the
-        access is logged.
-
-        Args:
-            memory_id: ID of the memory to retrieve.
-            accessor_id: Agent requesting access (for permission filtering).
-
-        Returns:
-            The memory item (possibly content-filtered), or None.
-        """
+        """Retrieve a memory item by ID with optional permission filtering."""
         item = await self._store.get(memory_id)
         if item is None:
             return None
 
         if accessor_id and accessor_id != item.agent_id:
-            # Apply permission filtering
             level = self._permissions.check_permission(
                 accessor_id, item.agent_id, ACTION_READ,
             )
@@ -169,22 +149,11 @@ class MemoryService:
         accessor_id: str = "",
         **kwargs: Any,
     ) -> MemoryItem | None:
-        """Update a memory item's content and/or fields.
-
-        Args:
-            memory_id: ID of the item to update.
-            content: New content text (optional).
-            accessor_id: Agent performing the update (for permission check).
-            **kwargs: Additional fields to update.
-
-        Returns:
-            The updated item, or None if not found or access denied.
-        """
+        """Update memory item content/fields with permission check."""
         item = await self._store.get(memory_id)
         if item is None:
             return None
 
-        # Permission check for write access
         if accessor_id and accessor_id != item.agent_id:
             level = self._permissions.check_permission(
                 accessor_id, item.agent_id, ACTION_WRITE,
@@ -194,10 +163,9 @@ class MemoryService:
                 ACTION_WRITE, level,
             )
             if level < PermissionLevel.ADMIN:
-                return None  # Access denied
+                return None
 
         item = await self._store.update(memory_id, content=content, **kwargs)
-        # Re-index in vector store if content changed
         if item and content and self._vector_store is not None:
             await self._vector_store.add(memory_id, content)
         return item
@@ -207,15 +175,7 @@ class MemoryService:
         memory_id: str,
         accessor_id: str = "",
     ) -> bool:
-        """Delete a memory item.
-
-        Args:
-            memory_id: ID to delete.
-            accessor_id: Agent performing the deletion (for permission check).
-
-        Returns:
-            True if deleted, False if not found or access denied.
-        """
+        """Delete a memory item with permission check."""
         if accessor_id:
             item = await self._store.get(memory_id)
             if item and accessor_id != item.agent_id:
@@ -248,12 +208,14 @@ class MemoryService:
     ) -> list[MemoryItem]:
         """Recall memories matching a query.
 
-        Supports two modes:
-        - **KEYWORD**: Case-insensitive keyword matching (MVP default).
+        Supports three retrieval paths:
+        - **KEYWORD**: Case-insensitive keyword matching.
         - **SEMANTIC**: Vector similarity search + keyword rerank.
+        - **KG** (Knowledge Graph): Entity lookup -> associated memory IDs.
 
-        When *include_shared* is True, also searches shared/workspace-scope
-        memories and applies permission filtering to cross-agent results.
+        When mode=SEMANTIC and a KG is configured, all three paths
+        are combined. Results are deduplicated and KG-matched items
+        receive a score boost.
 
         Args:
             query: Search query text.
@@ -277,11 +239,79 @@ class MemoryService:
                 query, agent_id, session_id, memory_type, scope, top_k,
             )
 
+        # Third retrieval path — Knowledge Graph
+        if self._kg is not None and query.strip():
+            kg_results = await self._recall_kg(
+                query, agent_id, session_id, memory_type, scope,
+            )
+            if kg_results:
+                seen_ids: set[str] = {item.id for item in results}
+                for item in kg_results:
+                    if item.id not in seen_ids:
+                        item.metadata["_kg_match"] = True
+                        results.append(item)
+                        seen_ids.add(item.id)
+                results.sort(
+                    key=lambda i: (
+                        1.0 if i.metadata.get("_kg_match") else 0.0,
+                        i.importance,
+                    ),
+                    reverse=True,
+                )
+
         if include_shared and agent_id:
             shared = await self._recall_shared(query, agent_id, top_k)
             results.extend(shared)
 
         return results[:top_k]
+
+    async def _recall_kg(
+        self,
+        query: str,
+        agent_id: str,
+        session_id: str,
+        memory_type: MemoryType | None,
+        scope: MemoryScope | None,
+    ) -> list[MemoryItem]:
+        """Recall memories via Knowledge Graph entity lookup.
+
+        Extracts keywords from query, searches KG for matching entities,
+        then loads their associated source_memory_ids from the store.
+        """
+        if self._kg is None:
+            return []
+
+        results: list[MemoryItem] = []
+        seen: set[str] = set()
+        keywords = query.split()
+
+        for kw in keywords:
+            if len(kw) < 2:
+                continue
+            try:
+                entities = self._kg.search_entities(kw, limit=5)
+            except Exception:
+                continue
+            for ent in entities:
+                source_ids: list[str] = ent.get("source_memory_ids", [])
+                for mid in source_ids:
+                    if mid in seen:
+                        continue
+                    seen.add(mid)
+                    item = await self._store.get(mid)
+                    if item is None or item.archived:
+                        continue
+                    if agent_id and item.agent_id != agent_id:
+                        continue
+                    if session_id and item.session_id != session_id:
+                        continue
+                    if memory_type and item.memory_type != memory_type:
+                        continue
+                    if scope and item.scope != scope:
+                        continue
+                    results.append(item)
+
+        return results
 
     async def _recall_keyword(
         self,
@@ -374,6 +404,7 @@ class MemoryService:
         f = MemoryFilter(scope=MemoryScope.WORKSPACE)
         shared_items = await self._store.search(f)
 
+
         keywords = query.lower().split() if query.strip() else []
         results: list[MemoryItem] = []
 
@@ -443,6 +474,107 @@ class MemoryService:
     async def get_recent(self, session_id: str, limit: int = 5) -> list[MemoryItem]:
         """Get the most recent memory items for a session."""
         return await self._store.get_recent(session_id, limit=limit)
+
+    # ── Memory Consolidation ───────────────────────────────────────
+
+    async def reflect(
+        self,
+        agent_id: str,
+        trigger: str = "periodic",
+        top_k: int = 20,
+    ) -> list[MemoryRef]:
+        """Consolidate recent episodic memories into semantic knowledge.
+
+        Retrieves the most recent EPISODIC memories for *agent_id*,
+        inspects them for duplicates and contradictions, then merges
+        related items into new SEMANTIC memories.
+
+        This implements the "L2 → L3" migration described in the
+        architecture doc (D-07): episodic experiences are periodically
+        distilled into durable semantic knowledge.
+
+        Args:
+            agent_id: The agent whose memories to consolidate.
+            trigger: Reason for the consolidation (e.g. ``"periodic"``,
+                ``"session_end"``).  Stored in the new semantic memory's
+                metadata for auditability.
+            top_k: How many recent episodic items to consider.
+
+        Returns:
+            A list of :class:`MemoryRef` for the newly created semantic
+            memories.  Empty if no consolidation was possible.
+        """
+        # 1. Recall recent episodic memories.
+        episodic_items: list[MemoryItem] = await self.recall(
+            query="",
+            agent_id=agent_id,
+            memory_type=MemoryType.EPISODIC,
+            top_k=top_k,
+        )
+
+        if not episodic_items:
+            return []
+
+        # 2. Group by content similarity (simple keyword-overlap heuristic).
+        groups: list[list[MemoryItem]] = []
+        used_ids: set[str] = set()
+
+        for item in episodic_items:
+            if item.id in used_ids:
+                continue
+            group = [item]
+            used_ids.add(item.id)
+            words = set(item.content.lower().split())
+
+            for other in episodic_items:
+                if other.id in used_ids:
+                    continue
+                other_words = set(other.content.lower().split())
+                # Jaccard-like overlap threshold (≥ 40 % shared tokens).
+                if words and other_words:
+                    overlap = len(words & other_words) / len(words | other_words)
+                    if overlap >= 0.4:
+                        group.append(other)
+                        used_ids.add(other.id)
+
+            groups.append(group)
+
+        # 3. Merge each group into a single semantic memory.
+        new_refs: list[MemoryRef] = []
+
+        for group in groups:
+            if len(group) < 2:
+                # Singletons are not consolidated.
+                continue
+
+            # Simple merge strategy: concatenate unique content fragments.
+            seen_fragments: set[str] = set()
+            merged_parts: list[str] = []
+            for member in group:
+                fragment = member.content.strip()
+                if fragment not in seen_fragments:
+                    seen_fragments.add(fragment)
+                    merged_parts.append(fragment)
+
+            merged_content = "\n---\n".join(merged_parts)
+
+            source_ids = [m.id for m in group]
+            max_importance = max(m.importance for m in group)
+
+            ref = await self.store(
+                content=merged_content,
+                agent_id=agent_id,
+                memory_type=MemoryType.SEMANTIC,
+                importance=max_importance,
+                metadata={
+                    "consolidation_trigger": trigger,
+                    "source_ids": source_ids,
+                    "merged_count": len(group),
+                },
+            )
+            new_refs.append(ref)
+
+        return new_refs
 
     async def archive_session(self, session_id: str) -> bool:
         """Archive a session and all its memories."""

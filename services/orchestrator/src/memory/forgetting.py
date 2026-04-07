@@ -43,17 +43,23 @@ class ActiveForgetting:
         print(f"Archived {result.archived} of {result.scanned} memories")
     """
 
+    #: Default number of sweep rounds before a safety-protected item
+    #: becomes eligible for normal forgetting logic.
+    DEFAULT_SAFETY_TURNS: int = 4
+
     def __init__(
         self,
         memory_service: MemoryService,
         scorer: ImportanceScorer | None = None,
         forget_threshold: float = 0.1,
         min_age_hours: float = 24.0,
+        default_safety_turns: int = 4,
     ) -> None:
         self._memory = memory_service
         self._scorer = scorer or ImportanceScorer(forget_threshold=forget_threshold)
         self._forget_threshold = forget_threshold
         self._min_age_hours = min_age_hours
+        self._default_safety_turns = default_safety_turns
 
     async def run_sweep(
         self,
@@ -86,10 +92,42 @@ class ActiveForgetting:
             if item.archived:
                 continue
 
-            # Check safety deadline - skip recently created tool results
+            # ── Safety-deadline turn counter ─────────────────────────
+            # Items with ``safety_deadline`` are protected from forgetting
+            # for a configurable number of sweep rounds.  Each sweep
+            # decrements ``safety_turns_remaining``; when it reaches 0 the
+            # protection is lifted and normal scoring applies.
             if item.metadata.get("safety_deadline"):
-                result.skipped_above_threshold += 1
-                continue
+                turns_left = item.metadata.get("safety_turns_remaining")
+                if turns_left is None:
+                    # Legacy items that only had the boolean flag —
+                    # initialise the counter with the default value.
+                    turns_left = self._default_safety_turns
+
+                turns_left -= 1
+                if turns_left > 0:
+                    # Still protected — persist decremented counter.
+                    await self._memory.update(
+                        item.id,
+                        metadata={
+                            **item.metadata,
+                            "safety_turns_remaining": turns_left,
+                        },
+                    )
+                    result.skipped_above_threshold += 1
+                    continue
+                else:
+                    # Safety window expired — remove flag so the item
+                    # participates in normal importance scoring below.
+                    await self._memory.update(
+                        item.id,
+                        metadata={
+                            **item.metadata,
+                            "safety_deadline": False,
+                            "safety_turns_remaining": 0,
+                        },
+                    )
+                    # Fall through to importance check below.
 
             # Check importance score
             score = self._scorer.score(item)

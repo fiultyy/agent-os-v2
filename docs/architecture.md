@@ -1,6 +1,6 @@
 # Agent OS Architecture
 
-> Last updated: 2026-04-02
+> Last updated: 2026-04-07
 > Research references: RESEARCH-orchestration-core.md, RESEARCH-framework-comparison.md, RESEARCH-memory-subsystem-design.md, RESEARCH-agent-memory.md
 
 ## Runtime Architecture
@@ -94,12 +94,12 @@ await memory.update(memory_id, content, merge_strategy)     → MemoryRef
 
 # Read
 await memory.recall(query, top_k, scope, strategy)          → list[MemoryItem]
-await memory.search(query, filters, scope)                  → list[MemoryItem]
+await memory.search(query, filters, scope)                  → list[MemoryItem]  # alias: recall(mode=KEYWORD)
 
 # Management
 await memory.compress(target, strategy)                     → MemoryRef
 await memory.forget(memory_id, reason, mode)                → None
-await memory.reflect(trigger)                                → list[MemoryRef]
+await memory.reflect(agent_id, trigger)                     → list[MemoryRef]   # episodic→semantic consolidation
 ```
 
 ### Compression Triggers
@@ -117,9 +117,9 @@ Five dimensions with configurable weight templates per Agent type:
 
 ```python
 WEIGHT_TEMPLATES = {
-    "coding":    {"relevance": 0.20, "recency": 0.20, "uniqueness": 0.20, "confidence": 0.30, "frequency": 0.10},
-    "research":  {"relevance": 0.25, "recency": 0.30, "uniqueness": 0.20, "confidence": 0.15, "frequency": 0.10},
-    "assistant": {"relevance": 0.40, "recency": 0.20, "uniqueness": 0.15, "confidence": 0.15, "frequency": 0.10},
+    "research":  {"recency": 0.15, "frequency": 0.10, "relevance": 0.40, "emotional_weight": 0.10, "actionability": 0.25},
+    "coding":    {"recency": 0.20, "frequency": 0.20, "relevance": 0.30, "emotional_weight": 0.05, "actionability": 0.25},
+    "general":   {"recency": 0.25, "frequency": 0.15, "relevance": 0.25, "emotional_weight": 0.15, "actionability": 0.20},
 }
 ```
 
@@ -136,7 +136,8 @@ Agent      — Per-Agent isolated Working Memory, communication only via Communi
 
 ### Tool Result Lifecycle
 
-- New tool results enter "safety window" (3-5 inference turns, cannot be forgotten)
+- New tool results enter "safety window" with a turn counter (default: 4 sweeps, cannot be forgotten)
+- Each `ActiveForgetting.run_sweep()` decrements `safety_turns_remaining`; at 0 the `safety_deadline` flag is cleared
 - After safety window: participate in importance scoring, below threshold → forget
 - **Key rule**: `result` (temporary) can be discarded; `reasoning_context` (why called, what decision) is permanent
 - Reference: ReasoningBank — "failure experience is more valuable than success"
@@ -281,23 +282,25 @@ Global — 跨项目通用知识（KG）
 | Episodic → Semantic | 异步定时 | Heartbeat/Cron | 不抢推理资源 |
 
 ### D-08: 重要性评分 ✅
-- **五维度**: relevance(0.30) + recency(0.25) + uniqueness(0.20) + confidence(0.15) + frequency(0.10)
+- **五维度**: recency(0.25) + frequency(0.15) + relevance(0.25) + emotional_weight(0.15) + actionability(0.20)
 - **权重可配置模板**:
-  - coding: confidence 优先 (0.30)
-  - research: recency 优先 (0.30)
-  - assistant: relevance 优先 (0.40)
-- **评分策略**: 写入时初评 → 访问时增量 → 定时全量重评
-指数衰减）
+  - RESEARCH: relevance 优先 (0.40), actionability (0.25), recency (0.15)
+  - CODING: relevance (0.30), recency (0.20), frequency (0.20), actionability (0.25)
+  - GENERAL: 均衡分布 (recency 0.25, relevance 0.25, actionability 0.20, emotional_weight 0.15, frequency 0.15)
+- **评分策略**: 写入时初评 → 访问时增量 → 定时全量重评（指数衰减）
 
 ### D-09: 工具结果生命周期 ✅
-- **方案**: C + 安全期（3-5 轮推理不可遗忘）
+- **方案**: 安全期轮次计数器（默认 4 轮 sweep 后解除保护，进入正常重要性评分）
+- **实现**: `ActiveForgetting.run_sweep()` 每次递减 `safety_turns_remaining`，到 0 时移除 `safety_deadline` 标记
 - **推理链绑定**: result(可丢) + reasoning_context(永久保留)
 - **参考**: ReasoningBank "失败经验比成功经验更有价值"
 
 ### D-10: 前端记忆可视化 ✅
-- **Agent 节点面板（轻量）**: Working Memory 大小 + 最近 3 条摘要 + "更多"跳转
 - **独立 Memory 面板（完整）**: 四层全可见 + score + 来源 + 压缩/遗忘历史
 - **调试模式**: 开关显示所有状态变化事件流
+- **V2 计划**:
+  - Agent 节点面板（轻量）: Working Memory 大小 + 最近 3 条摘要 + "更多"跳转
+  - 事件历史时间线: 可视化压缩/遗忘/迁移事件流
 
 ### D-11: KG 层选型 ✅ (2026-04-06 更新)
 - **决策**: 轻量 SQLite KG（万级节点以下）→ 预留 Neo4j 迁移路径
