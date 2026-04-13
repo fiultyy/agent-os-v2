@@ -1,0 +1,11 @@
+name: browser
+version: 1.0.0
+description: Browser automation skill (navigate, snapshot, click, type)
+author: builtin
+skill_type: builtin
+tools:
+  - browser_navigate
+  - browser_snapshot
+  - browser_click
+  - browser_type
+dependencies: []

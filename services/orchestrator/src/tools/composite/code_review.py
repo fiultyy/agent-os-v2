@@ -14,8 +14,8 @@ code_review - 代码审查工作流
 from typing import Dict, Any, List, Optional
 
 # 导入 code skill 工具
-from ..skill.code.read import code_read
-from ..skill.code.search import code_search
+from ...skills.code.read import code_read
+from ...skills.code.search import code_search
 
 
 # 安全检查模式

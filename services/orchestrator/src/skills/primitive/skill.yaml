@@ -1,0 +1,22 @@
+name: primitive
+version: 1.0.0
+description: Built-in primitive tools (HTTP, File, DB operations)
+author: builtin
+skill_type: builtin
+tools:
+  - http_get
+  - http_post
+  - http_put
+  - http_delete
+  - http_patch
+  - file_read
+  - file_write
+  - file_delete
+  - file_exists
+  - file_list
+  - file_mkdir
+  - db_query
+  - db_execute
+  - db_transaction
+  - db_schema
+dependencies: []

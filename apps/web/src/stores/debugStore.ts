@@ -29,6 +29,21 @@ export interface ExecutionEvent {
   metadata: Record<string, unknown>;
 }
 
+/** A single memory lifecycle event (compress / forget / migrate). */
+export interface MemoryEvent {
+  event: "compress" | "forget" | "migrate";
+  agentId?: string;
+  level?: string;
+  path?: string;
+  originalCount?: number;
+  retainedCount?: number;
+  summaryCount?: number;
+  scanned?: number;
+  archived?: number;
+  count?: number;
+  timestamp?: string;
+}
+
 interface DebugState {
   /** Whether debug mode is active. */
   debugMode: boolean;
@@ -36,12 +51,15 @@ interface DebugState {
   executionEvents: ExecutionEvent[];
   /** Communication messages. */
   messages: CommMessage[];
+  /** Memory lifecycle events (compress/forget/migrate). */
+  memoryEvents: MemoryEvent[];
   /** Currently replaying execution index (-1 = not replaying). */
   replayIndex: number;
 
   toggleDebugMode: () => void;
   addExecutionEvent: (event: ExecutionEvent) => void;
   addMessage: (msg: CommMessage) => void;
+  addMemoryEvent: (event: MemoryEvent) => void;
   setReplayIndex: (idx: number) => void;
   clearHistory: () => void;
 }
@@ -50,6 +68,7 @@ export const useDebugStore = create<DebugState>((set) => ({
   debugMode: false,
   executionEvents: [],
   messages: [],
+  memoryEvents: [],
   replayIndex: -1,
 
   toggleDebugMode: () => set((s) => ({ debugMode: !s.debugMode })),
@@ -60,7 +79,12 @@ export const useDebugStore = create<DebugState>((set) => ({
   addMessage: (msg) =>
     set((s) => ({ messages: [...s.messages, msg] })),
 
+  addMemoryEvent: (event) =>
+    set((s) => ({
+      memoryEvents: [...s.memoryEvents, { ...event, timestamp: new Date().toISOString() }],
+    })),
+
   setReplayIndex: (idx) => set({ replayIndex: idx }),
 
-  clearHistory: () => set({ executionEvents: [], messages: [], replayIndex: -1 }),
+  clearHistory: () => set({ executionEvents: [], messages: [], memoryEvents: [], replayIndex: -1 }),
 }));

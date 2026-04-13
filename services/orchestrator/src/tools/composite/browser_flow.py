@@ -15,10 +15,10 @@ browser_flow - 浏览器操作流程编排
 from typing import Dict, Any, List, Optional
 
 # 导入 browser skill 工具
-from ..skill.browser.navigate import browser_navigate
-from ..skill.browser.snapshot import browser_snapshot
-from ..skill.browser.click import browser_click
-from ..skill.browser.type import browser_type
+from ...skills.browser.navigate import browser_navigate
+from ...skills.browser.snapshot import browser_snapshot
+from ...skills.browser.click import browser_click
+from ...skills.browser.type import browser_type
 
 
 def browser_flow_execute(

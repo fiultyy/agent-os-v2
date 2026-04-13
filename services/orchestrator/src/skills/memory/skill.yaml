@@ -1,0 +1,11 @@
+name: memory
+version: 1.0.0
+description: Memory management skill (recall, store)
+author: builtin
+skill_type: builtin
+tools:
+  - memory_recall
+  - memory_store
+  - memory_delete
+  - memory_update
+dependencies: []

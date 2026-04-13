@@ -1,6 +1,6 @@
 "use client";
 
-import { useDebugStore, type ExecutionEvent } from "@/stores/debugStore";
+import { useDebugStore, type ExecutionEvent, type MemoryEvent } from "@/stores/debugStore";
 import {
   Bug,
   Play,
@@ -12,6 +12,9 @@ import {
   CheckCircle2,
   XCircle,
   Loader2,
+  Zap,
+  Brain,
+  ArrowRightLeft,
 } from "lucide-react";
 
 const STATUS_ICON: Record<string, React.ReactNode> = {
@@ -20,10 +23,41 @@ const STATUS_ICON: Record<string, React.ReactNode> = {
   error: <XCircle className="h-3.5 w-3.5 text-red-500" />,
 };
 
+const MEMORY_EVENT_ICON: Record<string, React.ReactNode> = {
+  compress: <Zap className="h-3 w-3 text-amber-500" />,
+  forget: <Brain className="h-3 w-3 text-purple-500" />,
+  migrate: <ArrowRightLeft className="h-3 w-3 text-cyan-500" />,
+};
+
+function MemoryEventCard({ evt }: { evt: MemoryEvent }) {
+  const label = evt.event;
+  const icon = MEMORY_EVENT_ICON[label] ?? <Zap className="h-3 w-3" />;
+  const agent = evt.agentId ? evt.agentId.slice(0, 8) : "—";
+
+  let detail = "";
+  if (label === "compress") {
+    detail = `${evt.originalCount ?? 0}→${evt.retainedCount ?? 0} (${evt.summaryCount ?? 0} summaries, ${evt.level ?? "?"})`;
+  } else if (label === "forget") {
+    detail = `scanned ${evt.scanned ?? 0}, archived ${evt.archived ?? 0}`;
+  } else if (label === "migrate") {
+    detail = `${evt.path ?? "?"}: ${evt.count ?? 0} items`;
+  }
+
+  return (
+    <div className="flex items-center gap-2 rounded bg-gray-50 px-3 py-1.5 text-xs">
+      {icon}
+      <span className="font-medium capitalize">{label}</span>
+      <span className="text-gray-500">agent:{agent}</span>
+      <span className="ml-auto text-gray-400">{detail}</span>
+    </div>
+  );
+}
+
 export function DebugPanel() {
   const debugMode = useDebugStore((s) => s.debugMode);
   const toggleDebugMode = useDebugStore((s) => s.toggleDebugMode);
   const events = useDebugStore((s) => s.executionEvents);
+  const memoryEvents = useDebugStore((s) => s.memoryEvents);
   const replayIndex = useDebugStore((s) => s.replayIndex);
   const setReplayIndex = useDebugStore((s) => s.setReplayIndex);
   const clearHistory = useDebugStore((s) => s.clearHistory);
@@ -121,9 +155,23 @@ export function DebugPanel() {
         </div>
       )}
 
+      {/* Memory lifecycle events */}
+      {memoryEvents.length > 0 && (
+        <div className="border-b">
+          <div className="px-4 py-2 text-xs font-semibold text-gray-500">
+            记忆事件 ({memoryEvents.length})
+          </div>
+          <div className="max-h-40 space-y-1 overflow-y-auto px-4 pb-3">
+            {[...memoryEvents].reverse().map((evt, idx) => (
+              <MemoryEventCard key={idx} evt={evt} />
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Event timeline */}
       <div className="flex-1 overflow-y-auto p-4">
-        {events.length === 0 ? (
+        {events.length === 0 && memoryEvents.length === 0 ? (
           <div className="py-8 text-center text-xs text-gray-400">
             {debugMode ? "等待执行事件..." : "开启调试模式以记录事件"}
           </div>

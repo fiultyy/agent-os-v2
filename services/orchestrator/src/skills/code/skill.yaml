@@ -1,0 +1,10 @@
+name: code
+version: 1.0.0
+description: Code manipulation skill (read, write, search)
+author: builtin
+skill_type: builtin
+tools:
+  - code_read
+  - code_write
+  - code_search
+dependencies: []
