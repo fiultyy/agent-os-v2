@@ -192,7 +192,7 @@ def code_review_run(
         seen = set()
         unique_issues = []
         for issue in issues:
-            key = f"{issue['file']}:{issue['line']}"
+            key = f"{issue['file']}:{issue['line']}:{issue.get('pattern', '')}"
             if key not in seen:
                 seen.add(key)
                 unique_issues.append(issue)

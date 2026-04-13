@@ -20,14 +20,17 @@ def browser_click(
     modifiers: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
-    点击页面元素
-    
+    点击页面元素 (STUB - 需要 Playwright 后端)
+
+    注意: 当前实现为模拟返回。
+    需要集成 playwright 或 selenium 才能真正执行浏览器操作。
+
     Args:
         selector: CSS 选择器或元素 ID (必填)
         button: 鼠标按钮，"left"/"right"/"middle"，默认 "left"
         click_count: 点击次数，默认 1
         modifiers: 按住的修饰键，["Shift", "Ctrl", "Alt", "Meta"] (可选)
-    
+
     Returns:
         {
             "success": bool,
@@ -36,7 +39,7 @@ def browser_click(
             "action": str,
             "error": str (if failed)
         }
-    
+
     Example:
         >>> result = browser_click("#submit-btn", button="left", click_count=1)
         >>> if result["success"]:

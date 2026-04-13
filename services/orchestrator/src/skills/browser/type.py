@@ -20,8 +20,11 @@ def browser_type(
     modifiers: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
-    向输入框输入文本
-    
+    向输入框输入文本 (STUB - 需要 Playwright 后端)
+
+    注意: 当前实现为模拟返回。
+    需要集成 playwright 或 selenium 才能真正执行浏览器输入操作。
+
     Args:
         selector: CSS 选择器或元素 ID (必填)
         text: 要输入的文本 (必填)
@@ -29,7 +32,7 @@ def browser_type(
         clear_first: 输入前是否清空，默认 True
         type_speed: 打字速度（字符/秒），0 表示瞬时输入，默认 0
         modifiers: 前置操作，如 ["Ctrl+A"] 全选后删除再输入 (可选)
-    
+
     Returns:
         {
             "success": bool,
@@ -39,12 +42,12 @@ def browser_type(
             "action": str,
             "error": str (if failed)
         }
-    
+
     Example:
         >>> result = browser_type("#search-input", "hello world")
         >>> if result["success"]:
         ...     print(f"Typed {result['chars_typed']} chars")
-        >>> 
+        >>>
         >>> # 全选后替换
         >>> result = browser_type("#input", "new text", modifiers=["Ctrl+A"], clear_first=True)
     """

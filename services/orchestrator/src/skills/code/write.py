@@ -77,9 +77,13 @@ def code_write(
         if atomic:
             # 原子写入：先写临时文件再重命名
             temp_path = p.with_suffix(p.suffix + ".tmp")
-            with open(temp_path, "w", encoding=encoding) as f:
-                bytes_written = f.write(content)
-            temp_path.rename(p)
+            try:
+                with open(temp_path, "w", encoding=encoding) as f:
+                    bytes_written = f.write(content)
+                temp_path.rename(p)
+            finally:
+                if temp_path.exists():
+                    temp_path.unlink()
         else:
             # 直接写入
             with open(p, "w", encoding=encoding) as f:

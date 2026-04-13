@@ -350,6 +350,12 @@ def browser_flow_snapshot_full(url: str) -> Dict[str, Any]:
     """
     nav_result = browser_navigate(url)
     if not nav_result["success"]:
-        return nav_result
-    
-    return browser_snapshot()
+        return {
+            "success": False,
+            "error": nav_result.get("error", "Navigation failed"),
+            "step": "navigate",
+        }
+
+    snapshot_result = browser_snapshot()
+    snapshot_result["step"] = "snapshot"
+    return snapshot_result

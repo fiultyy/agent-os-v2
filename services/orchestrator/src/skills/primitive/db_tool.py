@@ -111,10 +111,16 @@ def db_query(
         "rows": [],
         "error": None,
     }
-    
+
     if params is None:
         params = []
-    
+
+    # 只允许 SELECT 和 PRAGMA 语句
+    sql_upper = sql.strip().upper()
+    if not (sql_upper.startswith("SELECT") or sql_upper.startswith("PRAGMA")):
+        result["error"] = "Only SELECT and PRAGMA statements are allowed via db_query(). Use db_execute() for other operations."
+        return result
+
     try:
         with _get_connection(db_path) as conn:
             cursor = conn.cursor()

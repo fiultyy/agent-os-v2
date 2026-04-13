@@ -16,13 +16,16 @@ def browser_snapshot(
     include_html: bool = False,
 ) -> Dict[str, Any]:
     """
-    获取页面快照
-    
+    获取页面快照 (STUB - 需要 Playwright 后端)
+
+    注意: 当前实现为模拟返回。
+    需要集成 playwright 或 selenium 才能真正获取页面 DOM。
+
     Args:
         selector: CSS 选择器，用于限定快照范围（可选）
         max_elements: 最大返回元素数，默认 50
         include_html: 是否包含 HTML 内容，默认 False
-    
+
     Returns:
         {
             "success": bool,
@@ -31,7 +34,7 @@ def browser_snapshot(
             "html": str (if include_html=True),
             "error": str (if failed)
         }
-    
+
     Example:
         >>> result = browser_snapshot(selector="#main", max_elements=20)
         >>> if result["success"]:
