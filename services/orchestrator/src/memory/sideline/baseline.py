@@ -9,6 +9,7 @@ HermesWikiBaseline - Baseline 明文 wiki 搜索
 
 import logging
 import re
+from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
@@ -25,10 +26,13 @@ class HermesWikiBaseline:
     - 返回原始文本片段
     """
 
+    # LRU 缓存配置
+    _CACHE_MAXSIZE = 100
+
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = config or {}
         self.wiki_path = Path(self.config.get("wiki_path", "~/文档/kb/")).expanduser()
-        self._cache: Dict[str, List[str]] = {}  # filename -> lines
+        self._cache: OrderedDict[str, List[str]] = OrderedDict()  # LRU cache: filename -> lines
 
     def search(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
         """
@@ -111,15 +115,22 @@ class HermesWikiBaseline:
             return False
 
     def _read_lines(self, file_path: Path) -> List[str]:
-        """读取文件行（带缓存）"""
+        """读取文件行（带 LRU 缓存）"""
         key = str(file_path)
         if key not in self._cache:
             try:
                 with open(file_path, "r", encoding="utf-8") as f:
-                    self._cache[key] = f.readlines()
+                    lines = f.readlines()
             except Exception as e:
                 logger.warning(f"Failed to read file {file_path}: {e}")
-                self._cache[key] = []
+                lines = []
+            # 淘汰最旧条目
+            if len(self._cache) >= self._CACHE_MAXSIZE:
+                self._cache.popitem(last=False)
+            self._cache[key] = lines
+        else:
+            # 命中时移到末尾（最近使用）
+            self._cache.move_to_end(key)
         return self._cache[key]
 
     def _calc_relevance(self, line: str, query: str) -> float:

@@ -8,7 +8,7 @@ memory_store - 记忆存储
 """
 
 from typing import Dict, Any, Optional, List
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 def memory_store(
@@ -86,7 +86,7 @@ def memory_store(
     
     try:
         # 生成记忆 ID
-        timestamp = datetime.utcnow()
+        timestamp = datetime.now(timezone.utc)
         memory_id = f"mem_{timestamp.strftime('%Y%m%d%H%M%S')}_{hash(content) % 100000:05d}"
         
         result["memory_id"] = memory_id

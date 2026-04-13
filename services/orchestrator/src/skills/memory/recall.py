@@ -68,38 +68,24 @@ def memory_recall(
         return result
     
     try:
-        # 模拟检索结果
-        # 实际实现需要集成 Agent OS 的 MemoryService
-        mock_results = [
-            {
-                "id": "mem_001",
-                "content": "Architecture decision: Use Layer pattern for tool abstraction. D-13.",
-                "memory_type": "semantic",
-                "score": 0.95,
-                "timestamp": "2026-04-13T10:00:00Z",
-                "source": "context_compiler",
-            },
-            {
-                "id": "mem_002",
-                "content": "Remember: Always use Store Protocol for store implementations. D-12.",
-                "memory_type": "semantic",
-                "score": 0.88,
-                "timestamp": "2026-04-12T15:30:00Z",
-                "source": "design_notes",
-            },
-        ]
-        
-        # 应用过滤器
-        if filters:
-            if "memory_type" in filters:
-                mock_results = [r for r in mock_results if r["memory_type"] == filters["memory_type"]]
-            if "session_id" in filters:
-                mock_results = [r for r in mock_results if r.get("session_id") == filters["session_id"]]
-        
-        # 应用阈值
-        results = [r for r in mock_results if r["score"] >= threshold]
-        
-        result["results"] = results[:limit]
+        # 接入实际的 MemoryService
+        from src.memory.service import MemoryService
+
+        service = MemoryService()
+        raw_results = service.search(
+            query=query,
+            mode=mode,
+            limit=limit,
+            threshold=threshold,
+            filters=filters,
+        )
+
+        # 兼容：如果 MemoryService.search 返回 list 直接使用；
+        # 如果返回 dict 则取 results 字段
+        if isinstance(raw_results, dict):
+            raw_results = raw_results.get("results", [])
+
+        result["results"] = raw_results[:limit]
         result["count"] = len(result["results"])
         result["success"] = True
         

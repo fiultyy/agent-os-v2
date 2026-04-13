@@ -117,8 +117,15 @@ class SidelineMemoryAgent:
         return False
     
     def _similar_query(self, q1: str, q2: str) -> bool:
-        """简单查询相似度（字符串包含）"""
-        return q1.lower() in q2.lower() or q2.lower() in q1.lower()
+        """Jaccard 相似度匹配（替代子串匹配）"""
+        words1 = set(q1.lower().split())
+        words2 = set(q2.lower().split())
+        if not words1 or not words2:
+            return False
+        intersection = words1 & words2
+        union = words1 | words2
+        jaccard = len(intersection) / len(union) if union else 0
+        return jaccard > 0.4  # Jaccard 阈值 0.4
     
     def _classify(
         self,

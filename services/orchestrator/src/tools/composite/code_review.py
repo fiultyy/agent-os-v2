@@ -11,11 +11,55 @@ code_review - 代码审查工作流
 - 最佳实践（错误处理、日志）
 """
 
+import re
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 
-# 导入 code skill 工具
-from ...skills.code.read import code_read
-from ...skills.code.search import code_search
+
+def _find_python_files(path: str) -> List[str]:
+    """递归查找目录下所有 .py 文件"""
+    p = Path(path)
+    if p.is_file():
+        return [str(p)]
+    return [str(f) for f in p.rglob("*.py")]
+
+
+def _build_file_contents(path: str) -> Dict[str, str]:
+    """一次性读取所有文件内容到内存"""
+    file_contents = {}
+    for file_path in _find_python_files(path):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                file_contents[file_path] = f.read()
+        except Exception:
+            continue
+    return file_contents
+
+
+def _search_in_memory(
+    file_contents: Dict[str, str],
+    pattern: str,
+    max_results: int = 50,
+) -> List[Dict[str, Any]]:
+    """在内存中的文件内容上执行正则搜索"""
+    matches = []
+    for file_path, content in file_contents.items():
+        for match in re.finditer(pattern, content, re.MULTILINE):
+            line_num = content[:match.start()].count("\n") + 1
+            line_start = content.rfind("\n", 0, match.start()) + 1
+            line_end = content.find("\n", match.end())
+            line_content = content[line_start:line_end].strip()
+            matches.append({
+                "file": file_path,
+                "line": line_num,
+                "line_content": line_content,
+                "match_start": match.start(),
+            })
+            if len(matches) >= max_results:
+                break
+        if len(matches) >= max_results:
+            break
+    return matches
 
 
 # 安全检查模式
@@ -105,85 +149,45 @@ def code_review_run(
         check_types = ["security", "performance", "quality"]
     
     try:
-        # 读取代码
-        read_result = code_read(path, language=language)
-        if not read_result["success"]:
-            result["error"] = f"Failed to read file: {read_result.get('error')}"
-            return result
-        
-        language = read_result["language"]
-        lines = read_result["lines"]
-        total_lines = read_result["total_lines"]
-        
         # 收集问题
         issues = []
-        
-        # 安全检查
+
+        # 一次性读取所有文件内容
+        file_contents = _build_file_contents(path)
+        if not file_contents:
+            result["error"] = "No Python files found"
+            return result
+
+        # 统计总行数
+        total_lines = sum(content.count('\n') for content in file_contents.values())
+        detected_language = "python"
+
+        # 合并所有 pattern，统一在内存中搜索
+        all_patterns = []
         if "security" in check_types:
             for pattern, message in SECURITY_PATTERNS:
-                search_result = code_search(
-                    query=pattern,
-                    path=path,
-                    pattern_type="regex",
-                    context_lines=context_lines,
-                    max_results=max_issues,
-                )
-                if search_result["success"]:
-                    for match in search_result["matches"]:
-                        issues.append({
-                            "type": "security",
-                            "severity": "HIGH",
-                            "message": message,
-                            "file": match["file"],
-                            "line": match["line"],
-                            "line_content": match["line_content"],
-                            "pattern": pattern,
-                        })
-        
-        # 性能检查
+                all_patterns.append((pattern, message, "security", "HIGH"))
         if "performance" in check_types:
             for pattern, message in PERFORMANCE_PATTERNS:
-                search_result = code_search(
-                    query=pattern,
-                    path=path,
-                    pattern_type="regex",
-                    context_lines=context_lines,
-                    max_results=max_issues,
-                )
-                if search_result["success"]:
-                    for match in search_result["matches"]:
-                        issues.append({
-                            "type": "performance",
-                            "severity": "MEDIUM",
-                            "message": message,
-                            "file": match["file"],
-                            "line": match["line"],
-                            "line_content": match["line_content"],
-                            "pattern": pattern,
-                        })
-        
-        # 代码质量检查
+                all_patterns.append((pattern, message, "performance", "MEDIUM"))
         if "quality" in check_types:
             for pattern, message in QUALITY_PATTERNS:
-                search_result = code_search(
-                    query=pattern,
-                    path=path,
-                    pattern_type="regex",
-                    context_lines=context_lines,
-                    max_results=max_issues,
-                )
-                if search_result["success"]:
-                    for match in search_result["matches"]:
-                        issues.append({
-                            "type": "quality",
-                            "severity": "LOW",
-                            "message": message,
-                            "file": match["file"],
-                            "line": match["line"],
-                            "line_content": match["line_content"],
-                            "pattern": pattern,
-                        })
-        
+                all_patterns.append((pattern, message, "quality", "LOW"))
+
+        # 内存中执行所有 pattern 匹配
+        for pattern, message, issue_type, severity in all_patterns:
+            matches = _search_in_memory(file_contents, pattern, max_results=max_issues)
+            for match in matches:
+                issues.append({
+                    "type": issue_type,
+                    "severity": severity,
+                    "message": message,
+                    "file": match["file"],
+                    "line": match["line"],
+                    "line_content": match["line_content"],
+                    "pattern": pattern,
+                })
+
         # 去重（根据 file:line 组合）
         seen = set()
         unique_issues = []
@@ -192,10 +196,10 @@ def code_review_run(
             if key not in seen:
                 seen.add(key)
                 unique_issues.append(issue)
-        
+
         # 限制数量
         unique_issues = unique_issues[:max_issues]
-        
+
         # 统计摘要
         summary = {
             "total_lines": total_lines,
@@ -211,7 +215,8 @@ def code_review_run(
                 "LOW": len([i for i in unique_issues if i["severity"] == "LOW"]),
             },
         }
-        
+
+        result["language"] = detected_language
         result["issues"] = unique_issues
         result["issue_count"] = len(unique_issues)
         result["summary"] = summary
