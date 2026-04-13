@@ -39,3 +39,9 @@ coverage/
 *.tsbuildinfo
 venv/
 logs/
+
+# Runtime data files
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/*.faiss
