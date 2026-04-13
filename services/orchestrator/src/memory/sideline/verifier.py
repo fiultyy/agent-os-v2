@@ -142,18 +142,21 @@ class RecallVerifier:
             context: 当前上下文
 
         Returns:
-            排序后的记忆列表
+            排序后的记忆列表（深拷贝，不污染原始数据）
         """
         if not memories:
             return []
 
+        import copy
+        ranked = copy.deepcopy(memories)
+
         # 计算每个记忆的分数
-        for mem in memories:
+        for mem in ranked:
             mem["_verifier_score"] = self._calc_relevance([mem], context)
 
         # 按分数排序
         return sorted(
-            memories,
+            ranked,
             key=lambda x: x.get("_verifier_score", 0),
             reverse=True
         )

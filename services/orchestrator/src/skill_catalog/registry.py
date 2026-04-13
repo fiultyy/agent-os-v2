@@ -127,9 +127,35 @@ class SkillRegistry:
             deps.update(self.get_dependencies(dep))
         return deps
     
-    def _get_category(self, name: str) -> str:
-        """推断 Skill 分类"""
-        name_lower = name.lower()
+    def _get_category(self, name_or_metadata) -> str:
+        """推断 Skill 分类
+
+        支持传入 SkillMetadata 或名称字符串：
+        - SkillMetadata: 优先使用显式字段，其次从 tools 推断，最后回退名称匹配
+        - str: 纯名称推断（向后兼容）
+        """
+        # 如果传入的是 SkillMetadata，优先使用显式字段和 tools 推断
+        if isinstance(name_or_metadata, SkillMetadata):
+            metadata = name_or_metadata
+            # 优先使用显式字段
+            if hasattr(metadata, 'category') and getattr(metadata, 'category', None):
+                return metadata.category
+            # 从 tools 列表推断
+            tools = metadata.tools or []
+            if any('browser' in t.lower() for t in tools):
+                return "browser"
+            if any('code' in t.lower() for t in tools):
+                return "code"
+            if any('memory' in t.lower() for t in tools):
+                return "memory"
+            if any(t in ['http_get', 'http_post', 'file_read', 'db_query'] for t in tools):
+                return "primitive"
+            # 回退到名称匹配
+            name_lower = metadata.name.lower()
+        else:
+            name_lower = str(name_or_metadata).lower()
+
+        # 名称推断（原有逻辑）
         if "browser" in name_lower:
             return "browser"
         elif "code" in name_lower:

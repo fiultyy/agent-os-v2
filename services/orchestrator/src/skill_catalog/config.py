@@ -8,8 +8,11 @@ SkillConfig - Skill 配置管理
 """
 
 import json
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class SkillConfig:
@@ -47,8 +50,17 @@ class SkillConfig:
         return config.get(key, default)
     
     def set(self, skill_name: str, key: str, value: Any) -> bool:
-        """设置 Skill 配置"""
+        """设置 Skill 配置（带 schema 验证）"""
         config = self._load_config(skill_name)
+
+        # 检查是否有 schema 定义，进行验证
+        schema = self._load_schema(skill_name)
+        if schema and key in schema:
+            valid, error = self.validate_schema(schema[key], value)
+            if not valid:
+                logger.warning("Config validation failed for %s.%s: %s", skill_name, key, error)
+                return False
+
         config[key] = value
         return self._save_config(skill_name, config)
     
@@ -81,6 +93,7 @@ class SkillConfig:
     
     def validate_schema(self, schema: Dict[str, Any], value: Any) -> tuple[bool, Optional[str]]:
         """验证配置值是否符合 schema"""
+        """验证配置值是否符合 schema"""
         expected_type = schema.get("type")
         
         type_map = {
@@ -109,6 +122,17 @@ class SkillConfig:
         
         return True, None
     
+    def _load_schema(self, skill_name: str) -> Optional[Dict[str, Any]]:
+        """加载 Skill 的配置 schema（如果存在）"""
+        schema_file = self.config_dir / f"{skill_name}.schema.json"
+        if schema_file.exists():
+            try:
+                with open(schema_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, IOError):
+                pass
+        return None
+
     def _load_config(self, skill_name: str) -> Dict[str, Any]:
         """加载配置到缓存"""
         if skill_name in self._cache:

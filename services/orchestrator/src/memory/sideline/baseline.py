@@ -114,6 +114,24 @@ class HermesWikiBaseline:
             logger.error(f"Failed to write memory item: {e}")
             return False
 
+    def batch_search(self, queries: List[str], limit_per_query: int = 5) -> Dict[str, List[Dict]]:
+        """批量搜索多个查询"""
+        results = {}
+        for query in queries:
+            results[query] = self.search(query, limit=limit_per_query)
+        return results
+
+    def get_stats(self) -> Dict[str, Any]:
+        """获取 baseline 统计信息"""
+        cache_size = len(self._cache)
+        cached_files = list(self._cache.keys()) if hasattr(self, '_cache') else []
+        return {
+            "cache_size": cache_size,
+            "cached_files": cached_files,
+            "wiki_path": str(self.wiki_path),
+            "wiki_path_exists": self.wiki_path.exists()
+        }
+
     def _read_lines(self, file_path: Path) -> List[str]:
         """读取文件行（带 LRU 缓存）"""
         key = str(file_path)
