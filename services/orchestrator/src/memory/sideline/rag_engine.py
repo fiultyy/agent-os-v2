@@ -36,7 +36,11 @@ class RAGEngine:
         """初始化 FAISS 索引"""
         try:
             import faiss
-            import sqlite3
+
+            try:
+                from pysqlite3 import dbapi2 as sqlite3  # type: ignore[import-untyped]
+            except ImportError:
+                import sqlite3  # noqa: F401 — stdlib fallback
 
             data_path = Path(self.config.get("data_path", "~/projects/agent-os/data"))
             index_file = data_path / "memory.faiss"
@@ -53,7 +57,10 @@ class RAGEngine:
         """初始化 KG 数据库"""
         if self.kg_db is None:
             try:
-                import sqlite3
+                try:
+                    from pysqlite3 import dbapi2 as sqlite3  # type: ignore[import-untyped]
+                except ImportError:
+                    import sqlite3  # noqa: F401 — stdlib fallback
                 data_path = Path(self.config.get("data_path", "~/projects/agent-os/data"))
                 kg_db_file = data_path / "kg.db"
                 if kg_db_file.exists():
