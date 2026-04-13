@@ -39,6 +39,7 @@ def test_skill():
     from src.skills.browser import browser_navigate, browser_snapshot, browser_click, browser_type
     from src.skills.code import code_read, code_write, code_search
     from src.skills.memory import memory_recall, memory_store
+    from src.skills.primitive import file_write, file_delete
 
     # Memory operations
     result = memory_recall("test", mode="keyword")
