@@ -188,11 +188,11 @@ def code_review_run(
                     "pattern": pattern,
                 })
 
-        # 去重（根据 file:line 组合）
+        # 去重（根据 file:line:pattern 三元组）
         seen = set()
         unique_issues = []
         for issue in issues:
-            key = f"{issue['file']}:{issue['line']}:{issue.get('pattern', '')}"
+            key = f"{issue['file']}:{issue['line']}:{issue.get('pattern', issue.get('message', ''))}"
             if key not in seen:
                 seen.add(key)
                 unique_issues.append(issue)
