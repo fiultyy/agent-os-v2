@@ -28,6 +28,7 @@ class RAGEngine:
         self.config = config or {}
         self.faiss_index = None
         self.kg_db = None
+        self._embedding_provider = None  # lazy init in _embed_query
         self._init_faiss()
         self._init_kg()
 
@@ -126,12 +127,31 @@ class RAGEngine:
             return []
 
     def _embed_query(self, query: str):
-        """简化：生成随机向量或使用 TF-IDF"""
+        """生成查询文本的 embedding 向量。
+
+        使用项目已有的 SentenceTransformerProvider（all-MiniLM-L6-v2，384 维）
+        作为默认 embedding 后端。如果 embedding 服务不可用，退回到
+        随机向量（仅用于测试/演示，会打印警告）。
+        """
         import numpy as np
-        # TODO: 集成真正的 embedding 模型
-        # 暂时返回随机向量（仅用于演示）
-        dim = self.faiss_index.d
-        return np.random.rand(1, dim).astype('float32')
+
+        # 尝试使用真实 embedding 服务
+        try:
+            from src.memory.embedding import SentenceTransformerProvider
+
+            if not hasattr(self, '_embedding_provider') or self._embedding_provider is None:
+                self._embedding_provider = SentenceTransformerProvider()
+
+            vec = self._embedding_provider.embed(query)  # (dim,)
+            # FAISS search 期望 (1, dim) 形状
+            return vec.reshape(1, -1).astype('float32')
+        except Exception as e:
+            logger.warning(
+                f"Embedding service unavailable, falling back to random vector: {e}"
+            )
+            # Fallback：仅当 embedding 服务不可用时使用随机向量
+            dim = self.faiss_index.d if self.faiss_index else 384
+            return np.random.rand(1, dim).astype('float32')
 
     def _get_meta_by_idx(self, idx: int) -> Optional[Dict]:
         """根据索引获取 metadata"""
