@@ -11,7 +11,10 @@ DB Tool - L3.3 Primitive Implementation
 
 import logging
 import re
-import sqlite3
+try:
+    from pysqlite3 import dbapi2 as sqlite3  # type: ignore[import-untyped]
+except ImportError:
+    import sqlite3  # noqa: F401 — stdlib fallback
 import json
 from typing import Dict, Any, List, Optional, Union
 from contextlib import contextmanager
