@@ -1454,6 +1454,111 @@ backward_memories ─┘                        ↓                             
   - `code_review.py` → read + search + write + comment
 - **状态**: ✅ 设计完成，⏳ 待实现
 
+### D-25: 三层记忆架构 + Sideline Memory Agent ✅ (2026-04-13)
+- **决策**: Forward 分层召回 + Backward Main 显式写回 + Sideline Memory Agent 独立管理
+- **灵感来源**: Hermes LLM-wiki 明文记忆 + RAG + KG 混合
+
+#### 架构概览
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Forward (Context 构建)                                           │
+│                                                                  │
+│  Main Agent                                                      │
+│  ├── Baseline: Wiki 明文搜索 (Hermes) ──→ 快速，短 context        │
+│  │                                                            │
+│  │    如果溢出 ──→ recall(query, mode=SEMANTIC)                │
+│  │                          │                                  │
+│  │                          ↓                                  │
+│  │                   Sideline Memory                           │
+│  │                   ├── Wiki 关系索引                         │
+│  │                   ├── 向量检索 (RAG)                        │
+│  │                   └── KG 扩展 (概念关系)                    │
+│  │                          │                                  │
+│  │                          ↓                                  │
+│  │                   Sideline Verifier                        │
+│  │                   └── recall 质量评分                       │
+│  │                          │                                  │
+│  └─────────────────────── Inject ◄─────────────────────────┘   │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│  Backward (记忆写回)                                              │
+│                                                                  │
+│  Main Agent                                                      │
+│  └── memory_write(item) ──→ Tools 调用                          │
+│                                │                                 │
+│                                ↓                                 │
+│                         Sideline Memory                         │
+│                         ├── wiki_write (明文)                  │
+│                         ├── file_graph.sync (链接)              │
+│                         ├── kg_add_relation (实体)               │
+│                         └── vector_index.add (语义)              │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### Layer 1: Baseline (Hermes LLM-wiki 明文记忆)
+
+```
+~/agent-os/memory-wiki/
+├── index.md                    # 分类导航
+├── projects/
+│   └── agent-os/
+│       ├── index.md           # 项目总览
+│       ├── decisions/         # 技术决策
+│       │   └── D-22-engine-refactor.md
+│       └── pitfails/          # 踩坑档案
+├── agents/
+│   └── memory-design.md
+└── concepts/
+    ├── context-compiler.md
+    └── recall-strategy.md
+```
+
+| 特性 | 说明 |
+|------|------|
+| **LLM 自主** | prompt 规定何时读、读什么 |
+| **高效** | 短 context 下无需向量检索 |
+| **可解释** | 明文，可直接阅读 |
+
+#### Layer 2: Sideline Memory (RAG + KG 混合)
+
+| 子模块 | 技术 | 职责 |
+|--------|------|------|
+| **Wiki 索引** | 文件系统 + 链接解析 | 明文关系索引 |
+| **文件图引擎** | Agent OS lightweight | 链接关系提取 |
+| **向量索引** | HNSW/FAISS | 语义 chunk 检索 |
+| **语义 KG** | SQLite KG | 概念关系推理 |
+
+#### Layer 3: Sideline Verifier (recall 质量跟踪)
+
+| 功能 | 说明 |
+|------|------|
+| **recall 评分** | 评估召回结果相关性、完整性 |
+| **质量反馈** | 分数写入 KG，调整后续 recall 策略 |
+
+#### Backward Tools (Main 调用)
+
+| Tool | 说明 |
+|------|------|
+| `memory_write` | 写记忆到 wiki + KG + 向量索引 |
+| `wiki_update` | 更新 wiki 页面 |
+| `kg_add_relation` | 添加 KG 关系 |
+| `file_graph_sync` | 同步文件图链接 |
+
+#### 解耦价值
+
+| 价值 | 说明 |
+|------|------|
+| **独立迭代** | Memory 可单独优化，不影响 Main |
+| **版本管理** | 各子模块独立版本号 |
+| **实验能力** | 可做 A/B 测试 |
+| **技术演进** | 可替换 embedding 模型、KG 引擎 |
+
+- **状态**: ✅ 设计完成，⏳ 待实现
+
 ---
 
 ## Coding 场景 CA IO 流程
