@@ -1,0 +1,14 @@
+{
+  "global": {
+    "debug": false,
+    "log_level": "info",
+    "auto_load_skills": true,
+    "skill_priority": ["user", "plugin", "builtin"]
+  },
+  "skill_catalog": {
+    "builtin_path": "src/skills",
+    "user_path": "~/.agent-os/skills",
+    "plugin_path": "~/.agent-os/plugins",
+    "config_path": "~/.agent-os/config"
+  }
+}

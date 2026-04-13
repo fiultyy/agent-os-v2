@@ -1,0 +1,14 @@
+name: hello-world
+version: 1.0.0
+description: Hello World 示例 Skill，展示用户自定义 Skill 的结构
+author: user
+skill_type: user
+tools:
+  - greet
+  - farewell
+dependencies: []
+config_schema:
+  default_name:
+    type: string
+    default: "World"
+    description: 默认问候名称
