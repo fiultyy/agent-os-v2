@@ -1,10 +1,7 @@
 """
 browser_click - 点击页面元素
 
-支持点击：
-- 按钮
-- 链接
-- 其他可交互元素
+使用 Playwright 执行真实点击操作。
 """
 
 import logging
@@ -20,30 +17,16 @@ def browser_click(
     modifiers: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
-    点击页面元素 (STUB - 需要 Playwright 后端)
-
-    注意: 当前实现为模拟返回。
-    需要集成 playwright 或 selenium 才能真正执行浏览器操作。
+    点击页面元素（Playwright 实现）
 
     Args:
-        selector: CSS 选择器或元素 ID (必填)
+        selector: CSS 选择器 (必填)
         button: 鼠标按钮，"left"/"right"/"middle"，默认 "left"
         click_count: 点击次数，默认 1
-        modifiers: 按住的修饰键，["Shift", "Ctrl", "Alt", "Meta"] (可选)
+        modifiers: 修饰键列表 (可选)
 
     Returns:
-        {
-            "success": bool,
-            "selector": str,
-            "element": dict,
-            "action": str,
-            "error": str (if failed)
-        }
-
-    Example:
-        >>> result = browser_click("#submit-btn", button="left", click_count=1)
-        >>> if result["success"]:
-        ...     print(f"Clicked: {result['element']['text']}")
+        {"success": bool, "selector": str, "action": str, "error": str}
     """
     result = {
         "success": False,
@@ -52,42 +35,58 @@ def browser_click(
         "action": None,
         "error": None,
     }
-    
+
     if not selector:
         result["error"] = "Selector is required"
         return result
-    
-    # 验证 button 参数
+
     valid_buttons = ["left", "right", "middle"]
     if button not in valid_buttons:
         result["error"] = f"Invalid button: {button}. Must be one of {valid_buttons}"
         return result
-    
-    # 验证 click_count
+
     if click_count < 1 or click_count > 3:
         result["error"] = f"Invalid click_count: {click_count}. Must be 1-3"
         return result
-    
+
     try:
-        # 模拟点击结果
-        # 实际实现需要集成 Playwright/Selenium 执行真实点击
-        result["element"] = {
-            "tag": "button",
-            "id": selector.lstrip("#").lstrip("."),
-            "class": "btn-primary",
-            "text": f"Button {selector}",
-            "clickable": True,
-        }
-        
-        modifiers_str = ""
+        from ._browser import get_page
+
+        page = get_page()
+        loc = page.locator(selector).first
+
+        if loc.count() == 0:
+            result["error"] = f"Element not found: {selector}"
+            return result
+
+        # Build modifier list for Playwright
+        pw_modifiers = []
         if modifiers:
-            modifiers_str = f" with {'+'.join(modifiers)}"
-        
-        result["action"] = f"click{modifiers_str} ({button} button, {click_count}x)"
+            mod_map = {"Ctrl": "Control", "Cmd": "Meta", "Shift": "Shift", "Alt": "Alt"}
+            pw_modifiers = [mod_map.get(m, m) for m in modifiers]
+
+        loc.click(button=button, click_count=click_count, modifiers=pw_modifiers or None)
+
+        # Read element info after click
+        try:
+            text = loc.text_content(timeout=1000) or ""
+            tag = loc.evaluate("el => el.tagName.toLowerCase()")
+            el_id = loc.get_attribute("id") or ""
+            result["element"] = {
+                "tag": tag,
+                "id": el_id,
+                "text": text[:200],
+                "clickable": True,
+            }
+        except Exception:
+            pass
+
+        mod_str = f" with {'+'.join(modifiers)}" if modifiers else ""
+        result["action"] = f"click{mod_str} ({button} button, {click_count}x)"
         result["success"] = True
-        
+
     except Exception as e:
-        logger.error(f"Click error: {e}")
         result["error"] = f"Click error: {str(e)}"
-    
+        logger.warning(f"browser_click failed: {e}")
+
     return result

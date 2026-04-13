@@ -1,13 +1,16 @@
 """
 browser_snapshot - 页面快照
 
-获取当前页面状态，包括：
-- DOM 结构
+使用 Playwright 获取当前页面的真实 DOM 状态，包括：
 - 可交互元素列表
-- 截图（可选）
+- 元素文本、属性
+- 页面 HTML（可选）
 """
 
+import logging
 from typing import Dict, Any, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 def browser_snapshot(
@@ -16,10 +19,7 @@ def browser_snapshot(
     include_html: bool = False,
 ) -> Dict[str, Any]:
     """
-    获取页面快照 (STUB - 需要 Playwright 后端)
-
-    注意: 当前实现为模拟返回。
-    需要集成 playwright 或 selenium 才能真正获取页面 DOM。
+    获取页面快照（Playwright 实现）
 
     Args:
         selector: CSS 选择器，用于限定快照范围（可选）
@@ -34,12 +34,6 @@ def browser_snapshot(
             "html": str (if include_html=True),
             "error": str (if failed)
         }
-
-    Example:
-        >>> result = browser_snapshot(selector="#main", max_elements=20)
-        >>> if result["success"]:
-        ...     for elem in result["elements"]:
-        ...         print(f"{elem['tag']}: {elem['text'][:50]}")
     """
     result = {
         "success": False,
@@ -49,31 +43,56 @@ def browser_snapshot(
         "html": None,
         "error": None,
     }
-    
+
     try:
-        # 模拟快照返回
-        # 实际实现需要集成 Playwright/Selenium 获取真实 DOM
-        mock_elements = [
-            {"tag": "header", "id": "header", "class": "site-header", "text": "Site Header", "clickable": False},
-            {"tag": "nav", "id": "nav", "class": "main-nav", "text": "Navigation", "clickable": False},
-            {"tag": "main", "id": "main", "class": "content", "text": "Main Content Area", "clickable": False},
-            {"tag": "button", "id": "btn-submit", "class": "btn primary", "text": "Submit", "clickable": True},
-            {"tag": "input", "id": "input-name", "class": "form-input", "type": "text", "clickable": True},
-            {"tag": "a", "id": "link-about", "class": "nav-link", "text": "About", "clickable": True},
-        ]
-        
-        # 如果指定了 selector，进行过滤（简化实现）
-        if selector:
-            # 简化：假设 selector 是简单标签或类名
-            filtered = [e for e in mock_elements if selector.lstrip('.#') in (e.get('id', ''), e.get('class', ''), e.get('tag', ''))]
-            result["elements"] = filtered[:max_elements]
-        else:
-            result["elements"] = mock_elements[:max_elements]
-        
-        result["count"] = len(result["elements"])
+        from ._browser import get_page
+
+        page = get_page()
+
+        # 获取可交互元素
+        js_script = """
+        (args) => {
+            const [selector, maxElements] = args;
+            const root = selector ? document.querySelector(selector) : document;
+            if (!root) return [];
+
+            const interactable = root.querySelectorAll(
+                'a, button, input, select, textarea, [role="button"], [role="link"], [onclick], [contenteditable="true"]'
+            );
+
+            const elements = [];
+            for (let i = 0; i < Math.min(interactable.length, maxElements); i++) {
+                const el = interactable[i];
+                elements.push({
+                    tag: el.tagName.toLowerCase(),
+                    id: el.id || null,
+                    class: el.className || null,
+                    type: el.getAttribute('type') || null,
+                    text: (el.textContent || '').trim().substring(0, 200),
+                    href: el.getAttribute('href') || null,
+                    placeholder: el.getAttribute('placeholder') || null,
+                    clickable: true,
+                });
+            }
+            return elements;
+        }
+        """
+
+        elements = page.evaluate(js_script, [selector, max_elements])
+        result["elements"] = elements
+        result["count"] = len(elements)
+
+        if include_html:
+            if selector:
+                loc = page.locator(selector).first
+                result["html"] = loc.inner_html() if loc.count() > 0 else ""
+            else:
+                result["html"] = page.content()
+
         result["success"] = True
-        
+
     except Exception as e:
         result["error"] = f"Snapshot error: {str(e)}"
-    
+        logger.warning(f"browser_snapshot failed: {e}")
+
     return result

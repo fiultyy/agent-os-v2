@@ -1,14 +1,17 @@
 """
 browser_navigate - 导航到指定 URL
 
-模拟浏览器导航操作，支持：
+使用 Playwright 进行真实浏览器导航，支持：
 - URL 验证
-- 页面加载状态
-- 历史记录管理
+- 页面加载等待
+- 页面标题获取
 """
 
 import re
-from typing import Dict, Any, Optional
+import logging
+from typing import Dict, Any
+
+logger = logging.getLogger(__name__)
 
 
 def browser_navigate(
@@ -17,13 +20,13 @@ def browser_navigate(
     timeout: int = 30,
 ) -> Dict[str, Any]:
     """
-    导航到指定 URL
-    
+    导航到指定 URL（Playwright 实现）
+
     Args:
         url: 目标 URL (必填)
         reload: 是否强制刷新，默认 False
         timeout: 超时秒数，默认 30
-    
+
     Returns:
         {
             "success": bool,
@@ -32,11 +35,6 @@ def browser_navigate(
             "title": str,
             "error": str (if failed)
         }
-    
-    Example:
-        >>> result = browser_navigate("https://www.example.com")
-        >>> if result["success"]:
-        ...     print(f"Loaded: {result['title']}")
     """
     result = {
         "success": False,
@@ -45,8 +43,7 @@ def browser_navigate(
         "title": None,
         "error": None,
     }
-    
-    # URL 验证：只允许 http:// 和 https://
+
     url_pattern = re.compile(
         r'^(?:http|https)://'
         r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|'
@@ -55,31 +52,29 @@ def browser_navigate(
         r'(?::\d+)?'
         r'(?:/?|[/?]\S+)$', re.IGNORECASE
     )
-    
+
     if not url_pattern.match(url):
         result["error"] = f"Invalid URL format: {url}"
         return result
-    
+
     try:
-        # 模拟浏览器导航（实际实现需要集成 Playwright/Selenium）
-        # 这里使用 urllib 模拟页面标题获取
-        import urllib.request
-        
-        req = urllib.request.Request(url)
-        req.add_header("User-Agent", "Mozilla/5.0 (compatible; AgentOS/1.0)")
-        
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            result["status"] = "loaded"
-            result["title"] = response.url  # 简化：使用 URL 作为 title
-            result["success"] = True
-            
-    except urllib.error.HTTPError as e:
-        result["status"] = "http_error"
-        result["error"] = f"HTTP {e.code}: {e.reason}"
-    except urllib.error.URLError as e:
-        result["status"] = "connection_error"
-        result["error"] = f"Connection failed: {e.reason}"
+        from ._browser import get_page
+
+        page = get_page()
+
+        if reload and page.url == url:
+            page.reload(timeout=timeout * 1000)
+        else:
+            page.goto(url, timeout=timeout * 1000, wait_until="domcontentloaded")
+
+        result["status"] = "loaded"
+        result["title"] = page.title()
+        result["url"] = page.url
+        result["success"] = True
+
     except Exception as e:
+        result["status"] = "error"
         result["error"] = f"Navigation error: {str(e)}"
-    
+        logger.warning(f"browser_navigate failed: {e}")
+
     return result
