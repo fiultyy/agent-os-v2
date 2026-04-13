@@ -9,17 +9,26 @@ memory_store - 记忆存储
 
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone
+from functools import lru_cache
 import logging
 
 logger = logging.getLogger(__name__)
 
 
 def _get_memory_service():
-    """Lazily obtain or create the MemoryService instance.
+    """Lazily obtain or create a singleton MemoryService instance.
 
     Uses SQLiteStore when ``data/memories.db`` exists (production),
     otherwise falls back to InMemoryStore (development/testing).
+
+    Wrapped with lru_cache to avoid creating a new SQLiteStore
+    connection on every call.
     """
+    return _create_memory_service()
+
+
+@lru_cache(maxsize=1)
+def _create_memory_service():
     from src.memory.service import MemoryService
     from src.memory.sqlitestore import SQLiteStore
     from src.memory.store import InMemoryStore
