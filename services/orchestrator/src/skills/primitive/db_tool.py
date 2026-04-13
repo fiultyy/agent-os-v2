@@ -9,14 +9,39 @@ DB Tool - L3.3 Primitive Implementation
 - 错误处理
 """
 
+import logging
+import re
 import sqlite3
 import json
 from typing import Dict, Any, List, Optional, Union
 from contextlib import contextmanager
 
+logger = logging.getLogger(__name__)
+
 
 # 默认数据库路径（内存数据库）
 DEFAULT_DB = ":memory:"
+
+
+# 表名验证正则：只允许 ASCII 字母、下划线开头，后跟字母/数字/下划线
+_TABLE_NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+
+def _validate_table_name(table: str) -> None:
+    """
+    验证表名是否安全，防止 SQL 注入。
+
+    Args:
+        table: 表名
+
+    Raises:
+        ValueError: 表名格式非法
+    """
+    if not _TABLE_NAME_RE.match(table):
+        raise ValueError(
+            f"Invalid table name '{table}': "
+            "must match ^[a-zA-Z_][a-zA-Z0-9_]*$"
+        )
 
 
 @contextmanager
@@ -30,12 +55,17 @@ def _get_connection(db_path: str = DEFAULT_DB):
     Yields:
         sqlite3.Connection
     """
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    conn = None
     try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
         yield conn
+    except Exception as e:
+        logger.error(f"Database connection error: {e}")
+        raise
     finally:
-        conn.close()
+        if conn:
+            conn.close()
 
 
 def db_query(
@@ -291,9 +321,12 @@ def db_schema(
     }
     
     try:
+        # 表名安全校验
+        _validate_table_name(table)
+
         with _get_connection(db_path) as conn:
             cursor = conn.cursor()
-            
+
             # 获取列信息
             cursor.execute(f"PRAGMA table_info({table})")
             columns = cursor.fetchall()
@@ -310,10 +343,12 @@ def db_schema(
             ]
             
             # 获取行数
+            # 表名已通过 _validate_table_name 校验，此处为安全调用
             cursor.execute(f"SELECT COUNT(*) FROM {table}")
             result["row_count"] = cursor.fetchone()[0]
             
             # 获取索引信息
+            # 表名已通过 _validate_table_name 校验，此处为安全调用
             cursor.execute(f"PRAGMA index_list({table})")
             indexes = cursor.fetchall()
             result["indexes"] = [

@@ -7,9 +7,12 @@ HermesWikiBaseline - Baseline 明文 wiki 搜索
 - 直接读取 wiki 文件内容
 """
 
+import logging
 import re
 from pathlib import Path
 from typing import Dict, Any, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class HermesWikiBaseline:
@@ -67,7 +70,8 @@ class HermesWikiBaseline:
                         if len(results) >= limit:
                             return sorted(results, key=lambda x: x["relevance"], reverse=True)
 
-            except Exception:
+            except Exception as e:
+                logger.warning(f"Failed to process file {md_file}: {e}")
                 continue
 
         return sorted(results, key=lambda x: x["relevance"], reverse=True)[:limit]
@@ -102,7 +106,8 @@ class HermesWikiBaseline:
 
             return True
 
-        except Exception:
+        except Exception as e:
+            logger.error(f"Failed to write memory item: {e}")
             return False
 
     def _read_lines(self, file_path: Path) -> List[str]:
@@ -112,7 +117,8 @@ class HermesWikiBaseline:
             try:
                 with open(file_path, "r", encoding="utf-8") as f:
                     self._cache[key] = f.readlines()
-            except Exception:
+            except Exception as e:
+                logger.warning(f"Failed to read file {file_path}: {e}")
                 self._cache[key] = []
         return self._cache[key]
 

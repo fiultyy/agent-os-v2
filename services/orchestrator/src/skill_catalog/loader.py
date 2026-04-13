@@ -7,10 +7,13 @@ SkillLoader - Skill 发现与加载器
 - 插件 Skill: ~/.agent-os/plugins/
 """
 
+import logging
 import importlib.util
 import os
 from pathlib import Path
 from typing import Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from .registry import SkillMetadata, get_registry
 
@@ -195,7 +198,8 @@ class SkillLoader:
                 path=str(yaml_path.parent),
                 skill_type=skill_type,
             )
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Failed to load skill metadata from {yaml_path}: {e}")
             return None
     
     def _discover_tools(self, skill_dir: Path) -> List[str]:

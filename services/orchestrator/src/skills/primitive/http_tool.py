@@ -11,8 +11,14 @@ HTTP Tool - L3.3 Primitive Implementation
 
 import urllib.request
 import urllib.error
+import ssl
 import json
 from typing import Dict, Any, Optional
+
+# Default SSL context with certificate verification
+_DEFAULT_SSL_CONTEXT = ssl.create_default_context()
+# Maximum response body size (10MB)
+MAX_RESPONSE_SIZE = 10 * 1024 * 1024
 
 
 def _build_request(
@@ -59,10 +65,21 @@ def _build_request(
         for key, value in headers.items():
             req.add_header(key, value)
         
-        with urllib.request.urlopen(req, timeout=timeout) as response:
+        # Create SSL context with certificate verification
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = True
+        ssl_context.verify_mode = ssl.CERT_REQUIRED
+        
+        with urllib.request.urlopen(req, timeout=timeout, context=ssl_context) as response:
             result["status"] = response.status
             result["headers"] = dict(response.headers)
-            result["body"] = response.read().decode("utf-8")
+            # Limit response size to prevent memory issues
+            body = response.read(MAX_RESPONSE_SIZE + 1)
+            if len(body) > MAX_RESPONSE_SIZE:
+                result["body"] = body[:MAX_RESPONSE_SIZE].decode("utf-8", errors="replace")
+                result["error"] = f"Response truncated: exceeded {MAX_RESPONSE_SIZE} bytes"
+            else:
+                result["body"] = body.decode("utf-8")
             result["success"] = True
             
             # 尝试解析 JSON
@@ -76,8 +93,9 @@ def _build_request(
         result["status"] = e.code
         try:
             result["body"] = e.read().decode("utf-8")
-        except:
+        except Exception as body_error:
             result["body"] = None
+            result["error"] += f" (failed to read body: {body_error})"
     except urllib.error.URLError as e:
         result["error"] = f"URLError: {e.reason}"
     except Exception as e:

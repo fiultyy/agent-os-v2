@@ -8,6 +8,7 @@ code_search - 代码搜索
 - 搜索结果高亮
 """
 
+import os
 import re
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -22,6 +23,7 @@ def code_search(
     context_lines: int = 0,
     max_results: int = 100,
     recursive: bool = True,
+    max_depth: int = 10,
 ) -> Dict[str, Any]:
     """
     搜索代码文件
@@ -35,6 +37,7 @@ def code_search(
         context_lines: 上下文行数，默认 0
         max_results: 最大结果数，默认 100
         recursive: 是否递归搜索，默认 True
+        max_depth: 最大递归深度，默认 10（仅 recursive=True 时生效）
     
     Returns:
         {
@@ -147,6 +150,14 @@ def code_search(
                 search_file(search_path)
         else:
             for root, dirnames, filenames in os.walk(search_path):
+                # Calculate current depth relative to starting path
+                try:
+                    depth = len(Path(root).relative_to(search_path).parts)
+                except ValueError:
+                    depth = 0
+                if depth >= max_depth:
+                    dirnames.clear()  # Don't recurse deeper
+                    continue
                 # 跳过隐藏目录和特定目录
                 dirnames[:] = [d for d in dirnames if not d.startswith('.') and d not in ('__pycache__', 'node_modules', '.git')]
                 

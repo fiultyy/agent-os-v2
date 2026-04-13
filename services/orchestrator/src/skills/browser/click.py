@@ -7,7 +7,10 @@ browser_click - 点击页面元素
 - 其他可交互元素
 """
 
+import logging
 from typing import Dict, Any, Optional, List
+
+logger = logging.getLogger(__name__)
 
 
 def browser_click(
@@ -81,6 +84,7 @@ def browser_click(
         result["success"] = True
         
     except Exception as e:
+        logger.error(f"Click error: {e}")
         result["error"] = f"Click error: {str(e)}"
     
     return result

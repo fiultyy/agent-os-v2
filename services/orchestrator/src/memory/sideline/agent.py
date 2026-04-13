@@ -8,6 +8,9 @@ SidelineMemoryAgent - 旁路记忆系统主控
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
 from enum import Enum
+from .baseline import HermesWikiBaseline
+from .rag_engine import RAGEngine
+from .verifier import RecallVerifier
 
 
 class RecallMode(Enum):

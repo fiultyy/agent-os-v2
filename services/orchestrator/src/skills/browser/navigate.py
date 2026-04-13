@@ -46,9 +46,9 @@ def browser_navigate(
         "error": None,
     }
     
-    # URL 验证
+    # URL 验证：只允许 http:// 和 https://
     url_pattern = re.compile(
-        r'^(?:http|https|file)://'
+        r'^(?:http|https)://'
         r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|'
         r'localhost|'
         r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'

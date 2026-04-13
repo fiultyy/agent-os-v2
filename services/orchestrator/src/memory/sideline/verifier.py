@@ -7,7 +7,10 @@ RecallVerifier - recall 质量验证器
 - 决定是否注入
 """
 
-from typing import Dict, Any, List, Optional
+import logging
+from typing import Dict, Any, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 class RecallVerifier:
@@ -110,7 +113,7 @@ class RecallVerifier:
         self,
         memories: List[Dict[str, Any]],
         context: str
-    ) -> tuple[bool, float]:
+    ) -> Tuple[bool, float]:
         """
         验证记忆是否应该注入
 

@@ -7,8 +7,11 @@ RAGEngine - 语义检索引擎
 - 混合召回
 """
 
+import logging
 from typing import Dict, Any, List, Optional
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class RAGEngine:
@@ -41,8 +44,8 @@ class RAGEngine:
             if index_file.exists() and meta_db_file.exists():
                 self.faiss_index = faiss.read_index(str(index_file))
                 self.kg_db = sqlite3.connect(str(meta_db_file), check_same_thread=False)
-        except Exception:
-            # Faiss 不可用时降级
+        except Exception as e:
+            logger.warning(f"Failed to initialize FAISS index: {e}")
             self.faiss_index = None
 
     def _init_kg(self):
@@ -54,7 +57,8 @@ class RAGEngine:
                 kg_db_file = data_path / "kg.db"
                 if kg_db_file.exists():
                     self.kg_db = sqlite3.connect(str(kg_db_file), check_same_thread=False)
-            except Exception:
+            except Exception as e:
+                logger.warning(f"Failed to initialize KG database: {e}")
                 self.kg_db = None
 
     def search(

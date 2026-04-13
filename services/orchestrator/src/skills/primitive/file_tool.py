@@ -8,35 +8,48 @@ File Tool - L3.3 Primitive Implementation
 - 文件类型判断
 """
 
+import logging
 import os
 import shutil
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
+logger = logging.getLogger(__name__)
+
 
 def _safe_path(path: str, base: Optional[str] = None) -> Path:
     """
     安全路径解析，防止路径遍历攻击
-    
+
     Args:
         path: 输入路径
-        base: 基准目录，默认 None 表示不限
-    
+        base: 基准目录，默认 None 表示不限（但仍禁止 .. 遍历）
+
     Returns:
         解析后的 Path 对象
-    
+
     Raises:
         ValueError: 如果路径不安全
     """
-    p = Path(path).expanduser().resolve()
-    
+    # 先规范化但不复原 ..，用于检测 .. 遍历
+    raw = Path(path).expanduser()
+
+    # 显式禁止 .. 路径组件
+    for part in raw.parts:
+        if part == "..":
+            raise ValueError(f"Path traversal '..' is not allowed in '{path}'")
+
+    # 如果有 base，限制在 base 目录内
     if base:
         base_path = Path(base).expanduser().resolve()
+        p = raw.resolve()
         try:
             p.relative_to(base_path)
         except ValueError:
             raise ValueError(f"Path '{path}' is outside base directory '{base}'")
-    
+    else:
+        p = raw.resolve()
+
     return p
 
 
@@ -263,6 +276,7 @@ def file_list(
     path: str,
     pattern: str = "*",
     recursive: bool = False,
+    max_depth: int = 10,
 ) -> Dict[str, Any]:
     """
     列出目录内容
@@ -271,6 +285,7 @@ def file_list(
         path: 目录路径 (必填)
         pattern: 文件名匹配模式，默认 "*" 表示全部
         recursive: 是否递归，默认 False
+        max_depth: 最大递归深度，默认 10（仅 recursive=True 时生效）
     
     Returns:
         {
@@ -312,12 +327,20 @@ def file_list(
         
         if recursive:
             for root, dirnames, filenames in os.walk(p):
+                # Calculate current depth relative to starting path
+                try:
+                    depth = len(Path(root).relative_to(p).parts)
+                except ValueError:
+                    depth = 0
+                if depth >= max_depth:
+                    dirnames.clear()  # Don't recurse deeper
+                    continue
                 root_path = Path(root)
                 for name in filenames:
-                    if name匹配 := _match_pattern(name, pattern):
+                    if name_match := _match_pattern(name, pattern):
                         files.append(str(root_path / name))
                 for name in dirnames:
-                    if name匹配 := _match_pattern(name, pattern):
+                    if name_match := _match_pattern(name, pattern):
                         dirs.append(str(root_path / name))
         else:
             for item in p.iterdir():
