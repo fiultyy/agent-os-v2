@@ -98,19 +98,56 @@ class RAGEngine:
 
     def _search_vector(self, query: str, limit: int) -> List[Dict[str, Any]]:
         """向量检索"""
-        try:
-            import numpy as np
-
-            # 简单实现：返回模拟结果
-            # 实际需要使用 embedding 模型
-            return [{
-                "memory_id": f"vec_{i}",
-                "content": f"Vector search result for: {query}",
-                "score": 0.9 - i * 0.1,
-                "type": "vector"
-            } for i in range(min(3, limit))]
-        except Exception:
+        if self.faiss_index is None:
             return []
+
+        try:
+            query_vector = self._embed_query(query)
+
+            # FAISS 搜索
+            D, I = self.faiss_index.search(query_vector, limit)
+
+            # 从 meta.db 获取结果
+            results = []
+            for i, idx in enumerate(I[0]):
+                if idx < 0:
+                    continue
+                meta = self._get_meta_by_idx(idx)
+                if meta:
+                    results.append({
+                        "memory_id": meta.get("memory_id", f"vec_{idx}"),
+                        "content": meta.get("content", ""),
+                        "score": float(D[0][i]),
+                        "type": "vector"
+                    })
+            return results
+        except Exception as e:
+            logger.warning(f"Vector search failed: {e}")
+            return []
+
+    def _embed_query(self, query: str):
+        """简化：生成随机向量或使用 TF-IDF"""
+        import numpy as np
+        # TODO: 集成真正的 embedding 模型
+        # 暂时返回随机向量（仅用于演示）
+        dim = self.faiss_index.d
+        return np.random.rand(1, dim).astype('float32')
+
+    def _get_meta_by_idx(self, idx: int) -> Optional[Dict]:
+        """根据索引获取 metadata"""
+        if self.kg_db is None:
+            return None
+        try:
+            cursor = self.kg_db.execute(
+                "SELECT memory_id, content FROM memories WHERE id = ?",
+                (idx,)
+            )
+            row = cursor.fetchone()
+            if row:
+                return {"memory_id": row[0], "content": row[1]}
+        except Exception:
+            pass
+        return None
 
     def _search_kg(self, query: str, limit: int) -> List[Dict[str, Any]]:
         """KG 实体检索"""
@@ -180,7 +217,8 @@ class RAGEngine:
         """添加向量索引"""
         # TODO: 实现向量生成和索引更新
         # 需要 embedding 模型
-        return True
+        logger.warning("add_vector() not fully implemented - vector index not updated")
+        return False  # 返回 False 表示未真正实现
 
     def close(self):
         """关闭连接"""

@@ -92,12 +92,16 @@ def test_skill_catalog():
 
 def test_all_imports():
     """测试所有导入"""
-    from src.skills.primitive import *
-    from src.skills.browser import *
-    from src.skills.code import *
-    from src.skills.memory import *
-    from src.tools.composite import *
-    from src.skill_catalog import *
+    # 不能在函数内使用 import *
+    # 改为显式导入
+    from src.skills.primitive import http_get, http_post, http_put, http_delete, http_patch
+    from src.skills.primitive import file_read, file_write, file_delete, file_exists, file_list, file_mkdir
+    from src.skills.primitive import db_query, db_execute, db_transaction, db_schema
+    from src.skills.browser import browser_navigate, browser_snapshot, browser_click, browser_type
+    from src.skills.code import code_read, code_write, code_search
+    from src.skills.memory import memory_recall, memory_store
+    from src.tools.composite import browser_flow_execute, code_review_run
+    from src.skill_catalog import SkillRegistry, SkillLoader, SkillConfig, SkillMetadata
     print("✅ all imports")
 
 
