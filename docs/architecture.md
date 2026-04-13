@@ -1559,6 +1559,34 @@ backward_memories ─┘                        ↓                             
 
 - **状态**: ✅ 设计完成，⏳ 待实现
 
+### D-26: JWT 安全加固 ✅ (2026-04-06)
+- **决策**: RS256 JWT + Token Rotation + Rate Limiting
+- **commit**: `e3d7b06`
+- **后端 (Gateway)**:
+  - `auth.py`: RS256 JWT，auto-generated RSA key pair，access (15min) + refresh (7d) tokens
+  - `routes/auth.py`: POST /auth/token, /auth/refresh, /auth/verify endpoints
+  - `middleware.py`: Bearer token auth + sliding-window rate limiter (10 req/min/IP)
+  - Service-to-service auth via X-Service-Key header
+  - Backward compatible: AUTH_ENABLED=false (default) skips all auth checks
+- **前端**:
+  - `auth.ts`: Token storage, login/refresh/verify, reactive auth state
+  - `api.ts`: Auto-attach Bearer token, 401 auto-refresh retry
+  - `login/page.tsx`: Minimal login page with API key input
+- **配置**: AUTH_ENABLED, AUTH_API_KEYS, JWT_PRIVATE_KEY_PATH, JWT_PUBLIC_KEY_PATH, SERVICE_AUTH_KEY
+
+### D-27: 压缩引擎修复 ✅ (2026-04-06)
+- **决策**: 修复 reasoning chain 豁免导致的 no-op bug
+- **commit**: `b09cceb`
+- **根因**:
+  1. `_is_reasoning_chain()` 过于严格，transition words 计数错误
+  2. Reasoning chains 完全豁免压缩，导致高占比时 compress_items() 直接返回原列表
+  3. `target_ratio` 预算反用，reasoning items 消耗所有 slots
+- **修复方案**:
+  1. 修复 transition words 计数，每个词单独计数
+  2. Reasoning chains 改为 +0.15 importance boost，但仍参与 slots 竞争
+  3. 修正 target_ratio 预算逻辑
+- **效果**: 11→3 retained + 3 summaries（之前 11→11 空转）
+
 ---
 
 ## Coding 场景 CA IO 流程
