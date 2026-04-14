@@ -76,8 +76,9 @@ def browser_type(
             delay = max(1, int(1000 / type_speed))  # ms per char
             loc.type(text, delay=delay)
         else:
-            loc.fill("")  # clear via Playwright API
-            loc.type(text)  # type character by character (fires events)
+            # Already cleared via Ctrl+A/Backspace when clear_first=True,
+            # so skip redundant loc.fill("") — loc.type fires the proper events
+            loc.type(text)
 
         result["chars_typed"] = len(text)
 
