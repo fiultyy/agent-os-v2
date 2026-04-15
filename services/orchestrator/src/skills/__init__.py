@@ -1,5 +1,5 @@
 """
-Agent OS User Skill System — P0 + P1 + P2
+Agent OS User Skill System — P0 + P1 + P2 + P3
 """
 
 from .skill_loader import SkillLoader, SkillEntry, SkillRequires, SkillExposure
@@ -14,6 +14,7 @@ from .prompt_integration import (
     AVAILABLE_SKILLS_TEMPLATE,
     SKILL_ENTRY_TEMPLATE,
 )
+from .hot_reload import SkillHotReloader
 
 __all__ = [
     # P0: Loader + Catalog
@@ -38,4 +39,6 @@ __all__ = [
     "format_skill_entry",
     "AVAILABLE_SKILLS_TEMPLATE",
     "SKILL_ENTRY_TEMPLATE",
+    # P3-A: Hot Reload
+    "SkillHotReloader",
 ]
