@@ -176,6 +176,10 @@ class SkillToolRegistryBridge:
             logger.warning("Cannot register skill %r: not found in catalog", name)
             return False
 
+        if not entry.exposure.visible:
+            logger.warning("Cannot register skill %r: exposure.visible is False", name)
+            return False
+
         tool_name = self._tool_name(entry.name)
         self._register_entry(entry)
         return True
