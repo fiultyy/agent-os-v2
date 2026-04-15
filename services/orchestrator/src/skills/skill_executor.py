@@ -10,7 +10,6 @@ SkillExecutor — Skill 执行引擎
 
 import logging
 import os
-import re
 from typing import Any, Callable, Dict, List, Optional
 
 from .skill_catalog import SkillCatalog
@@ -43,18 +42,6 @@ class SkillExecutor:
         5. 调用 tool_executor 执行
         6. 返回结果
     """
-
-    # Regex to extract ```json ... ``` config_schema blocks from SKILL.md
-    _CONFIG_SCHEMA_RE = re.compile(
-        r"```json\s*\n\s*config_schema\s*:\s*\n(.*?)```",
-        re.DOTALL,
-    )
-
-    # Regex to extract a simple parameters section
-    _PARAMS_RE = re.compile(
-        r"(?:##?\s*Parameters|##?\s*参数)\s*\n(.*?)(?=\n##?\s|\Z)",
-        re.DOTALL,
-    )
 
     def __init__(
         self,
