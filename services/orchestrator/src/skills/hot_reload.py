@@ -166,7 +166,13 @@ class _PollingReloader:
 
     def _poll_loop(self) -> None:
         while not self._stop_event.wait(self._poll_interval):
-            new_mtimes = self._scan_mtimes()
+            try:
+                new_mtimes = self._scan_mtimes()
+            except Exception as e:
+                logger.warning(
+                    "SkillHotReloader: polling scan failed: %s. Skipping this cycle.", e
+                )
+                continue
             if new_mtimes != self._mtimes:
                 logger.debug("SkillHotReloader: change detected via polling")
                 self._mtimes = new_mtimes
