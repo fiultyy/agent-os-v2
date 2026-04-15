@@ -1,11 +1,19 @@
 """
-Agent OS User Skill System — P0 + P1
+Agent OS User Skill System — P0 + P1 + P2
 """
 
 from .skill_loader import SkillLoader, SkillEntry, SkillRequires, SkillExposure
 from .skill_catalog import SkillCatalog
 from .skill_executor import SkillExecutor, SkillExecutionError, SkillNotFoundError, DependencyError
 from .skill_config import SkillConfig, SkillConfigError
+from .tool_registry_integration import SkillToolRegistryBridge, ToolRegistryLike
+from .prompt_integration import (
+    build_skills_prompt,
+    build_skills_prompt_from_entries,
+    format_skill_entry,
+    AVAILABLE_SKILLS_TEMPLATE,
+    SKILL_ENTRY_TEMPLATE,
+)
 
 __all__ = [
     # P0: Loader + Catalog
@@ -21,4 +29,13 @@ __all__ = [
     "DependencyError",
     "SkillConfig",
     "SkillConfigError",
+    # P2-A: ToolRegistry Integration
+    "SkillToolRegistryBridge",
+    "ToolRegistryLike",
+    # P2-B: Prompt Integration
+    "build_skills_prompt",
+    "build_skills_prompt_from_entries",
+    "format_skill_entry",
+    "AVAILABLE_SKILLS_TEMPLATE",
+    "SKILL_ENTRY_TEMPLATE",
 ]
