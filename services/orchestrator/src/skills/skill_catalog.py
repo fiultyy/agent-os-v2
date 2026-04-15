@@ -57,16 +57,15 @@ class SkillCatalog:
     # ------------------------------------------------------------------
 
     def get(self, name: str) -> Optional[SkillEntry]:
-        """按名称获取 skill（不区分大小写）。"""
-        return self._entries.get(name) or self._entries.get(name.lower())
+        """按名称获取 enabled skill（不区分大小写）。"""
+        entry = self._entries.get(name) or self._entries.get(name.lower())
+        if entry is not None and not entry.is_enabled():
+            return None
+        return entry
 
     def list_all(self) -> List[SkillEntry]:
-        """列出所有 visible skills。"""
-        return [
-            entry
-            for entry in self._entries.values()
-            if entry.exposure.visible
-        ]
+        """列出所有 enabled (visible) skills。"""
+        return [entry for entry in self._entries.values() if entry.is_enabled()]
 
     @property
     def version(self) -> int:
