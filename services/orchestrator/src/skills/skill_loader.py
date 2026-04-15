@@ -44,6 +44,10 @@ class SkillEntry:
     requires: SkillRequires = field(default_factory=SkillRequires)
     exposure: SkillExposure = field(default_factory=SkillExposure)
 
+    def is_enabled(self) -> bool:
+        """Check if the skill is enabled (visible for discovery and execution)."""
+        return self.exposure.visible
+
 
 # ---------------------------------------------------------------------------
 # Frontmatter parser
@@ -180,29 +184,40 @@ class SkillLoader:
             logger.warning("SKILL.md missing 'name' field: %s", path)
             return None
 
+        skill_name = fm.get("name", path.parent.name)
+        requires_raw = fm.get("requires")
+        if not isinstance(requires_raw, dict):
+            if requires_raw is not None:
+                logger.warning(
+                    "SKILL.md 'requires' field is not a dict (skill=%r, path=%s): "
+                    "expected {{tools: [...], env: [...]}}, got %r. Ignoring requires.",
+                    skill_name, path, requires_raw,
+                )
+            requires = SkillRequires()
+        else:
+            requires = SkillRequires(
+                tools=list(requires_raw.get("tools", [])),
+                env=list(requires_raw.get("env", [])),
+            )
+
+        exposure_raw = fm.get("exposure")
+        if not isinstance(exposure_raw, dict):
+            exposure = SkillExposure(visible=True, user_invocable=False)
+        else:
+            exposure = SkillExposure(
+                visible=bool(exposure_raw.get("visible", True)),
+                user_invocable=bool(exposure_raw.get("user_invocable", False)),
+            )
+
         return SkillEntry(
-            name=fm.get("name", path.parent.name),
+            name=skill_name,
             description=str(fm.get("description", "")),
             version=str(fm.get("version", "1.0.0")),
             location=path,
             base_dir=path.parent,
             source=source,
-            requires=SkillRequires(
-                tools=list(fm.get("requires", {}).get("tools", []))
-                       if isinstance(fm.get("requires"), dict)
-                       else [],
-                env=list(fm.get("requires", {}).get("env", []))
-                    if isinstance(fm.get("requires"), dict)
-                    else [],
-            ),
-            exposure=SkillExposure(
-                visible=bool(fm.get("exposure", {}).get("visible", True))
-                        if isinstance(fm.get("exposure"), dict)
-                        else True,
-                user_invocable=bool(fm.get("exposure", {}).get("user_invocable", False))
-                               if isinstance(fm.get("exposure"), dict)
-                               else False,
-            ),
+            requires=requires,
+            exposure=exposure,
         )
 
     def _validate_path(self, skill_path: Path, root: Path) -> bool:
