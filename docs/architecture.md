@@ -1589,6 +1589,56 @@ backward_memories ─┘                        ↓                             
 
 ---
 
+### D-28: User Skill Plug-in System ✅ (2026-04-16)
+- **决策**: SKILL.md 标准化 + 渐进式注入 + 三层优先级
+- **评分**: 9.6/10 PASS
+- **位置**: `services/orchestrator/src/skills/`
+
+**核心模块（8个）**:
+
+| 模块 | 文件 | 功能 |
+|------|------|------|
+| SkillLoader | `skill_loader.py` | 三层扫描 + YAML frontmatter解析 |
+| SkillCatalog | `skill_catalog.py` | 入口管理 + exposure过滤 |
+| SkillExecutor | `skill_executor.py` | mtime缓存 + 依赖验证 |
+| SkillConfig | `skill_config.py` | YAML schema验证 |
+| ToolRegistry Bridge | `tool_registry_integration.py` | L3 ToolRegistry桥接 |
+| Prompt集成 | `prompt_integration.py` | `<available_skills>` XML生成 |
+| HotReload | `hot_reload.py` | watchdog + polling降级 |
+| CLI | `cli.py` | 6命令（list/show/enable/disable/reload/search）|
+
+**渐进式注入设计**:
+- Stage 1: `<name>` + `<description>` + `<location>` 始终注入prompt
+- Stage 2: SKILL.md内容通过`read`工具按需加载
+- mtime缓存: 内容缓存，文件变化时失效
+
+**三层优先级**: user(200) > project(100) > builtin(0)
+
+**SKILL.md Contract**:
+```yaml
+---
+name: <string>        # 必需
+description: <string> # 必需
+version: <semver>     # 必需
+author: <string>      # 必需
+requires:             # 可选
+  tools: []
+  env: []
+  python_packages: []
+exposure:             # 必需
+  visible: true
+  user_invocable: true
+  priority: <int>
+  tags: []
+config_schema: {}     # 可选
+---
+Markdown 正文...
+```
+
+**Commits**: `2e85218` `6a20104` `bd88cb4` `31cdc97` `36ed514` `79f26a3` `1275141` `fb44637` `3987fab`
+
+---
+
 ## Coding 场景 CA IO 流程
 
 ### Coding 场景 CA Layer Stack

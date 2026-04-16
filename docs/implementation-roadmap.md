@@ -598,6 +598,25 @@ Phase 9: 生产化 (V2)       ← PG + KG + 完整权限
 
 ---
 
+## D-26: User Skill Plug-in System ✅ (2026-04-14~16)
+
+> SKILL.md 标准化 + 渐进式注入 + 三层优先级目录结构
+
+| 阶段 | Commit | 内容 |
+|------|--------|------|
+| P0 | `2e85218` | SkillLoader + SkillCatalog |
+| P1 | `6a20104` | SkillExecutor + SkillConfig |
+| P2 | `bd88cb4` | ToolRegistry Bridge + Prompt注入 |
+| P3 | `31cdc97` | HotReload + CLI |
+| 审查修复 | `36ed514`等 | C-1/C-2/H-1/H-2/H-3 |
+| 验证 | `c6a4cb7` | hello-agent 验证通过 |
+
+**最终评分**: 9.6/10 PASS
+
+详细设计见: `docs/D-26-user-skill-plug-in.md`
+
+---
+
 ## 时间估算
 
 | Phase | 预计工时 | 累计 |
