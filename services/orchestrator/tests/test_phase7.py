@@ -13,6 +13,7 @@ import math
 import sys
 import os
 import pytest
+import tempfile
 
 # Ensure src is importable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -67,6 +68,17 @@ def _service_factory() -> MemoryService:
     return MemoryService(store=InMemoryStore())
 
 
+@pytest.fixture
+def vector_store(tmp_path):
+    """Isolated FAISSVectorStore backed by a temporary directory."""
+    from src.memory.vector import FAISSVectorStore
+
+    store = FAISSVectorStore(persist_path=str(tmp_path / "test.faiss"))
+    yield store
+    # Force sync save before cleanup
+    store.save()
+
+
 # ════════════════════════════════════════════════════════════════════
 # 7.1 向量检索
 # ════════════════════════════════════════════════════════════════════
@@ -75,63 +87,51 @@ class TestVectorStore:
     """Test VectorStore abstraction and FAISS backend."""
 
     @pytest.mark.asyncio
-    async def test_add_and_search(self):
+    async def test_add_and_search(self, vector_store):
         """VectorStore can index and semantically retrieve memories."""
-        from src.memory.vector import FAISSVectorStore
+        await vector_store.add("m1", "How to deploy a Python service to production")
+        await vector_store.add("m2", "The weather is sunny today")
+        await vector_store.add("m3", "Steps for deploying Docker containers")
 
-        store = FAISSVectorStore()
-        await store.add("m1", "How to deploy a Python service to production")
-        await store.add("m2", "The weather is sunny today")
-        await store.add("m3", "Steps for deploying Docker containers")
-
-        results = await store.search("deployment process", top_k=2)
+        results = await vector_store.search("deployment process", top_k=2)
         assert len(results) == 2
         # m1 and m3 should be more similar to "deployment" than m2
         ids = [r[0] for r in results]
         assert "m1" in ids or "m3" in ids
 
     @pytest.mark.asyncio
-    async def test_add_batch(self):
+    async def test_add_batch(self, vector_store):
         """Batch indexing works correctly."""
-        from src.memory.vector import FAISSVectorStore
-
-        store = FAISSVectorStore()
         items = [
             (f"m{i}", f"Memory item number {i} about topic {i % 3}")
             for i in range(10)
         ]
-        await store.add_batch(items)
-        assert await store.size() == 10
+        await vector_store.add_batch(items)
+        assert await vector_store.size() == 10
 
-        results = await store.search("topic 0", top_k=3)
+        results = await vector_store.search("topic 0", top_k=3)
         assert len(results) == 3
 
     @pytest.mark.asyncio
-    async def test_delete(self):
+    async def test_delete(self, vector_store):
         """Delete removes item from search results."""
-        from src.memory.vector import FAISSVectorStore
+        await vector_store.add("m1", "unique content about machine learning")
+        await vector_store.add("m2", "something completely different")
 
-        store = FAISSVectorStore()
-        await store.add("m1", "unique content about machine learning")
-        await store.add("m2", "something completely different")
-
-        await store.delete("m1")
+        await vector_store.delete("m1")
         # After deletion, search should not return m1
-        results = await store.search("machine learning", top_k=5)
+        results = await vector_store.search("machine learning", top_k=5)
         ids = [r[0] for r in results]
         # m1 is tombstoned; may still appear in results but search
         # should not crash
         assert isinstance(results, list)
 
     @pytest.mark.asyncio
-    async def test_size(self):
+    async def test_size(self, vector_store):
         """Size tracks indexed vectors."""
-        from src.memory.vector import FAISSVectorStore
-
-        store = FAISSVectorStore()
-        assert await store.size() == 0
-        await store.add("m1", "test")
-        assert await store.size() == 1
+        assert await vector_store.size() == 0
+        await vector_store.add("m1", "test")
+        assert await vector_store.size() == 1
 
 
 class TestSemanticRecall:

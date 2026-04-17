@@ -81,6 +81,13 @@ class FAISSVectorStore(VectorStore):
         persist_path: str = "data/memory.faiss",
     ) -> None:
         self._provider = provider or SentenceTransformerProvider()
+        # Resolve relative paths to absolute and ensure directory exists
+        if persist_path:
+            persist_path_obj = Path(persist_path)
+            if not persist_path_obj.is_absolute():
+                persist_path_obj = Path.cwd() / persist_path_obj
+            persist_path_obj.parent.mkdir(parents=True, exist_ok=True)
+            persist_path = str(persist_path_obj)
         self._persist_path = persist_path
         self._ids: list[str] = []
         self._id_to_idx: dict[str, int] = {}
