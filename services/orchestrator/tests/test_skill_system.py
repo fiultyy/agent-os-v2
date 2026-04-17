@@ -312,10 +312,10 @@ Usage: blah blah
             catalog = SkillCatalog(loader)
             catalog.reload()
 
-        content = catalog.get_skill_content("memo")
-        assert content is not None
-        assert "# Memo Skill" in content
-        assert "Usage: blah blah" in content
+            content = catalog.get_skill_content("memo")
+            assert content is not None
+            assert "# Memo Skill" in content
+            assert "Usage: blah blah" in content
 
     def test_get_skill_content_nonexistent(self):
         """get_skill_content() returns None for unknown skill."""

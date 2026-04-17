@@ -123,8 +123,8 @@ class SkillLoader:
                 continue
             for entry in self._scan_dir(dir_path, source):
                 # Higher priority source wins (user > project > builtin)
-                if entry.name not in collected:
-                    collected[entry.name] = entry
+                # Iterate from lowest to highest so highest overwrites
+                collected[entry.name] = entry
 
         return list(collected.values())
 
