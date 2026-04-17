@@ -85,6 +85,7 @@ exposure:
                 (Path(td) / bad / "SKILL.md").write_text(
                     self._make_skill_md("bad-skill"), encoding="utf-8",
                 )
+            (Path(td) / "good-skill").mkdir(parents=True, exist_ok=True)
             (Path(td) / "good-skill" / "SKILL.md").write_text(
                 self._make_skill_md("good-skill", "Good"), encoding="utf-8",
             )
@@ -101,6 +102,7 @@ exposure:
             # builtin has skill "my-skill"
             builtin = Path(td) / "builtin"
             builtin.mkdir()
+            (builtin / "my-skill").mkdir(parents=True, exist_ok=True)
             (builtin / "my-skill" / "SKILL.md").write_text(
                 self._make_skill_md("my-skill", "Builtin version"),
                 encoding="utf-8",
@@ -108,6 +110,7 @@ exposure:
             # user has same skill "my-skill" — should win
             user = Path(td) / "user"
             user.mkdir()
+            (user / "my-skill").mkdir(parents=True, exist_ok=True)
             (user / "my-skill" / "SKILL.md").write_text(
                 self._make_skill_md("my-skill", "User version"),
                 encoding="utf-8",
@@ -136,6 +139,7 @@ exposure:
         """exposure.visible and exposure.user_invocable are parsed."""
         from skills.skill_loader import SkillLoader
         with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "secret").mkdir(parents=True, exist_ok=True)
             (Path(td) / "secret" / "SKILL.md").write_text(
                 self._make_skill_md("secret", "Hidden skill",
                                     visible=False, user_invocable=True),
@@ -152,6 +156,7 @@ exposure:
         """requires.tools and requires.env are parsed."""
         from skills.skill_loader import SkillLoader
         with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "tooled").mkdir(parents=True, exist_ok=True)
             (Path(td) / "tooled" / "SKILL.md").write_text(
                 self._make_skill_md("tooled", "Has requirements",
                                     tools=["browser", "http_get"],
@@ -345,6 +350,7 @@ exposure:
             v1 = catalog.version
 
             # Add another skill
+            (Path(td) / "s2").mkdir(parents=True, exist_ok=True)
             (Path(td) / "s2" / "SKILL.md").write_text("""---
 name: s2
 description: desc2
