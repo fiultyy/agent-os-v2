@@ -3,10 +3,16 @@
 On startup the module loads (or auto-generates) an RSA key pair used for
 signing and verifying JSON Web Tokens.  The public key can be safely shared
 with other services that only need to verify tokens.
+
+Keys are persisted to disk so they survive service restarts:
+- If ``JWT_PRIVATE_KEY_PATH`` / ``JWT_PUBLIC_KEY_PATH`` are set, those paths are used.
+- Otherwise keys are stored in ``data/keys/jwt_private.pem`` / ``data/keys/jwt_public.pem``
+  (relative to the gateway service root).
 """
 
 from __future__ import annotations
 
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -29,6 +35,12 @@ REFRESH_TOKEN_TTL: timedelta = timedelta(days=7)
 _private_key_pem: str | None = None
 _public_key_pem: str | None = None
 
+# Default key storage directory (relative to this file's location)
+_GATEWAY_ROOT = Path(__file__).parent.parent
+_DEFAULT_KEY_DIR = _GATEWAY_ROOT / "data" / "keys"
+_DEFAULT_PRIVATE_PATH = _DEFAULT_KEY_DIR / "jwt_private.pem"
+_DEFAULT_PUBLIC_PATH = _DEFAULT_KEY_DIR / "jwt_public.pem"
+
 
 def _generate_key_pair() -> tuple[str, str]:
     """Generate a fresh 2048-bit RSA key pair and return PEM strings."""
@@ -48,14 +60,34 @@ def _generate_key_pair() -> tuple[str, str]:
     return priv_pem, pub_pem
 
 
+def _save_keys(priv_pem: str, pub_pem: str, priv_path: Path, pub_path: Path) -> None:
+    """Persist a key pair to the given file paths, creating parent dirs as needed."""
+    priv_path.parent.mkdir(parents=True, exist_ok=True)
+    priv_path.write_text(priv_pem, encoding="utf-8")
+    pub_path.write_text(pub_pem, encoding="utf-8")
+
+
 def _load_or_generate_keys() -> tuple[str, str]:
-    """Load keys from file paths (if configured) or auto-generate a pair."""
-    if JWT_PRIVATE_KEY_PATH and JWT_PUBLIC_KEY_PATH:
-        priv = Path(JWT_PRIVATE_KEY_PATH).read_text()
-        pub = Path(JWT_PUBLIC_KEY_PATH).read_text()
+    """Load keys from configured or default paths, generating and saving if absent."""
+    # Resolve key paths: use env-configured paths, otherwise fall back to defaults
+    priv_path_str = JWT_PRIVATE_KEY_PATH or str(_DEFAULT_PRIVATE_PATH)
+    pub_path_str = JWT_PUBLIC_KEY_PATH or str(_DEFAULT_PUBLIC_PATH)
+    priv_path = Path(priv_path_str)
+    pub_path = Path(pub_path_str)
+
+    # Load from file if both files exist
+    if priv_path.exists() and pub_path.exists():
+        priv = priv_path.read_text(encoding="utf-8")
+        pub = pub_path.read_text(encoding="utf-8")
         return priv, pub
 
-    return _generate_key_pair()
+    # Generate new key pair
+    priv_pem, pub_pem = _generate_key_pair()
+
+    # Persist to the resolved paths (whether env-configured or default)
+    _save_keys(priv_pem, pub_pem, priv_path, pub_path)
+
+    return priv_pem, pub_pem
 
 
 def init_keys() -> None:

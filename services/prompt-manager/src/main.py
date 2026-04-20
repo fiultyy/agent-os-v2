@@ -63,7 +63,8 @@ async def create_template(req: CreateTemplateRequest) -> dict:
     now = datetime.now(timezone.utc).isoformat()
 
     if not req.variables:
-        req.variables = re.findall(r"\{(\w+)\}", req.content)
+        req.variables = re.findall(r"\{\{(\w+)\}\}", req.content)
+
 
     template = {
         "id": template_id,
@@ -106,7 +107,7 @@ async def update_template(template_id: str, req: UpdateTemplateRequest) -> dict:
         t["name"] = req.name
     if req.content is not None:
         t["content"] = req.content
-        t["variables"] = re.findall(r"\{(\w+)\}", req.content)
+        t["variables"] = re.findall(r"\{\{(\w+)\}\}", req.content)
         vs = _version_stores.get(template_id)
         if vs:
             vs.create_version(req.content, {"description": t.get("description", "")})
@@ -180,7 +181,7 @@ async def rollback_template(template_id: str, version: int) -> dict:
         return {"error": "Version not found"}
 
     t["content"] = v["content"]
-    t["variables"] = re.findall(r"\{(\w+)\}", v["content"])
+    t["variables"] = re.findall(r"\{\{(\w+)\}\}", v["content"])
     t["updated_at"] = datetime.now(timezone.utc).isoformat()
 
     vs.create_version(v["content"], {"rollback_from": version})

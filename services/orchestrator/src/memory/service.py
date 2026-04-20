@@ -224,7 +224,7 @@ class MemoryService:
         # Third retrieval path — Knowledge Graph
         if self._kg_recall is not None and query.strip():
             kg_results = await self._kg_recall.recall(
-                query, agent_id, session_id, memory_type, scope,
+                query, agent_id, session_id, memory_type, scope, top_k,
             )
             if kg_results:
                 seen_ids: set[str] = {item.id for item in results}
