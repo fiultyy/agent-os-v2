@@ -759,9 +759,9 @@ class AgentBaseProfile:
         self.layers[layer.layer].sort(key=lambda x: x.priority)
     
     def compile(self) -> str:
-        """编译为完整 System Prompt"""
+        """编译为完整 System Prompt（L0-L4，L5=History 由 ContextCompiler 单独管理）"""
         lines = []
-        for layer in range(6):
+        for layer in range(5):  # L0-L4 only, L5 is managed by ContextCompiler
             for profile in self.layers.get(layer, []):
                 lines.append(f"=== {profile.source} (L{layer}) ===")
                 lines.append(profile.content)
