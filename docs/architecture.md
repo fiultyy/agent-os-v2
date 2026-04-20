@@ -614,7 +614,7 @@ Layer 3: Tool Execution
 │       └── code_review.py     # read + search + write + comment
 │
 └── L3.4: Tool Catalog（工具目录）
-    └── catalog.py       # 按 category/tag 索引工具
+    └── catalog.py       # 按 category/tag/version 索引工具（已实现）
 ```
 
 ### 接口定义
@@ -626,27 +626,32 @@ from typing import Protocol, Any
 from dataclasses import dataclass
 from enum import Enum
 
-class ToolScope(Enum):
-    """工具作用域"""
-    PRIMITIVE = "primitive"      # 原子工具
-    SKILL = "skill"             # 技能工具
-    COMPOSITE = "composite"     # 组合工具
+class ToolLayer(Enum):
+    """工具层级（L3 架构）"""
+    PRIMITIVE = "L3.1"      # 原子工具
+    SKILL = "L3.2"         # 技能工具
+    COMPOSITE = "L3.3"     # 组合工具
 
 @dataclass
-class ToolMetadata:
+class ToolCatalogEntry:
+    """目录条目"""
     name: str
-    scope: ToolScope
+    layer: ToolLayer
     category: str
-    description: str
-    parameters: dict[str, Any]
-    tags: list[str]
+    tags: list[str] = field(default_factory=list)
+    version: str = "1.0.0"
+    description: str = ""
+    created_at: datetime
+    handler_ref: str  # 指向实际 handler 的引用
 
 class ToolRegistry(Protocol):
-    """工具注册表接口"""
-    def register(self, tool: ToolMetadata, handler: Callable) -> None: ...
-    def get(self, name: str) -> ToolMetadata | None: ...
-    def list_by_scope(self, scope: ToolScope) -> list[ToolMetadata]: ...
-    def list_by_category(self, category: str) -> list[ToolMetadata]: ...
+    """工具注册表接口（集成 ToolCatalog）"""
+    def register(self, tool: ToolCatalogEntry, handler: Callable) -> None: ...  # 自动双写到 catalog
+    def get(self, name: str) -> ToolCatalogEntry | None: ...
+    def list_by_layer(self, layer: ToolLayer) -> list[ToolCatalogEntry]: ...
+    def list_by_category(self, category: str) -> list[ToolCatalogEntry]: ...
+    def list_by_tags(self, tags: list[str]) -> list[ToolCatalogEntry]: ...
+    def search(self, query: str) -> list[ToolCatalogEntry]: ...
 
 class ToolGuardrail(Protocol):
     """安全防护接口"""
@@ -716,7 +721,7 @@ L3.1 Executor ──→ L3.3 Implementations（执行）
 | L3.3.1 primitive | ✅ 设计完成 | http_tool/file_tool/db_tool（9个方法）|
 | L3.3.2 skill | ✅ 设计完成 | browser/code/memory skill（10个方法）|
 | L3.3.3 composite | ✅ 设计完成 | browser_flow/code_review（2个组合）|
-| L3.4 Catalog | ⏳ 待启动 | category/tag 索引 |
+| L3.4 Catalog | ✅ 完成 | category/tag/version 索引 + search + registry 集成 |
 
 ---
 
