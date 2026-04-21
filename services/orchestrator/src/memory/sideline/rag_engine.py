@@ -7,6 +7,7 @@ RAGEngine - 语义检索引擎
 - 混合召回
 """
 
+import json
 import logging
 from typing import Dict, Any, List, Optional
 from pathlib import Path
@@ -241,11 +242,35 @@ class RAGEngine:
             return False
 
     def add_vector(self, memory_item: Dict[str, Any]) -> bool:
-        """添加向量索引"""
-        # TODO: 实现向量生成和索引更新
-        # 需要 embedding 模型
-        logger.warning("add_vector() not fully implemented - vector index not updated")
-        return False  # 返回 False 表示未真正实现
+        """将记忆项添加到 KG 索引（替代原向量索引）。
+
+        将 memory_item 转化为 KG entity 并写入知识图谱。
+        """
+        if not self.kg_db:
+            return False
+
+        try:
+            memory_id = memory_item.get("memory_id") or memory_item.get("id", "")
+            content = memory_item.get("content", "")
+
+            if not memory_id or not content:
+                return False
+
+            cursor = self.kg_db.cursor()
+            cursor.execute(
+                "INSERT OR REPLACE INTO entities (id, name, entity_type, properties) VALUES (?, ?, ?, ?)",
+                (memory_id, content[:100], "memory", json.dumps({
+                    "content": content,
+                    "memory_type": memory_item.get("memory_type", ""),
+                    "importance": memory_item.get("importance", 0.5),
+                    "session_id": memory_item.get("session_id", ""),
+                }))
+            )
+            self.kg_db.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to add memory to KG: {e}")
+            return False
 
     def close(self):
         """关闭连接"""
