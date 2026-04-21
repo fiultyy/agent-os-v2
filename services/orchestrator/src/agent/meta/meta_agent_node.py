@@ -175,7 +175,8 @@ class MetaAgentNode(GraphNode):
     async def cancel(self) -> None:
         """Cancel execution."""
         logger.info(f"Cancelling MetaAgentNode '{self.name}' (agent_id={self.agent_id})")
-        self.status = "failed"
+        if self.status in ("running", "executing"):
+            self.status = "failed"
 
         if self._cancel_event:
             self._cancel_event.set()
