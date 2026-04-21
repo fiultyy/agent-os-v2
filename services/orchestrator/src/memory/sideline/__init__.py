@@ -10,6 +10,7 @@ Sideline Memory Agent - 旁路记忆系统
 """
 
 from .agent import SidelineMemoryAgent
+from .backward_writer import BackwardWriter, WriteBackChannel, WriteBackResult
 from .baseline import HermesWikiBaseline
 from .rag_engine import RAGEngine
 from .transcriber import SidelineTranscriber
@@ -20,6 +21,9 @@ from .critic import CriticAgent
 
 __all__ = [
     "SidelineMemoryAgent",
+    "BackwardWriter",
+    "WriteBackChannel",
+    "WriteBackResult",
     "HermesWikiBaseline",
     "RAGEngine",
     "SidelineTranscriber",
