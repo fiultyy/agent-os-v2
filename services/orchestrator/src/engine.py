@@ -139,13 +139,17 @@ async def _shutdown() -> None:
 
 from src.api.routes.agents import router as agents_router
 from src.api.routes.memory import router as memory_router
-from src.api.routes.chat import router as chat_router
+from src.api.routes.chat import router as chat_router, root_router_health
 from src.api.routes.entities import router as entities_router
 
-app.include_router(agents_router)
-app.include_router(memory_router)
-app.include_router(chat_router)
-app.include_router(entities_router)
+# Health endpoint stays at root (no version prefix)
+app.include_router(root_router_health)
+
+# All API routes under /v1 prefix
+app.include_router(agents_router, prefix="/v1")
+app.include_router(memory_router, prefix="/v1")
+app.include_router(chat_router, prefix="/v1")
+app.include_router(entities_router, prefix="/v1")
 
 
 # ── CLI entry point ────────────────────────────────────────────────

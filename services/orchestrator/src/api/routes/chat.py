@@ -324,9 +324,13 @@ def _build_execution_graph() -> StateGraph:
 # ── Health endpoint ────────────────────────────────────────────────
 
 
-@router.get("/health")
-async def health() -> dict:
+async def _health_impl() -> dict:
     return {"status": "ok"}
+
+
+# Expose at root level (no /v1 prefix) via engine.py
+root_router_health = APIRouter()
+root_router_health.add_api_route("/health", _health_impl, methods=["GET"])
 
 
 # ── Simple Chat ───────────────────────────────────────────────────
