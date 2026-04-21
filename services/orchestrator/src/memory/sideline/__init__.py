@@ -14,6 +14,9 @@ from .baseline import HermesWikiBaseline
 from .rag_engine import RAGEngine
 from .transcriber import SidelineTranscriber
 from .verifier import RecallVerifier
+from .kairos import KairosAgent
+from .dreamer import DreamerAgent
+from .critic import CriticAgent
 
 __all__ = [
     "SidelineMemoryAgent",
@@ -21,4 +24,7 @@ __all__ = [
     "RAGEngine",
     "SidelineTranscriber",
     "RecallVerifier",
+    "KairosAgent",
+    "DreamerAgent",
+    "CriticAgent",
 ]
