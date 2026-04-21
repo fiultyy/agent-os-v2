@@ -60,6 +60,7 @@ class MetaAgentNode(GraphNode):
         self.result: dict[str, Any] | None = None
         self._execution_task: asyncio.Task | None = None
         self._cancel_event: asyncio.Event | None = None
+        self._completion_event: asyncio.Event | None = None
 
     async def execute(self, state: GraphState) -> GraphState:
         """Execute meta agent and update state.
@@ -74,6 +75,7 @@ class MetaAgentNode(GraphNode):
             Updated GraphState.
         """
         self._cancel_event = asyncio.Event()
+        self._completion_event = asyncio.Event()
         self.status = "running"
         state.current_node = self.name
 
@@ -89,6 +91,11 @@ class MetaAgentNode(GraphNode):
                 state.errors.append(f"MetaAgentNode '{self.name}': No agent_id available")
                 self.status = "failed"
                 return state
+
+            # Signal completion for stub mode.
+            # Real agent_manager integrations should override _execute_agent()
+            # and manage the completion_event based on actual agent lifecycle.
+            self._completion_event.set()
 
             # 创建后台任务执行 agent（真正的任务对象，供 cancel() 使用）
             self._execution_task = asyncio.create_task(
@@ -144,33 +151,42 @@ class MetaAgentNode(GraphNode):
         )
 
     async def _execute_agent(self, state: GraphState) -> dict[str, Any]:
-        """Execute subagent and return result.
+        """Execute subagent and wait for completion.
 
-        This is a stub that integrates with the agent_manager.
-        Override this method for real agent execution.
-        The actual implementation should:
-        1. Call agent_manager to run the subagent with agent_id
-        2. Stream results back via a queue or callback
-        3. Check self._cancel_event periodically for cancellation
+        Waits for either completion_event, cancel_event, or timeout (300s).
+        Override this method for real agent_manager integration.
         """
-        if self.spawner and self.agent_id:
-            # 定期检查取消信号（每 5 秒）
-            for _ in range(60):  # 最多 5 分钟
-                if self._cancel_event and self._cancel_event.is_set():
-                    self.status = "failed"
-                    return {"error": "Cancelled", "agent_id": self.agent_id}
-                await asyncio.sleep(5)
+        # If events were never initialized (direct call, not via execute()),
+        # return immediately for backward compatibility.
+        if self._completion_event is None and self._cancel_event is None:
+            return self._build_result(state, "completed")
 
-        # 构建结果（stub）
-        result = {
+        # Event-driven wait: loop checking cancel/completion events.
+        # Override this method for real agent_manager integration that
+        # sets self._completion_event on agent completion.
+        timeout = 300
+        check_interval = 1
+
+        for _ in range(timeout):
+            if self._cancel_event and self._cancel_event.is_set():
+                return {"error": "Cancelled", "agent_id": self.agent_id}
+
+            if self._completion_event and self._completion_event.is_set():
+                return self._build_result(state, "completed")
+
+            await asyncio.sleep(check_interval)
+
+        return self._build_result(state, "timeout")
+
+    def _build_result(self, state: GraphState, status: str) -> dict[str, Any]:
+        """Build execution result dict."""
+        return {
             "agent_id": self.agent_id,
-            "status": self.status,
+            "status": status,
             "node_name": self.name,
             "input": state.input,
             "messages_count": len(state.messages),
         }
-        self.status = "completed"
-        return result
 
     async def cancel(self) -> None:
         """Cancel execution."""
