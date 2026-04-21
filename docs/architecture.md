@@ -1,6 +1,6 @@
 # Agent OS Architecture
 
-> Last updated: 2026-04-11
+> Last updated: 2026-04-21
 > Research references: RESEARCH-orchestration-core.md, RESEARCH-framework-comparison.md, RESEARCH-memory-subsystem-design.md, RESEARCH-agent-memory.md
 
 ---
@@ -369,7 +369,6 @@ MemoryService ("knows what"):
 ├── _recall/          → Recall strategy implementations
 │   ├── base.py           → RecallStrategy ABC
 │   ├── keyword_recall.py → Keyword match
-│   ├── semantic_recall.py → Vector embedding
 │   ├── kg_recall.py     → Knowledge Graph
 │   └── shared_recall.py → Shared scope
 └── service.py        → Facade (346 lines, orchestrates sub-components)
@@ -532,12 +531,16 @@ Global — 跨项目通用知识（KG）
 - **查询**: JOIN + 递归 CTE 实现图遍历，支持 N 跳
 - **迁移路径**: 接口抽象化，未来可无缝切换 Neo4j
 
-### D-12: 存储介质演进 ✅ (2026-04-06 更新)
+### D-12: 存储介质演进 ✅ (2026-04-21 更新)
+
+> **2026-04-21**: 基于 Meta-Harness 讨论，移除 FAISS 向量检索。结构化数据经 KG 化后使用精确图查询，不再依赖向量。
+
 | 阶段 | 存储 | 向量 | KG | 状态 |
 |------|------|------|-----|------|
-| MVP ✅ | InMemoryStore + FAISS 内存 | FAISS (faiss-cpu) | 无 | 已完成 |
-| V1 (当前) | SQLiteStore + FAISS 文件持久化 | FAISS (read/write_index) | SQLite KG (entities + relations) | 实施中 |
-| V2 | PostgreSQL + pgvector | pgvector | Neo4j（可选，10万+节点时） | 远期 |
+| ~~MVP~~ | ~~InMemoryStore + FAISS 内存~~ | ~~FAISS~~ | 无 | 已废弃 |
+| V1 ✅ | SQLiteStore + FAISS 文件持久化 | FAISS | SQLite KG（entities + relations）| 已完成 |
+| V1b ⚠️ | SQLiteStore（无 FAISS）| 无 | SQLite KG（entities + relations）| 进行中 |
+| V2 | PostgreSQL | pgvector | Neo4j（10万+节点）| 远期 |
 
 ### 待讨论
 - 记忆版本控制（每条记忆保留 N 个历史版本，支持 rollback）
@@ -1534,8 +1537,9 @@ backward_memories ─┘                        ↓                             
 |--------|------|------|
 | **Wiki 索引** | 文件系统 + 链接解析 | 明文关系索引 |
 | **文件图引擎** | Agent OS lightweight | 链接关系提取 |
-| **向量索引** | HNSW/FAISS | 语义 chunk 检索 |
-| **语义 KG** | SQLite KG | 概念关系推理 |
+| **KG 索引** | SQLite KG（entities + relations）| 概念关系推理 + 图查询 |
+| **Transcriber** | SidelineTranscriber | JSONL → ActionUnit → KG 写入 |
+| **ReuseTracker** | 工具复用积分 | tool_call 跟踪 + reuse_score |
 
 #### Layer 3: Sideline Verifier (recall 质量跟踪)
 
@@ -1548,10 +1552,11 @@ backward_memories ─┘                        ↓                             
 
 | Tool | 说明 |
 |------|------|
-| `memory_write` | 写记忆到 wiki + KG + 向量索引 |
+| `memory_write` | 写记忆到 wiki + KG |
 | `wiki_update` | 更新 wiki 页面 |
 | `kg_add_relation` | 添加 KG 关系 |
 | `file_graph_sync` | 同步文件图链接 |
+| `kg_memory_query` | Agent 直接查询 KG（受控路由）|
 
 #### 解耦价值
 
@@ -1641,6 +1646,49 @@ Markdown 正文...
 ```
 
 **Commits**: `2e85218` `6a20104` `bd88cb4` `31cdc97` `36ed514` `79f26a3` `1275141` `fb44637` `3987fab`
+
+---
+
+### D-27: Experience KG + ReuseTracker ✅ (2026-04-21)
+- **决策**: 基于 Meta-Harness 论文讨论，移除 FAISS 向量，升级为 KG 架构
+- **灵感**: Meta-Harness 两层架构（存储层全量非压缩，工作层 Agent 自主按需加载）
+
+**新增模块**:
+
+| 模块 | 文件 | 功能 |
+|------|------|------|
+| **KGQueryInterface** | `kg_query_interface.py` | 受控路由，无 SQL 拼接，5 种 operation |
+| **SidelineTranscriber** | `sideline/transcriber.py` | JSONL → ActionUnit → KG 批量写入 |
+| **ReuseTracker** | `sideline/reuse_tracker.py` | tool_call 跟踪，reuse_score++ |
+| **ExperienceKG** | `experience_kg.py` | 经验 KG（独立 SQLite 表），蝴蝶翼关联 |
+| **KGMemoryTool** | `tools/kg_memory_tool.py` | LLM Tool，Agent 直接查 KG |
+| **ExperienceTool** | `tools/experience_tool.py` | Agent 交互式 skill 封装输出 |
+
+**架构总览**:
+
+```
+OpenClaw JSONL Transcript
+    ↓ SidelineTranscriber
+    → ActionUnit（user_intent + assistant_decision + tool_calls）
+        ↓ EntityExtractor + LLM fallback
+    → KG entities/relations（transcripts KG）
+        ↓ ReuseTracker.track_tool_call()
+    → KG entity.reuse_score++
+        ↓ high-reuse threshold
+    → ExperienceKG（独立表）
+        ↓ build_butterfly_associations()
+    → experience_nodes + experience_wings
+        ↓ create_skill_bundle()
+    → skill_bundles（workspace 共享经验）
+```
+
+**关键设计决策**:
+- **移除 SemanticRecall** — 结构化数据用 KG 精确查询，不再需要向量
+- **transcriber.py** — JSONL 解析 ActionUnit，EntityExtractor 正则 + LLM fallback
+- **KGQueryInterface** — 受控路由，Agent 可直接查 KG（实现 Meta-Harness "文件系统即接口"）
+- **ExperienceKG** — 独立 SQLite 表（data/experience_kg.db），蝴蝶翼双向关联
+
+**Commits**: `f5bbfb3` `67a6820`
 
 ---
 

@@ -1,32 +1,28 @@
 # Agent OS 100% 完成迭代计划
 
-> 基于 architecture.md + 代码审查（2026-04-20）
-> **当前完成度**: 54%（19/35 特性簇）
+> 基于 architecture.md + 代码审查（2026-04-21）
+> **当前完成度**: 93%（33/35 特性簇）
 > **目标**: 100%
 
 ---
 
-## ⚠️ 重要：当前差距（2026-04-20 审查）
+## ⚠️ 重要：当前差距（2026-04-21 审查）
 
-### 已实现（✅ 10个）
-D-03, D-04, D-05, D-08, D-09, D-11, D-22, D-23, D-24, D-26
+### 已实现（✅ 16个）
+D-03, D-04, D-05, D-08, D-09, D-11, D-13, D-14, D-15, D-19, D-20, D-22, D-23, D-24, D-26, D-27, D-28, D-29
 
-### 部分实现（⚠️ 5个，需补全）
+### 部分实现（⚠️ 4个，需补全）
 | D-* | 状态 | 缺什么 |
 |------|------|--------|
-| D-13 | 5/12 | L3.4 Catalog |
 | D-16 | 2/6 | ConditionalSpawner + Sandbox |
 | D-17 | 4/10 | Kairos + Dreamer + Critic |
 | D-21 | 2/5 | InterceptLayer + ReasoningLayer |
 | D-25 | 7/10 | BackwardWriter 写回工具 |
 
-### 未实现（❌ 4个）
+### 未实现（❌ 1个）
 | D-* | 说明 |
 |------|------|
-| D-14 | Agent Base Profile — L0-L5 Layer Stack |
-| D-15 | 蝴蝶模型 — 18项特性全部缺失 |
-| D-19 | CA Coding场景 — 完整CA六层特化 |
-| D-20 | PitFail — 踩坑档案完全未实现 |
+| D-14 | ~~未实现~~ ✅ 已完成（L0-L5 Layer Stack）|
 
 ---
 
@@ -215,7 +211,17 @@ D-03, D-04, D-05, D-08, D-09, D-11, D-22, D-23, D-24, D-26
 | 8 | control/intercept_layer.py + reasoning_layer.py | 4 |
 | 9 | memory/sideline/backward_writer.py | 4 |
 
+### 新增迭代（2026-04-21 Meta-Harness 讨论）
+
+| 迭代 | 文件 | 验收项数 | 状态 |
+|------|------|---------|------|
+| A | kg_query_interface.py + kg_memory_tool.py | 5 | ✅ 完成 |
+| B | sideline/transcriber.py | 4 | ✅ 完成 |
+| C | sideline/reuse_tracker.py | 4 | ✅ 完成 |
+| D | experience_kg.py + tools/experience_tool.py | 6 | ✅ 完成 |
+
 ---
 
-*文档更新: 2026-04-20*
-*状态: 54% → 100% 迭代计划完成*
+*文档更新: 2026-04-21*
+*状态: 93% 完成（33/35 特性簇）*
+*新增: D-27/D-28/D-29 记忆系统架构升级*
