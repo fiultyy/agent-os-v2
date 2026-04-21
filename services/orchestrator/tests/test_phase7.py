@@ -135,16 +135,13 @@ class TestVectorStore:
 
 
 class TestSemanticRecall:
-    """Test MemoryService.recall() with SEMANTIC mode."""
+    """Test MemoryService.recall() with KEYWORD mode (FAISS removed, KG+keyword dual-path)."""
 
     @pytest.mark.asyncio
     async def test_semantic_recall(self):
-        """Semantic search returns relevant memories, not keyword matches."""
-        from src.memory.vector import FAISSVectorStore
-
+        """Keyword recall returns relevant memories, not unrelated matches."""
         svc = MemoryService(
             store=InMemoryStore(),
-            vector_store=FAISSVectorStore(),
         )
 
         await svc.store("The server crashed due to memory overflow", agent_id="a1")
@@ -152,13 +149,13 @@ class TestSemanticRecall:
         await svc.store("How to debug production outages", agent_id="a1")
 
         results = await svc.recall(
-            "system failure troubleshooting",
+            "server crashed",
             agent_id="a1",
-            mode=RecallMode.SEMANTIC,
+            mode=RecallMode.KEYWORD,
             top_k=2,
         )
         assert len(results) <= 2
-        # Should return crash/outage related items, not lunch
+        # Should return crash-related items, not lunch
         for r in results:
             assert "lunch" not in r.content.lower()
 
