@@ -20,6 +20,7 @@ class RecallMode(str, Enum):
 
     KEYWORD = "keyword"        # Simple case-insensitive keyword matching
     SEMANTIC = "semantic"      # Vector similarity search + optional rerank
+    UNIFIED = "unified"        # Keyword + KG dual-path fusion
 
 
 class MemoryScope(str, Enum):

@@ -29,6 +29,7 @@ from src.memory._recall import (
     KeywordRecall,
     KGRecall,
     SharedRecall,
+    UnifiedRecall,
 )
 
 
@@ -195,29 +196,22 @@ class MemoryService:
         Returns:
             List of matching memory items (content may be filtered).
         """
-        results = await self._keyword_recall.recall(
-            query, agent_id, session_id, memory_type, scope, top_k,
-        )
-
-        # Third retrieval path — Knowledge Graph
-        if self._kg_recall is not None and query.strip():
-            kg_results = await self._kg_recall.recall(
+        # Unified dual-path recall (P4)
+        if (
+            mode == RecallMode.UNIFIED
+            or (mode == RecallMode.KEYWORD and self._kg_recall is not None)
+        ) and self._kg_recall is not None:
+            unified = UnifiedRecall(
+                keyword_recall=self._keyword_recall,
+                kg_recall=self._kg_recall,
+            )
+            results = await unified.recall(
                 query, agent_id, session_id, memory_type, scope, top_k,
             )
-            if kg_results:
-                seen_ids: set[str] = {item.id for item in results}
-                for item in kg_results:
-                    if item.id not in seen_ids:
-                        item.metadata["_kg_match"] = True
-                        results.append(item)
-                        seen_ids.add(item.id)
-                results.sort(
-                    key=lambda i: (
-                        1.0 if i.metadata.get("_kg_match") else 0.0,
-                        i.importance,
-                    ),
-                    reverse=True,
-                )
+        else:
+            results = await self._keyword_recall.recall(
+                query, agent_id, session_id, memory_type, scope, top_k,
+            )
 
         if include_shared and agent_id:
             shared = await self._shared_recall.recall(
