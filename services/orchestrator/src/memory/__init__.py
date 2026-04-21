@@ -18,6 +18,9 @@ from src.memory.permissions import (
     AccessGrant,
     AccessLogEntry,
 )
+from src.memory.kg_query_interface import KGQueryInterface
+from src.memory.sideline.transcriber import SidelineTranscriber
+from src.memory.tools import KGMemoryTool
 
 __all__ = [
     "MemoryService",
@@ -34,4 +37,7 @@ __all__ = [
     "PermissionLevel",
     "AccessGrant",
     "AccessLogEntry",
+    "KGQueryInterface",
+    "SidelineTranscriber",
+    "KGMemoryTool",
 ]

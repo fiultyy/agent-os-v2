@@ -12,11 +12,13 @@ Sideline Memory Agent - 旁路记忆系统
 from .agent import SidelineMemoryAgent
 from .baseline import HermesWikiBaseline
 from .rag_engine import RAGEngine
+from .transcriber import SidelineTranscriber
 from .verifier import RecallVerifier
 
 __all__ = [
     "SidelineMemoryAgent",
     "HermesWikiBaseline",
     "RAGEngine",
+    "SidelineTranscriber",
     "RecallVerifier",
 ]

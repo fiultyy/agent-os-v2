@@ -20,7 +20,6 @@ from src.memory.types import (
     RecallMode,
 )
 from src.memory.store import InMemoryStore
-from src.memory.vector import VectorStore
 from src.memory.permissions import PermissionManager, PermissionLevel
 from src.memory.scorer import ImportanceScorer
 from src.memory._crud import CrudOperations
@@ -28,7 +27,6 @@ from src.memory._blocks import BlockOperations
 from src.memory._session import SessionOperations
 from src.memory._recall import (
     KeywordRecall,
-    SemanticRecall,
     KGRecall,
     SharedRecall,
 )
@@ -37,10 +35,10 @@ from src.memory._recall import (
 class MemoryService:
     """High-level memory management service for agents.
 
-    Wraps an :class:`InMemoryStore` (and optional :class:`VectorStore`
-    and :class:`KnowledgeGraph`) and provides domain-level operations
-    including keyword/semantic/KG recall, block management, session
-    lifecycle, and cross-agent permission-controlled access.
+    Wraps an :class:`InMemoryStore` (and optional :class:`KnowledgeGraph`)
+    and provides domain-level operations including keyword/KG recall,
+    block management, session lifecycle, and cross-agent permission-
+    controlled access.
 
     This facade delegates to focused sub-components:
     - :class:`CrudOperations` for store/get/update/delete.
@@ -50,7 +48,6 @@ class MemoryService:
 
     Attributes:
         store: The underlying persistence layer.
-        vector_store: Optional vector store for semantic retrieval.
         kg: Optional knowledge graph for entity-based retrieval.
         permissions: Permission manager for cross-agent access control.
     """
@@ -58,13 +55,11 @@ class MemoryService:
     def __init__(
         self,
         store: InMemoryStore | None = None,
-        vector_store: VectorStore | None = None,
         knowledge_graph: Any | None = None,
         permission_manager: PermissionManager | None = None,
         auto_score: bool = True,
     ) -> None:
         self._store = store or InMemoryStore()
-        self._vector_store = vector_store
         self._kg = knowledge_graph
         self._permissions = permission_manager or PermissionManager()
         self._auto_score = auto_score
@@ -73,7 +68,7 @@ class MemoryService:
         # Sub-components
         self._crud = CrudOperations(
             store=self._store,
-            vector_store=self._vector_store,
+            vector_store=None,
             permissions=self._permissions,
             scorer=self._scorer,
             auto_score=self._auto_score,
@@ -85,13 +80,8 @@ class MemoryService:
             store_func=self._crud.store,
         )
 
-        # Recall strategies
+        # Recall strategies (semantic/vector removed)
         self._keyword_recall = KeywordRecall(store=self._store)
-        self._semantic_recall: SemanticRecall | None = None
-        if vector_store is not None:
-            self._semantic_recall = SemanticRecall(
-                store=self._store, vector_store=vector_store,
-            )
         self._kg_recall: KGRecall | None = None
         if knowledge_graph is not None:
             self._kg_recall = KGRecall(
@@ -105,11 +95,6 @@ class MemoryService:
     def store_backend(self) -> InMemoryStore:
         """Access the underlying persistence layer."""
         return self._store
-
-    @property
-    def vector_store(self) -> VectorStore | None:
-        """Access the optional vector store."""
-        return self._vector_store
 
     @property
     def kg(self) -> Any | None:
@@ -190,14 +175,12 @@ class MemoryService:
     ) -> list[MemoryItem]:
         """Recall memories matching a query.
 
-        Supports three retrieval paths:
+        Supports two retrieval paths:
         - **KEYWORD**: Case-insensitive keyword matching.
-        - **SEMANTIC**: Vector similarity search + keyword rerank.
         - **KG** (Knowledge Graph): Entity lookup -> associated memory IDs.
 
-        When mode=SEMANTIC and a KG is configured, all three paths
-        are combined. Results are deduplicated and KG-matched items
-        receive a score boost.
+        When a KG is configured, both paths are combined.
+        Results are deduplicated and KG-matched items receive a score boost.
 
         Args:
             query: Search query text.
@@ -212,14 +195,9 @@ class MemoryService:
         Returns:
             List of matching memory items (content may be filtered).
         """
-        if mode == RecallMode.SEMANTIC and self._semantic_recall is not None:
-            results = await self._semantic_recall.recall(
-                query, agent_id, session_id, memory_type, scope, top_k,
-            )
-        else:
-            results = await self._keyword_recall.recall(
-                query, agent_id, session_id, memory_type, scope, top_k,
-            )
+        results = await self._keyword_recall.recall(
+            query, agent_id, session_id, memory_type, scope, top_k,
+        )
 
         # Third retrieval path — Knowledge Graph
         if self._kg_recall is not None and query.strip():
