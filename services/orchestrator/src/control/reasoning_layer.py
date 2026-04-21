@@ -44,8 +44,9 @@ class ReasoningLayer:
         tree = layer.build_tree("s1")
     """
 
-    def __init__(self) -> None:
+    def __init__(self, max_sessions: int = 100) -> None:
         self._chains: dict[str, list[ReasoningStep]] = {}
+        self._max_sessions = max_sessions
 
     async def capture_step(self, session_id: str, step: ReasoningStep) -> None:
         """记录一个推理步骤。
@@ -57,6 +58,10 @@ class ReasoningLayer:
             step: 推理步骤数据。
         """
         if session_id not in self._chains:
+            if len(self._chains) >= self._max_sessions:
+                # Remove oldest session
+                oldest = next(iter(self._chains))
+                del self._chains[oldest]
             self._chains[session_id] = []
         self._chains[session_id].append(step)
 
@@ -161,3 +166,7 @@ class ReasoningLayer:
             session_id: 会话 ID。
         """
         self._chains.pop(session_id, None)
+
+    def clear_all(self) -> None:
+        """Clear all reasoning chains."""
+        self._chains.clear()

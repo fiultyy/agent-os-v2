@@ -167,6 +167,9 @@ class SandboxExecutor:
             "HOME": tempfile.gettempdir(),
         }
 
+        # Record baseline memory before spawning child (RUSAGE_CHILDREN is cumulative)
+        baseline_rss = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+
         proc: subprocess.Popen | None = None
         timed_out = False
         memory_kb: int | None = None
@@ -230,9 +233,10 @@ class SandboxExecutor:
             exit_code = proc.returncode if proc.returncode is not None else -1
 
             # 获取子进程资源使用（必须在 proc.wait() 之后调用）
+            # RUSAGE_CHILDREN 是累计值，需要减去 baseline
             try:
                 usage = resource.getrusage(resource.RUSAGE_CHILDREN)
-                memory_kb = int(usage.ru_maxrss)  # Linux: KB, macOS: bytes / 1024
+                memory_kb = max(0, int(usage.ru_maxrss) - baseline_rss)
             except (OSError, AttributeError):
                 memory_kb = None
 

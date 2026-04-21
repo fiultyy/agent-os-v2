@@ -40,6 +40,7 @@ class DreamerAgent:
         self._interval = interval_seconds
         self._last_run: Optional[str] = None
         self._total_runs: int = 0
+        self._registered_sessions: set[str] = set()
 
     async def run(self) -> dict:
         """
@@ -140,8 +141,20 @@ class DreamerAgent:
             sessions = await self._memory.list_sessions()
             return sessions if sessions else []
 
+        # Fallback to manually registered sessions
+        if self._registered_sessions:
+            return list(self._registered_sessions)
+
         # 默认返回空（不支持自动发现）
         return []
+
+    def register_session(self, session_id: str) -> None:
+        """Register a session for consolidation."""
+        self._registered_sessions.add(session_id)
+
+    def unregister_session(self, session_id: str) -> None:
+        """Unregister a session."""
+        self._registered_sessions.discard(session_id)
 
     def get_stats(self) -> dict:
         """获取运行统计"""

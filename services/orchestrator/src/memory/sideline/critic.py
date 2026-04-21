@@ -12,6 +12,7 @@
 - CriticAgent: 使用结构化置信度评分（无需 LLM）
 """
 
+import math
 from dataclasses import dataclass
 from typing import Optional
 
@@ -200,7 +201,7 @@ class CriticAgent:
                 from datetime import datetime, timezone
                 dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
                 age_hours = (datetime.now(timezone.utc) - dt).total_seconds() / 3600
-                age_decay = max(0.5, 1.0 - (age_hours / (24 * 30)))  # 30 天最低 50%
+                age_decay = 0.5 + 0.5 * math.exp(-age_hours / (24 * 30))  # 0.5 baseline, exponential decay to 0.5
             except Exception:
                 age_decay = 0.8
         else:

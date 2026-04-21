@@ -41,16 +41,18 @@ class KairosAgent:
             injection = await agent.get_injection("session-1", context)
     """
 
-    def __init__(self, memory_service, threshold: float = 0.8, decay_rate: float = 0.05):
+    def __init__(self, memory_service, threshold: float = 0.8, decay_rate: float = 0.05, max_sessions: int = 1000):
         """
         Args:
             memory_service: 记忆服务（用于获取上下文）
             threshold: 触发阈值，默认 0.8
             decay_rate: 每轮衰减率，默认 0.05
+            max_sessions: 最大 session 数，超出时淘汰最旧的，默认 1000
         """
         self._memory = memory_service
         self._threshold = threshold
         self._decay_rate = decay_rate
+        self._max_sessions = max_sessions
         self._lif: dict[str, LIFState] = {}
 
     def update_potential(self, session_id: str, importance: float, is_decision_point: bool = False) -> float:
@@ -70,6 +72,11 @@ class KairosAgent:
         Returns:
             当前电位值
         """
+        # Evict oldest session if at capacity
+        if session_id not in self._lif and len(self._lif) >= self._max_sessions:
+            oldest = min(self._lif.items(), key=lambda x: x[1].last_update)
+            del self._lif[oldest[0]]
+
         state = self._lif.setdefault(session_id, LIFState(
             threshold=self._threshold,
             decay_rate=self._decay_rate

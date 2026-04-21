@@ -122,16 +122,18 @@ class ConditionalSpawner:
         now = datetime.now()
         # 尝试获取下一个触发时间
         try:
-            next_time = sched.get_next()
+            next_time = sched.get_next(datetime)
             if next_time is None:
                 return False
-            # 判断是否到达触发时间（精度到秒）
-            # get_next() 返回本地时间（与上面 datetime.now() 一致）
-            if isinstance(next_time, (int, float)):
-                next_dt = datetime.fromtimestamp(next_time)
-            else:
-                next_dt = next_time
-            return next_dt <= now
+            # 如果下一个触发时间已过，说明应该触发
+            if next_time <= now:
+                return True
+            # 未到触发时间，重置 schedule 到当前时间避免内部指针漂移
+            self._cron_schedules[config.agent_type] = croniter.croniter(
+                config.condition, now
+            )
+            self._last_cron_check[config.agent_type] = now
+            return False
         except (ValueError, IndexError):
             return False
 
