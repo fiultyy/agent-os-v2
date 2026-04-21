@@ -38,15 +38,32 @@ class InterceptLayer:
         self._rules: list[dict[str, str]] = []
         self._log: list[dict[str, Any]] = []
 
-    def add_rule(self, pattern: str, action: str, reason: str) -> None:
+    def add_rule(
+        self,
+        pattern: str,
+        action: str,
+        reason: str,
+        modifier: Any | None = None,
+    ) -> None:
         """添加拦截规则。
 
         Args:
             pattern: 匹配模式，字符串包含判断（case-sensitive）。
             action: 执行动作，"allow" | "block" | "modify"。
             reason: 规则说明。
+            modifier: 可选的修改回调函数。当 action 为 "modify" 时，
+                该回调接收 messages 并返回修改后的 messages。
+                对请求拦截，签名为 (list[dict]) -> list[dict]。
+                对响应拦截，签名为 (dict) -> dict。
         """
-        self._rules.append({"pattern": pattern, "action": action, "reason": reason})
+        rule: dict[str, Any] = {
+            "pattern": pattern,
+            "action": action,
+            "reason": reason,
+        }
+        if modifier is not None:
+            rule["modifier"] = modifier
+        self._rules.append(rule)
 
     async def intercept_request(self, messages: list[dict[str, Any]]) -> InterceptResult:
         """拦截 LLM 请求，返回 allow/block/modify。
@@ -65,10 +82,18 @@ class InterceptLayer:
             for msg in messages:
                 content = msg.get("content", "")
                 if isinstance(content, str) and pattern in content:
+                    modified_data: dict[str, Any] | None = None
+                    if rule["action"] == "modify":
+                        modifier_fn = rule.get("modifier")
+                        if modifier_fn is not None:
+                            modified_msgs = modifier_fn(messages)
+                        else:
+                            modified_msgs = messages
+                        modified_data = {"messages": modified_msgs}
                     result = InterceptResult(
                         action=rule["action"],
                         reason=rule["reason"],
-                        modified={"messages": messages} if rule["action"] == "modify" else None,
+                        modified=modified_data,
                     )
                     self._log.append({
                         "type": "request",
@@ -96,10 +121,17 @@ class InterceptLayer:
         for rule in self._rules:
             pattern = rule["pattern"]
             if isinstance(content, str) and pattern in content:
+                modified_data: dict[str, Any] | None = None
+                if rule["action"] == "modify":
+                    modifier_fn = rule.get("modifier")
+                    if modifier_fn is not None:
+                        modified_data = modifier_fn(response)
+                    else:
+                        modified_data = response
                 result = InterceptResult(
                     action=rule["action"],
                     reason=rule["reason"],
-                    modified=response if rule["action"] == "modify" else None,
+                    modified=modified_data,
                 )
                 self._log.append({
                     "type": "response",
