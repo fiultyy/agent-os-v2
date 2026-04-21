@@ -59,29 +59,27 @@ class TestKGMemoryToolExecute:
         with pytest.raises(ValueError, match="Unknown operation"):
             tool.execute("invalid_op", {})
 
-    def test_execute_async(self, kg_qi):
+    @pytest.mark.asyncio
+    async def test_execute_async(self, kg_qi):
         tool = KGMemoryTool(kg_qi)
-        result = asyncio.run(tool.execute_async("stats", {}))
+        result = await tool.execute_async("stats", {})
         assert isinstance(result, dict)
+        assert "entity_count" in result
 
 
 class TestKGQueryInterfaceDirect:
-    @pytest.mark.asyncio
-    async def test_query_search_entities(self, kg_qi):
-        result = await kg_qi.query("agent-1", "search_entities", {"query": "foo"})
+    def test_query_search_entities(self, kg_qi):
+        result = kg_qi.query("agent-1", "search_entities", {"query": "foo"})
         assert isinstance(result, list)
 
-    @pytest.mark.asyncio
-    async def test_query_stats(self, kg_qi):
-        result = await kg_qi.query("agent-1", "stats", {})
+    def test_query_stats(self, kg_qi):
+        result = kg_qi.query("agent-1", "stats", {})
         assert "entity_count" in result
 
-    @pytest.mark.asyncio
-    async def test_query_unknown(self, kg_qi):
+    def test_query_unknown(self, kg_qi):
         with pytest.raises(ValueError):
-            await kg_qi.query("agent-1", "no_such_op", {})
+            kg_qi.query("agent-1", "no_such_op", {})
 
-    @pytest.mark.asyncio
-    async def test_query_get_neighbors_no_entity(self, kg_qi):
-        result = await kg_qi.query("agent-1", "get_neighbors", {"entity_name": "nonexistent"})
+    def test_query_get_neighbors_no_entity(self, kg_qi):
+        result = kg_qi.query("agent-1", "get_neighbors", {"entity_name": "nonexistent"})
         assert result == []

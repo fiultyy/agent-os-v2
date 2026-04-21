@@ -21,7 +21,7 @@ class KGQueryInterface:
     def __init__(self, knowledge_graph: KnowledgeGraph) -> None:
         self._kg = knowledge_graph
 
-    async def query(self, agent_id: str, operation: str, params: dict) -> dict | list | None:
+    def query(self, agent_id: str, operation: str, params: dict) -> dict | list | None:
         """执行受控 KG 查询。
 
         Args:

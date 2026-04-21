@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from src.memory.kg_query_interface import KGQueryInterface
@@ -21,51 +22,31 @@ class KGMemoryTool:
         result = tool.execute("search_entities", {"query": "auth"})
     """
 
-    def __init__(self, kg_query_interface: KGQueryInterface) -> None:
+    def __init__(
+        self,
+        kg_query_interface: KGQueryInterface,
+        max_workers: int = 4,
+    ) -> None:
         self._qi = kg_query_interface
+        self._executor = ThreadPoolExecutor(max_workers=max_workers)
+
+    def close(self) -> None:
+        """Shutdown the thread pool. Call on cleanup."""
+        self._executor.shutdown(wait=True)
 
     def execute(self, operation: str, params: dict) -> dict | list | None:
-        """同步执行 KG 查询（供 tool registry 使用）。
-
-        内部将 async 调用包装为同步接口。
-
-        Args:
-            operation: 查询操作名。
-            params: 操作参数。
-
-        Returns:
-            查询结果。
-        """
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop and loop.is_running():
-            # 已在 async 上下文中 — 用 create_task 避免嵌套 run
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(
-                    asyncio.run,
-                    self._qi.query("system", operation, params),
-                )
-                return future.result(timeout=30)
-        else:
-            return asyncio.run(
-                self._qi.query("system", operation, params),
-            )
+        """Execute KG query synchronously (for tool registry)."""
+        return self._qi.query("system", operation, params)
 
     async def execute_async(self, operation: str, params: dict) -> dict | list | None:
-        """异步执行 KG 查询。
+        """Execute KG query asynchronously.
 
-        Args:
-            operation: 查询操作名。
-            params: 操作参数。
-
-        Returns:
-            查询结果。
+        Since KGQueryInterface.query() is synchronous, this wraps it
+        in asyncio.to_thread() to avoid blocking the event loop.
         """
-        return await self._qi.query("system", operation, params)
+        return await asyncio.to_thread(
+            self._qi.query, "system", operation, params,
+        )
 
     @staticmethod
     def get_tool_definition() -> dict:

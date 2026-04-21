@@ -314,6 +314,79 @@ class KnowledgeGraph:
             "created_at": row["created_at"] or "",
         }
 
+    # ── Entity Property Operations (controlled access) ─────────────────
+
+    def update_entity_properties(
+        self,
+        entity_id: str,
+        properties: dict[str, Any],
+    ) -> bool:
+        """Update an entity's properties dict via controlled interface.
+
+        This is the preferred way for external components (ReuseTracker, etc.)
+        to update entity properties without directly accessing _conn.
+
+        Args:
+            entity_id: The entity to update.
+            properties: New properties dict (merged with existing).
+
+        Returns:
+            True if updated, False if entity not found.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        # Read existing properties and merge
+        entity = self.get_entity(entity_id)
+        if entity is None:
+            return False
+        merged = {**entity.get("properties", {}), **properties}
+        with self._conn:
+            self._conn.execute(
+                "UPDATE entities SET properties = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(merged, ensure_ascii=False), now, entity_id),
+            )
+        return True
+
+    def query_entities_sorted_by_reuse_score(
+        self,
+        entity_type: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Query entities sorted by reuse_score stored in properties JSON.
+
+        Uses Python-side sorting (SQLite can't sort by JSON field directly).
+        For high-volume scenarios, consider adding a dedicated reuse_score REAL
+        column with an index.
+
+        Args:
+            entity_type: Optional entity type filter.
+            limit: Maximum results.
+
+        Returns:
+            Entities sorted by reuse_score descending.
+        """
+        if entity_type:
+            rows = self._conn.execute(
+                "SELECT * FROM entities WHERE type = ?", (entity_type,)
+            ).fetchall()
+        else:
+            rows = self._conn.execute("SELECT * FROM entities").fetchall()
+
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            props = json.loads(row["properties"]) if row["properties"] else {}
+            score = float(props.get("reuse_score", 0.0))
+            if score > 0:
+                results.append({
+                    "id": row["id"],
+                    "name": row["name"],
+                    "entity_type": row["type"] or "",
+                    "reuse_score": score,
+                    "properties": props,
+                })
+
+        results.sort(key=lambda x: x["reuse_score"], reverse=True)
+        return results[:limit]
+
     # ── Entity operations ─────────────────────────────────────────
 
     def add_entity(self, entity: Entity) -> str:

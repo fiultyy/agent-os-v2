@@ -20,7 +20,9 @@ from src.memory.permissions import (
 )
 from src.memory.kg_query_interface import KGQueryInterface
 from src.memory.sideline.transcriber import SidelineTranscriber
-from src.memory.tools import KGMemoryTool
+from src.memory.experience_kg import ExperienceKG
+from src.memory.tools.kg_memory_tool import KGMemoryTool
+from src.memory.tools.experience_tool import ExperienceTool
 
 __all__ = [
     "MemoryService",
@@ -40,4 +42,6 @@ __all__ = [
     "KGQueryInterface",
     "SidelineTranscriber",
     "KGMemoryTool",
+    "ExperienceKG",
+    "ExperienceTool",
 ]

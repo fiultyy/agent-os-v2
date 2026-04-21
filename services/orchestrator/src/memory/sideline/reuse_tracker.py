@@ -76,15 +76,9 @@ class ReuseTracker:
         # 保留最近 100 条
         history = history[-100:]
 
-        # 5. 写回
+        # 5. 通过受控接口写回（不再直接访问 _conn）
         new_props = {**props, "reuse_score": new_score, "reuse_history": history}
-        self._kg._conn.execute(
-            "UPDATE entities SET properties = ?, updated_at = ? WHERE id = ?",
-            (json.dumps(new_props, ensure_ascii=False),
-             datetime.now(timezone.utc).isoformat(),
-             entity_id),
-        )
-        self._kg._conn.commit()
+        self._kg.update_entity_properties(entity_id, new_props)
 
         return {"entity_id": entity_id, "old_score": current_score, "new_score": new_score}
 
@@ -102,30 +96,10 @@ class ReuseTracker:
         Returns:
             按 reuse_score 降序排列的 entity 列表。
         """
-        sql = """
-            SELECT id, name, type, properties, created_at
-            FROM entities
-            WHERE properties LIKE '%reuse_score%'
-        """
-        params: list[Any] = []
-        if entity_type:
-            sql += " AND type = ?"
-            params.append(entity_type)
-
-        # SQLite 没有直接从 JSON 提取排序的能力，用 Python 排序
-        rows = self._kg._conn.execute(sql, params).fetchall()
-        results: list[dict[str, Any]] = []
-        for row in rows:
-            props = json.loads(row["properties"]) if row["properties"] else {}
-            score = float(props.get("reuse_score", 0.0))
-            results.append({
-                "id": row["id"],
-                "name": row["name"],
-                "entity_type": row["type"] or "",
-                "reuse_score": score,
-            })
-        results.sort(key=lambda x: x["reuse_score"], reverse=True)
-        return results[:limit]
+        return self._kg.query_entities_sorted_by_reuse_score(
+            entity_type=entity_type,
+            limit=limit,
+        )
 
     def decay_scores(self, days: int = 30) -> dict[str, int | float]:
         """对历史积分进行时间衰减。
@@ -164,14 +138,11 @@ class ReuseTracker:
                     delta *= 0.5  # 衰减：减半
                 new_score += delta
 
-            if new_score != old_score:
+            if abs(new_score - old_score) > 0.001:
                 decay_amount = old_score - new_score
                 total_decay += decay_amount
                 props["reuse_score"] = new_score
-                self._kg._conn.execute(
-                    "UPDATE entities SET properties = ? WHERE id = ?",
-                    (json.dumps(props, ensure_ascii=False), row["id"]),
-                )
+                self._kg.update_entity_properties(row["id"], props)
                 updated += 1
 
         self._kg._conn.commit()

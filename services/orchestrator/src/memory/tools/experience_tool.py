@@ -39,18 +39,33 @@ class ExperienceTool:
         self._executor = ThreadPoolExecutor(max_workers=2)
 
     def execute(self, operation: str, params: dict[str, Any]) -> dict[str, Any]:
-        """Synchronous execute wrapper (for sync tool registry)."""
+        """Synchronous execute wrapper (for sync tool registry).
+
+        Handles both sync and async contexts using a persistent ThreadPoolExecutor.
+        """
         try:
             loop = asyncio.get_running_loop()
-            return loop.run_until_complete(self._execute_async(operation, params))
         except RuntimeError:
-            # No running event loop
+            loop = None
+
+        if loop is not None and loop.is_running():
+            # Already in async context — use persistent thread pool
+            future = self._executor.submit(
+                asyncio.run,
+                self._execute_async(operation, params),
+            )
+            return future.result(timeout=30)
+        else:
             return asyncio.run(self._execute_async(operation, params))
 
     async def _execute_async(
         self, operation: str, params: dict[str, Any]
     ) -> dict[str, Any]:
-        """Async execute implementation."""
+        """Execute async — all handlers sync, so use to_thread for true async."""
+        return await asyncio.to_thread(self._sync_execute, operation, params)
+
+    def _sync_execute(self, operation: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Internal sync execute (called via to_thread in async context)."""
         if operation == "get_top_experiences":
             return self._get_top_experiences(params)
         elif operation == "get_butterfly_associations":
@@ -60,7 +75,7 @@ class ExperienceTool:
         elif operation == "list_skills":
             return self._list_skills(params)
         elif operation == "summarize_experience":
-            return await self._summarize_experience(params)
+            return asyncio.run(self._summarize_experience(params))
         else:
             raise ValueError(f"Unknown operation: {operation}")
 
