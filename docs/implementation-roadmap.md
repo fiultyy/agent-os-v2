@@ -1,7 +1,7 @@
 # Agent OS 100% 完成迭代计划
 
 > 基于 architecture.md + 代码审查（2026-04-21）
-> **当前完成度**: 93%（33/35 特性簇）
+> **当前完成度**: 97%（D-03~D-29 + P4 recall + API /v1/，2026-04-22）
 > **目标**: 100%
 
 ---
@@ -16,8 +16,8 @@ D-03, D-04, D-05, D-08, D-09, D-11, D-13, D-14, D-15, D-19, D-20, D-22, D-23, D-
 |------|------|--------|
 | D-16 | 2/6 | ConditionalSpawner + Sandbox |
 | D-17 | 4/10 | Kairos + Dreamer + Critic |
-| D-21 | 2/5 | InterceptLayer + ReasoningLayer |
-| D-25 | 7/10 | BackwardWriter 写回工具 |
+| D-21 | ✅ 全部 | InterceptLayer + ReasoningLayer |
+| D-25 | ✅ 全部 | BackwardWriter 写回工具 |
 
 ### 未实现（❌ 1个）
 | D-* | 说明 |
@@ -220,8 +220,37 @@ D-03, D-04, D-05, D-08, D-09, D-11, D-13, D-14, D-15, D-19, D-20, D-22, D-23, D-
 | C | sideline/reuse_tracker.py | 4 | ✅ 完成 |
 | D | experience_kg.py + tools/experience_tool.py | 6 | ✅ 完成 |
 
+### D-30 Sideline Agent Prompt System（v2 — Committee + Butterfly Signal，2026-04-22）
+
+**设计文档**: `docs/D-30-sideline-agent-prompt-system.md`
+
+**核心架构**:
+- **ScoringPolicy 独立抽象** — pluggable strategies，方便迭代
+- **Butterfly Signal 驱动进化** — forward × backward wing × co_occurrence
+- **Profile Generation Committee** — Transcriber/Refiner/Architect 三角色协商
+- **LLM 角色是"解释者"** — 不做决策，只生成 human-readable description
+
+**新增模块**:
+```
+ScoringPolicy Protocol  ← 独立抽象，可插拔
+    ├── ButterflySignalPolicy  (+ KG 图结构特征)
+    └── ReuseThresholdPolicy
+ScoringEngine            ← 多策略组合（weighted/max/min/any）
+ProfileGenerationCommittee  ← 三角色 JSON 协商
+ScoringCalibrationSystem   ← 支线系统，阈值 F1 自收敛
+    └── BundleHistory        ← bundle 调用追踪，ground truth
+```
+
+**实施状态**:
+- [x] D-30 v2 设计完成
+- [ ] Phase 1: Scoring 抽象层（ScoringPolicy + ScoringEngine + 2 策略 + KG 图结构）
+- [ ] Phase 2: Committee 框架（Committee + TaskSpec + BundleHistory）
+- [ ] Phase 3: Transcriber 改造
+- [ ] Phase 4: Refiner + Architect 实现
+- [ ] Phase 5: 端到端集成 + CalibrationSystem 自收敛
+
 ---
 
-*文档更新: 2026-04-21*
-*状态: 93% 完成（33/35 特性簇）*
-*新增: D-27/D-28/D-29 记忆系统架构升级*
+*文档更新: 2026-04-22*
+*状态: 97% 完成（D-03~D-29 + P4 recall + API /v1/）*
+*新增: D-30 Sideline Agent Prompt System*

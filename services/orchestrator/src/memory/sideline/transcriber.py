@@ -227,6 +227,85 @@ class SidelineTranscriber:
             "units": len(action_units),
         }
 
+    def _classify_action_unit(self, au: dict) -> dict:
+        """
+        Classify a single ActionUnit as relevant or discarded.
+
+        Returns {"relevant": bool, "reason": str, "fact": dict}
+        """
+        has_tools = bool(au.get("tool_calls"))
+        has_results = bool(au.get("tool_results"))
+        intent = au.get("user_intent", "")
+
+        # Trivial/chitchat intents
+        trivial_intents = {"hi", "hello", "hey", "how are you", "thanks", "thank you"}
+        is_trivial = intent.lower().strip() in trivial_intents if intent else True
+
+        if not has_tools or is_trivial:
+            return {
+                "relevant": False,
+                "reason": "no_tool_calls" if not has_tools else "trivial_intent",
+                "fact": au,
+            }
+
+        # Has tool calls - check if successful or failed
+        outcome = "success"
+        if has_results:
+            # Simple heuristic: if any result contains error/fail, mark as failure
+            for r in au.get("tool_results", []):
+                result_str = str(r.get("result", "")).lower()
+                if "error" in result_str or "fail" in result_str or "exception" in result_str:
+                    outcome = "failure"
+                    break
+
+        return {
+            "relevant": True,
+            "reason": outcome,
+            "fact": {
+                **au,
+                "outcome": outcome,
+            },
+        }
+
+    def process_action_units(
+        self,
+        action_units: list[dict],
+        scoring_signal: Any = None,
+    ) -> dict:
+        """
+        Process action units and classify into relevant/discarded facts.
+
+        Returns dict matching TRANSCRIBER_SPEC.output_schema:
+        {
+            "relevant_facts": [...],
+            "discarded_facts": [...],
+            "extraction_metadata": {
+                "total_action_units": int,
+                "relevant_count": int,
+                "discarded_count": int,
+            }
+        }
+        """
+        relevant_facts = []
+        discarded_facts = []
+
+        for au in action_units:
+            classification = self._classify_action_unit(au)
+            if classification["relevant"]:
+                relevant_facts.append(classification["fact"])
+            else:
+                discarded_facts.append(classification["fact"])
+
+        return {
+            "relevant_facts": relevant_facts,
+            "discarded_facts": discarded_facts,
+            "extraction_metadata": {
+                "total_action_units": len(action_units),
+                "relevant_count": len(relevant_facts),
+                "discarded_count": len(discarded_facts),
+            },
+        }
+
     def _llm_extract_relations(self, text: str) -> list[Relation]:
         """LLM 辅助关系提取（仅在正则提取失败时调用）。
 
