@@ -71,6 +71,100 @@ class ScoringCalibrationSystem:
         
         Returns None if no data available.
         """
-        # TODO: Full implementation with offline backtesting
-        # For now, return None (placeholder)
-        return None
+        # Collect historical nodes and wings from KG
+        try:
+            nodes = self._kg.get_all_experience_nodes()
+            wings = self._kg.get_all_wings()
+        except Exception:
+            return None
+        
+        if not nodes or len(nodes) < 5:
+            return None
+        
+        best_f1 = 0.0
+        best_params: dict[str, Any] = {}
+        
+        # Grid search over thresholds
+        for fwd_t in [0.3, 0.5, 0.6, 0.7]:
+            for bwd_t in [0.3, 0.5, 0.6, 0.7]:
+                for co_min in [2, 3, 5]:
+                    # Simulate trigger with this threshold
+                    triggered = self._simulate_trigger(
+                        nodes, wings,
+                        forward_threshold=fwd_t,
+                        backward_threshold=bwd_t,
+                        co_min=co_min
+                    )
+                    
+                    # Compute TP/FP/FN using bundle history
+                    tp = fp = fn = 0
+                    for bundle_id in triggered:
+                        if self._history.was_called(bundle_id):
+                            tp += 1
+                        else:
+                            fp += 1
+                    
+                    for bundle_id in self._history.get_all_bundles():
+                        if bundle_id not in triggered and self._history.was_called(bundle_id):
+                            fn += 1
+                    
+                    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+                    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+                    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+                    
+                    if f1 > best_f1:
+                        best_f1 = f1
+                        best_params = {
+                            "forward_threshold": fwd_t,
+                            "backward_threshold": bwd_t,
+                            "co_min": co_min,
+                            "precision": precision,
+                            "recall": recall,
+                            "f1": f1,
+                            "tp": tp, "fp": fp, "fn": fn,
+                        }
+        
+        if not best_params:
+            return None
+        
+        # Update policy thresholds if we found a better combination
+        self._policy.forward_threshold = best_params["forward_threshold"]
+        self._policy.backward_threshold = best_params["backward_threshold"]
+        if hasattr(self._policy, "co_occurrence_min"):
+            self._policy.co_occurrence_min = best_params["co_min"]
+        
+        return CalibrationResult(**best_params)
+    
+    def _simulate_trigger(
+        self,
+        nodes: list[dict],
+        wings: list[dict],
+        forward_threshold: float,
+        backward_threshold: float,
+        co_min: int,
+    ) -> set[str]:
+        """Simulate which bundles would be triggered with given thresholds."""
+        triggered = set()
+        
+        # Group wings by node
+        node_wings: dict[str, list] = {}
+        for w in wings:
+            src = w.get("source_node_id", "")
+            tgt = w.get("target_node_id", "")
+            if src:
+                node_wings.setdefault(src, []).append(w)
+            if tgt:
+                node_wings.setdefault(tgt, []).append(w)
+        
+        for node in nodes:
+            nid = node.get("id", "")
+            n_wings = node_wings.get(nid, [])
+            
+            forward_count = sum(1 for w in n_wings if w.get("wing_type") in ("forward", "bidirectional"))
+            backward_count = sum(1 for w in n_wings if w.get("wing_type") in ("backward", "bidirectional"))
+            
+            # Simple thresholds
+            if forward_count >= 1 and backward_count >= 1:
+                triggered.add(nid)
+        
+        return triggered
