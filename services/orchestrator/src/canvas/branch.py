@@ -121,11 +121,10 @@ class Branch:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Branch":
-        status_val = d.get("status", "active")
-        return cls(
-            status=BranchStatus(status_val),
-            **{k: v for k, v in d.items() if k in cls.__dataclass_fields__},
-        )
+        copy = dict(d)
+        status_val = copy.pop("status", "active")
+        copy["status"] = BranchStatus(status_val)
+        return cls(**{k: v for k, v in copy.items() if k in cls.__dataclass_fields__})
 
 
 class BranchStore:
@@ -148,6 +147,7 @@ class BranchStore:
         conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
+        conn.row_factory = sqlite3.Row
         return conn
 
     def _load_all(self) -> None:
