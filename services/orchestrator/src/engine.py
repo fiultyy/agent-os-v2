@@ -49,7 +49,7 @@ _state.knowledge_graph = KnowledgeGraph()
 _state.embedding_provider = SentenceTransformerProvider()
 _state.vector_store = FAISSVectorStore(provider=_state.embedding_provider)
 _state.memory_service = MemoryService(
-    SQLiteStore(), vector_store=_state.vector_store, knowledge_graph=_state.knowledge_graph
+    SQLiteStore(), knowledge_graph=_state.knowledge_graph
 )
 
 # Context compression components
@@ -141,9 +141,21 @@ from src.api.routes.agents import router as agents_router
 from src.api.routes.memory import router as memory_router
 from src.api.routes.chat import router as chat_router, root_router_health
 from src.api.routes.entities import router as entities_router
+from src.api.routes.canvas import router as canvas_router, init_canvas_routes
+from src.canvas.event_store import CanvasEventStore
+from src.canvas.emitter import SessionEventEmitter
+from src.canvas.tab_manager import TabManager
 
 # Health endpoint stays at root (no version prefix)
 app.include_router(root_router_health)
+
+# Canvas routes (WebSocket + REST, /api/canvas prefix)
+# Wire up canvas dependencies at import time
+_canvas_store = CanvasEventStore()
+_canvas_tab_mgr = TabManager()
+_canvas_emitter = SessionEventEmitter(event_store=_canvas_store)
+init_canvas_routes(store=_canvas_store, emitter=_canvas_emitter, tab_manager=_canvas_tab_mgr)
+app.include_router(canvas_router)
 
 # All API routes under /v1 prefix
 app.include_router(agents_router, prefix="/v1")

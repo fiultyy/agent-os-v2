@@ -45,3 +45,11 @@ data/*.db
 data/*.db-shm
 data/*.db-wal
 data/*.faiss
+
+# Runtime DB files in services
+services/data/*.db
+services/data/*.db-shm
+services/data/*.db-wal
+services/orchestrator/data/*.db-shm
+services/orchestrator/data/*.db-wal
+services/orchestrator/data/*.db

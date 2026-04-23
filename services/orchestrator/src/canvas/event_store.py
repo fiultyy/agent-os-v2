@@ -93,10 +93,9 @@ class CanvasEventStore:
         conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
-    async def _init_schema(self) -> None:
-        async with self._async_lock:
-            self._conn.executescript(SCHEMA)
-            self._conn.commit()
+    def _init_schema(self) -> None:
+        self._conn.executescript(SCHEMA)
+        self._conn.commit()
 
     # ── Write ──────────────────────────────────────────────────────
 
