@@ -211,6 +211,8 @@ class CanvasEventStore:
     def _row_to_event_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
         d = dict(row)
         d["data"] = json.loads(d["data"])
+        # Align key name with frontend CanvasEvent.type
+        d["type"] = d.pop("event_type")
         return d
 
     def close(self) -> None:

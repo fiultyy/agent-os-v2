@@ -75,7 +75,7 @@ class TickTracker:
 
     # ── Lifecycle: start ────────────────────────────────────────────
 
-    def start_tick(
+    async def start_tick(
         self,
         session_id: str,
         branch_id: str,
@@ -113,8 +113,7 @@ class TickTracker:
             request=request,
             lod=self._lod,
         )
-        # Schedule async emit — callers should await if needed
-        self._emitter.emit(event)
+        await self._emitter.emit(event)
 
         logger.debug(
             "Tick started: %s session=%s branch=%s",
@@ -124,7 +123,7 @@ class TickTracker:
 
     # ── Lifecycle: streaming ────────────────────────────────────────
 
-    def record_token(
+    async def record_token(
         self,
         tick: Tick,
         token: str,
@@ -143,12 +142,12 @@ class TickTracker:
             token=token,
             index=index,
         )
-        self._emitter.emit(event)
+        await self._emitter.emit(event)
         tick.response += token
 
     # ── Lifecycle: tool calls ───────────────────────────────────────
 
-    def record_tool_call(
+    async def record_tool_call(
         self,
         tick: Tick,
         tool_name: str,
@@ -181,10 +180,10 @@ class TickTracker:
             call_id=cid,
             lod=self._lod,
         )
-        self._emitter.emit(event)
+        await self._emitter.emit(event)
         return cid
 
-    def record_tool_result(
+    async def record_tool_result(
         self,
         tick: Tick,
         call_id: str,
@@ -211,11 +210,11 @@ class TickTracker:
             error=error,
             lod=self._lod,
         )
-        self._emitter.emit(event)
+        await self._emitter.emit(event)
 
     # ── Lifecycle: complete / fail ──────────────────────────────────
 
-    def complete_tick(
+    async def complete_tick(
         self,
         tick: Tick,
         response: str = "",
@@ -238,13 +237,13 @@ class TickTracker:
             duration_ms=tick.duration_ms or 0.0,
             lod=self._lod,
         )
-        self._emitter.emit(event)
+        await self._emitter.emit(event)
         self._active_ticks.pop(tick.tick_id, None)
 
         logger.debug("Tick completed: %s (%d tools, %.0fms)",
                       tick.tick_id, tick.tool_count, tick.duration_ms or 0)
 
-    def fail_tick(
+    async def fail_tick(
         self,
         tick: Tick,
         error: str,
@@ -265,7 +264,7 @@ class TickTracker:
             duration_ms=tick.duration_ms or 0.0,
             lod=self._lod,
         )
-        self._emitter.emit(event)
+        await self._emitter.emit(event)
         self._active_ticks.pop(tick.tick_id, None)
 
         logger.warning("Tick failed: %s — %s", tick.tick_id, error[:200])

@@ -15,7 +15,9 @@ export class CanvasWSClient {
     const params = new URLSearchParams({ session_id: sessionId });
     if (afterEventId) params.set("after_event_id", afterEventId);
 
-    const url = `/ws/canvas?${params}`;
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const host = window.location.host;
+    const url = `${protocol}//${host}/ws/canvas?${params}`;
     this.ws = new WebSocket(url);
 
     this.ws.onopen = () => {

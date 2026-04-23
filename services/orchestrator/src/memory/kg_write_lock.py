@@ -87,9 +87,10 @@ class KGWriteLock:
 
     def _get_async_lock(self, branch_id: str) -> asyncio.Lock:
         """Get or create an asyncio Lock for the branch."""
-        if branch_id not in self._async_locks:
-            self._async_locks[branch_id] = asyncio.Lock()
-        return self._async_locks[branch_id]
+        with self._meta_lock:
+            if branch_id not in self._async_locks:
+                self._async_locks[branch_id] = asyncio.Lock()
+            return self._async_locks[branch_id]
 
     # ── Convenience ─────────────────────────────────────────────────
 
