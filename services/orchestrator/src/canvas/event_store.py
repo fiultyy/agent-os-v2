@@ -253,6 +253,41 @@ class CanvasEventStore:
         d["type"] = d.pop("event_type")
         return d
 
+    # ── Maintenance ──────────────────────────────────────────────
+
+    DEFAULT_EVENT_LIMIT: int = 10_000
+
+    async def prune_old_events(self, limit: int | None = None) -> int:
+        """Delete oldest events beyond *limit*, keeping only the newest.
+
+        Returns the number of events deleted.
+        """
+        cap = limit or self.DEFAULT_EVENT_LIMIT
+        async with self._async_lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS cnt FROM canvas_events"
+            ).fetchone()
+            total = row["cnt"] if row else 0
+            if total <= cap:
+                return 0
+            delete_count = total - cap
+            # Delete events with the oldest timestamps, up to delete_count.
+            # We identify them by ordering on timestamp and using LIMIT.
+            self._conn.execute(
+                """
+                DELETE FROM canvas_events
+                WHERE event_id IN (
+                    SELECT event_id FROM canvas_events
+                    ORDER BY timestamp ASC
+                    LIMIT ?
+                )
+                """,
+                (delete_count,),
+            )
+            self._conn.commit()
+            logger.info("Pruned %d old canvas events (kept %d)", delete_count, cap)
+            return delete_count
+
     def close(self) -> None:
         self._conn.close()
 

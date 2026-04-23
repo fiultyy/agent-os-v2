@@ -1,5 +1,8 @@
 "use client";
 
+// TODO(V2): Add event history timeline panel showing tick-level execution trace
+// with expand/collapse, LOD switching, and branch comparison.
+
 import { useState } from "react";
 import { useFlowStore } from "@/stores/flowStore";
 import { useAgentStore } from "@/stores/agentStore";

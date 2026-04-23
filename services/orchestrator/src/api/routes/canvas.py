@@ -77,18 +77,25 @@ def _verify_token(token: str) -> bool:
 def _verify_origin(origin: str | None) -> bool:
     """Check the Origin header against allowed origins.
 
-    When ``CANVAS_ALLOWED_ORIGINS`` is empty, all origins are allowed.
+    When ``CANVAS_ALLOWED_ORIGINS`` is empty, only localhost origins
+    are allowed (localhost / 127.0.0.1 / [::1]).
+    Set the env var in production.
     Special regex characters in *origin* are escaped to prevent ReDoS.
     """
-    if not _ALLOWED_ORIGINS:
-        return True
     if not origin:
         return False
+    if _ALLOWED_ORIGINS:
+        safe_origin = re.escape(origin)
+        for allowed in _ALLOWED_ORIGINS:
+            if re.fullmatch(allowed.replace("*", ".*"), safe_origin):
+                return True
+        return False
+    # No explicit origins configured — allow localhost only.
     safe_origin = re.escape(origin)
-    for allowed in _ALLOWED_ORIGINS:
-        if re.fullmatch(allowed.replace("*", ".*"), safe_origin):
-            return True
-    return False
+    return bool(re.fullmatch(
+        r"(https?://)?(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(/.*)?",
+        safe_origin,
+    ))
 
 
 def init_canvas_routes(
@@ -190,6 +197,14 @@ async def canvas_websocket(
 
             if cmd == "ping":
                 await ws.send_text(json.dumps({"cmd": "pong"}))
+
+            elif cmd == "subscribe":
+                # Client re-subscribes (idempotent — already subscribed at connect).
+                await ws.send_text(json.dumps({
+                    "cmd": "subscribed",
+                    "session_id": session_id,
+                    "tab_id": tab.tab_id,
+                }))
 
             elif cmd == "switch_branch":
                 new_branch_id = msg.get("branch_id", "main")

@@ -79,17 +79,18 @@ class TabManager:
             The created Tab object.
         """
         tab = Tab(session_id=session_id, branch_id=branch_id)
-        self._tabs[tab.tab_id] = tab
+        with self._lock:
+            self._tabs[tab.tab_id] = tab
 
-        # Index by branch
-        if branch_id not in self._branch_tabs:
-            self._branch_tabs[branch_id] = set()
-        self._branch_tabs[branch_id].add(tab.tab_id)
+            # Index by branch
+            if branch_id not in self._branch_tabs:
+                self._branch_tabs[branch_id] = set()
+            self._branch_tabs[branch_id].add(tab.tab_id)
 
-        # Index by session
-        if session_id not in self._session_tabs:
-            self._session_tabs[session_id] = set()
-        self._session_tabs[session_id].add(tab.tab_id)
+            # Index by session
+            if session_id not in self._session_tabs:
+                self._session_tabs[session_id] = set()
+            self._session_tabs[session_id].add(tab.tab_id)
 
         logger.debug("Tab created: %s session=%s branch=%s",
                       tab.tab_id, session_id, branch_id)
@@ -140,24 +141,25 @@ class TabManager:
 
         Returns the updated Tab, or None if tab doesn't exist.
         """
-        tab = self._tabs.get(tab_id)
-        if tab is None:
-            return None
+        with self._lock:
+            tab = self._tabs.get(tab_id)
+            if tab is None:
+                return None
 
-        old_branch_id = tab.branch_id
+            old_branch_id = tab.branch_id
 
-        # Remove from old branch index
-        old_tabs = self._branch_tabs.get(old_branch_id, set())
-        old_tabs.discard(tab_id)
+            # Remove from old branch index
+            old_tabs = self._branch_tabs.get(old_branch_id, set())
+            old_tabs.discard(tab_id)
 
-        # Add to new branch index
-        if new_branch_id not in self._branch_tabs:
-            self._branch_tabs[new_branch_id] = set()
-        self._branch_tabs[new_branch_id].add(tab_id)
+            # Add to new branch index
+            if new_branch_id not in self._branch_tabs:
+                self._branch_tabs[new_branch_id] = set()
+            self._branch_tabs[new_branch_id].add(tab_id)
 
-        # Update tab
-        tab.branch_id = new_branch_id
-        tab.last_active_at = datetime.now(timezone.utc).isoformat()
+            # Update tab
+            tab.branch_id = new_branch_id
+            tab.last_active_at = datetime.now(timezone.utc).isoformat()
 
         logger.debug("Tab %s switched branch: %s → %s",
                       tab_id, old_branch_id, new_branch_id)
@@ -165,29 +167,31 @@ class TabManager:
 
     def touch(self, tab_id: str) -> None:
         """Update last_active_at for a tab."""
-        tab = self._tabs.get(tab_id)
-        if tab:
-            tab.last_active_at = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            tab = self._tabs.get(tab_id)
+            if tab:
+                tab.last_active_at = datetime.now(timezone.utc).isoformat()
 
     # ── Delete ──────────────────────────────────────────────────────
 
     def close_tab(self, tab_id: str) -> bool:
         """Remove a tab. Returns True if found and removed."""
-        tab = self._tabs.pop(tab_id, None)
-        if tab is None:
-            return False
+        with self._lock:
+            tab = self._tabs.pop(tab_id, None)
+            if tab is None:
+                return False
 
-        # Clean up branch index
-        branch_tabs = self._branch_tabs.get(tab.branch_id, set())
-        branch_tabs.discard(tab_id)
-        if not branch_tabs:
-            self._branch_tabs.pop(tab.branch_id, None)
+            # Clean up branch index
+            branch_tabs = self._branch_tabs.get(tab.branch_id, set())
+            branch_tabs.discard(tab_id)
+            if not branch_tabs:
+                self._branch_tabs.pop(tab.branch_id, None)
 
-        # Clean up session index
-        session_tabs = self._session_tabs.get(tab.session_id, set())
-        session_tabs.discard(tab_id)
-        if not session_tabs:
-            self._session_tabs.pop(tab.session_id, None)
+            # Clean up session index
+            session_tabs = self._session_tabs.get(tab.session_id, set())
+            session_tabs.discard(tab_id)
+            if not session_tabs:
+                self._session_tabs.pop(tab.session_id, None)
 
         logger.debug("Tab closed: %s", tab_id)
         return True

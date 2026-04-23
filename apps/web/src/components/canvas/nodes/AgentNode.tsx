@@ -1,7 +1,8 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { Bot } from "lucide-react";
 
-/** Agent node with name, status indicator, and memory count. */
+/** Agent node with name, status indicator, and memory count.
+ * TODO(V2): Add expandable detail panel showing agent memory, tools, and conversation history. */
 export function AgentNode({ data }: NodeProps) {
   const status = String(data.status ?? "idle");
   const memoryCount = Number(data.memoryCount ?? 0);

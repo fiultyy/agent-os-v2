@@ -43,6 +43,10 @@ class SessionEventEmitter:
         emitter.unsubscribe("session-1", websocket)
     """
 
+    # Maximum number of concurrent sessions with active subscribers.
+    # When exceeded, the oldest unsubscribed session is evicted.
+    MAX_SESSIONS: int = 500
+
     def __init__(self, event_store: CanvasEventStore) -> None:
         self._store = event_store
         # session_id -> set of WebSocket handles

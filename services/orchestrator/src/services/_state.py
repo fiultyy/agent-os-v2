@@ -19,7 +19,6 @@ def sse(event: str, data: dict) -> str:
 # ── Agent state ────────────────────────────────────────────────────
 
 agents: dict[str, dict[str, Any]] = {}
-pg_store: Any | None = None
 
 # ── LLM ────────────────────────────────────────────────────────────
 
@@ -28,8 +27,8 @@ llm_client: Any = None
 # ── Memory ─────────────────────────────────────────────────────────
 
 knowledge_graph: Any = None
-embedding_provider: Any = None
-vector_store: Any = None
+# NOTE(D-27): vector_store and embedding_provider removed.
+# MemoryService uses KG-based structured recall.
 memory_service: Any = None
 
 # ── Context & compression ──────────────────────────────────────────

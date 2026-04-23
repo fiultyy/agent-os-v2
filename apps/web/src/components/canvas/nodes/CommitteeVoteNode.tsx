@@ -41,6 +41,8 @@ function decisionColor(decision: CommitteeVoteData["decision"]) {
 }
 
 // ── CommitteeVoteNode ────────────────────────────────────────
+// @internal — Used by TickCanvas for committee.vote event rendering.
+// Not yet wired to the main Canvas flow (reserved for V2 event pipeline).
 
 export interface CommitteeVoteNodeData {
   voteData: CommitteeVoteData;

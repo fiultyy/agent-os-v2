@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from pathlib import Path
 from typing import Any
 
@@ -21,8 +20,6 @@ from fastapi import FastAPI
 
 from src.memory import MemoryService, InMemoryStore, SQLiteStore
 from src.memory.knowledge_graph import KnowledgeGraph
-from src.memory.vector import FAISSVectorStore
-from src.memory.embedding import SentenceTransformerProvider
 from src.memory.compressor import AsyncCompressor, SyncCompressor, ContextMonitor
 from src.memory.migrator import MemoryMigrator
 from src.memory.forgetting import ActiveForgetting
@@ -46,8 +43,9 @@ _state.llm_client = LLMClient()
 
 # Knowledge graph must be created first — MemoryService depends on it.
 _state.knowledge_graph = KnowledgeGraph()
-_state.embedding_provider = SentenceTransformerProvider()
-_state.vector_store = FAISSVectorStore(provider=_state.embedding_provider)
+# NOTE(D-27): FAISS vector_store removed — MemoryService uses KG-based
+# structured recall instead.  FAISSVectorStore class is kept for any
+# external references.
 _state.memory_service = MemoryService(
     SQLiteStore(), knowledge_graph=_state.knowledge_graph
 )
@@ -69,24 +67,6 @@ _state.concurrency_controller = ConcurrencyController()
 
 # Ensure data directory exists for SQLite databases
 Path("data").mkdir(exist_ok=True)
-
-# ── Postgres store (optional) ──────────────────────────────────────
-
-_database_url = os.environ.get("DATABASE_URL", "")
-if _database_url:
-    try:
-        from src.memory.pgstore import PostgresStore
-        _state.pg_store = PostgresStore(_database_url)
-
-        @app.on_event("startup")
-        async def _init_pg_store() -> None:
-            await _state.pg_store.initialize()
-            for agent in await _state.pg_store.list_agents():
-                _state.agents[agent["id"]] = agent
-
-    except Exception:
-        _state.pg_store = None
-
 
 # ── Lifecycle hooks ────────────────────────────────────────────────
 
@@ -128,10 +108,7 @@ async def _start_forgetting_sweep() -> None:
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
-    """Graceful shutdown: persist FAISS index, close database connections."""
-    _state.vector_store.save()
-    if _state.pg_store is not None:
-        await _state.pg_store.close()
+    """Graceful shutdown: close database connections."""
     await _state.communication_bus.close()
 
 
