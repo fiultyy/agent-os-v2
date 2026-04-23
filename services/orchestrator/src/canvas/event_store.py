@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -60,6 +61,7 @@ class CanvasEventStore:
 
     def __init__(self, db_path: Optional[Path] = None) -> None:
         self._db_path: Path = db_path or _default_db_path()
+        self._lock = threading.Lock()
         self._conn: sqlite3.Connection = self._create_connection()
         self._init_schema()
 
@@ -74,60 +76,63 @@ class CanvasEventStore:
         return conn
 
     def _init_schema(self) -> None:
-        self._conn.executescript(SCHEMA)
-        self._conn.commit()
+        with self._lock:
+            self._conn.executescript(SCHEMA)
+            self._conn.commit()
 
     # ── Write ──────────────────────────────────────────────────────
 
     def append(self, event: CanvasEvent) -> None:
         """Append a single event to the log (append-only)."""
-        self._conn.execute(
-            """
-            INSERT INTO canvas_events
-                (event_id, session_id, branch_id, tick_id, event_type, data, lod, timestamp, created_at)
-            VALUES
-                (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                event.event_id,
-                event.session_id,
-                event.branch_id,
-                event.tick_id,
-                event.event_type,
-                json.dumps(event.data, ensure_ascii=False),
-                event.lod,
-                event.timestamp,
-                datetime.now(timezone.utc).isoformat(),
-            ),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO canvas_events
+                    (event_id, session_id, branch_id, tick_id, event_type, data, lod, timestamp, created_at)
+                VALUES
+                    (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event.event_id,
+                    event.session_id,
+                    event.branch_id,
+                    event.tick_id,
+                    event.event_type,
+                    json.dumps(event.data, ensure_ascii=False),
+                    event.lod,
+                    event.timestamp,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            self._conn.commit()
 
     def append_many(self, events: List[CanvasEvent]) -> None:
         """Batch-append multiple events in a single transaction."""
-        rows = [
-            (
-                e.event_id,
-                e.session_id,
-                e.branch_id,
-                e.tick_id,
-                e.event_type,
-                json.dumps(e.data, ensure_ascii=False),
-                e.lod,
-                e.timestamp,
-                datetime.now(timezone.utc).isoformat(),
+        with self._lock:
+            rows = [
+                (
+                    e.event_id,
+                    e.session_id,
+                    e.branch_id,
+                    e.tick_id,
+                    e.event_type,
+                    json.dumps(e.data, ensure_ascii=False),
+                    e.lod,
+                    e.timestamp,
+                    datetime.now(timezone.utc).isoformat(),
+                )
+                for e in events
+            ]
+            self._conn.executemany(
+                """
+                INSERT OR IGNORE INTO canvas_events
+                    (event_id, session_id, branch_id, tick_id, event_type, data, lod, timestamp, created_at)
+                VALUES
+                    (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
             )
-            for e in events
-        ]
-        self._conn.executemany(
-            """
-            INSERT OR IGNORE INTO canvas_events
-                (event_id, session_id, branch_id, tick_id, event_type, data, lod, timestamp, created_at)
-            VALUES
-                (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            rows,
-        )
-        self._conn.commit()
+            self._conn.commit()
 
     # ── Query ──────────────────────────────────────────────────────
 

@@ -7,7 +7,7 @@ const MAX_EVENTS = 2000;
 
 function dedupe(ev: CanvasEvent[]): CanvasEvent[] {
   const seen = new Set<string>();
-  return ev.filter(e => { const k = e.event_id + ":" + e.type; if (seen.has(k)) return false; seen.add(k); return true; });
+  return ev.filter(e => { if (seen.has(e.event_id)) return false; seen.add(e.event_id); return true; });
 }
 
 export interface CanvasStore {
@@ -98,19 +98,34 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
         });
       }
     } else if (e.type === "tool.call" && e.tick_id) {
-      const existing = nextTicks.get(e.tick_id);
-      if (existing) {
-        const tc: import("@/types/canvas").ToolCallInfo = {
-          tool_call_id: (e.data.tool_call_id as string) || (e.data.call_id as string) || "",
-          tool_name: (e.data.tool_name as string) || "",
-          label: (e.data.tool_name as string) || "",
+      let existing = nextTicks.get(e.tick_id);
+      if (!existing) {
+        // Stub tick for out-of-order events (tool.call before tick.started)
+        existing = {
+          tick_id: e.tick_id,
+          parent_tick_id: null,
+          branch_id: e.branch_id,
+          request: "",
+          response: "",
           summary: "",
-          args: JSON.stringify(e.data.arguments ?? {}),
-          result: "",
+          label: "",
+          tool_calls: [],
           status: "running" as const,
+          created_at: e.timestamp,
+          completed_at: null,
         };
-        nextTicks.set(e.tick_id, { ...existing, tool_calls: [...existing.tool_calls, tc] });
+        nextTicks.set(e.tick_id, existing);
       }
+      const tc: import("@/types/canvas").ToolCallInfo = {
+        tool_call_id: (e.data.tool_call_id as string) || (e.data.call_id as string) || "",
+        tool_name: (e.data.tool_name as string) || "",
+        label: (e.data.tool_name as string) || "",
+        summary: "",
+        args: JSON.stringify(e.data.arguments ?? {}),
+        result: "",
+        status: "running" as const,
+      };
+      nextTicks.set(e.tick_id, { ...existing, tool_calls: [...existing.tool_calls, tc] });
     } else if (e.type === "tool.result" && e.tick_id) {
       const existing = nextTicks.get(e.tick_id);
       if (existing) {

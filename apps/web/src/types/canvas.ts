@@ -77,9 +77,12 @@ export interface ToolCallInfo {
 export interface Branch {
   branch_id: string;
   session_id: string;
-  name: string;
-  parent_tick_id: string | null;
+  parent_branch_id: string;
+  fork_tick_id: string | null;
+  status: "active" | "merged" | "pruned" | "archived";
   created_at: string;
+  merged_at: string | null;
+  metadata?: Record<string, Record<string, unknown>>;
 }
 
 export interface CanvasTab {

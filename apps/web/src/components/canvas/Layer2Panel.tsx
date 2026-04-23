@@ -23,7 +23,7 @@ export function Layer2Panel() {
     if (!activeTab || staging.length === 0) return;
     const payload = submitPayload(activeTab.session_id, activeTab.branch_id);
     console.log("[Layer2] Submit:", payload);
-    canvasWsClient.send(JSON.stringify(payload));
+    canvasWsClient.send(payload);
     clear();
   };
 
