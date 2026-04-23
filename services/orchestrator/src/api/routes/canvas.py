@@ -14,9 +14,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import re
 from typing import Optional
 
-from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, Field, field_validator
 
 from src.canvas.branch import Branch, BranchStatus
 from src.canvas.events import (
@@ -41,6 +44,50 @@ _tab_manager: Optional[TabManager] = None
 # In-memory branch registry (branch_id -> Branch)
 _branches: dict[str, Branch] = {}
 
+# ── Auth configuration ────────────────────────────────────────
+
+# Canvas API token — set via CANVAS_API_TOKEN env var.
+# Falls back to a development default when not set.
+_CANVAS_API_TOKEN: str = os.environ.get("CANVAS_API_TOKEN", "")
+
+# Allowed origins for WebSocket connections (Origin header check).
+# Comma-separated list. Empty string = allow all (dev mode).
+_ALLOWED_ORIGINS: list[str] = [
+    o.strip()
+    for o in os.environ.get("CANVAS_ALLOWED_ORIGINS", "").split(",")
+    if o.strip()
+]
+
+
+def _verify_token(token: str) -> bool:
+    """Check the provided token against the configured API token.
+
+    Returns True if authentication passes.  When ``CANVAS_API_TOKEN``
+    is not set (empty string), authentication is disabled for
+    backwards-compatible development usage.
+    """
+    if not _CANVAS_API_TOKEN:
+        # No token configured — auth disabled (dev mode)
+        return True
+    # Constant-time comparison to prevent timing attacks
+    import hmac
+    return hmac.compare_digest(token, _CANVAS_API_TOKEN)
+
+
+def _verify_origin(origin: str | None) -> bool:
+    """Check the Origin header against allowed origins.
+
+    When ``CANVAS_ALLOWED_ORIGINS`` is empty, all origins are allowed.
+    """
+    if not _ALLOWED_ORIGINS:
+        return True
+    if not origin:
+        return False
+    for allowed in _ALLOWED_ORIGINS:
+        if re.fullmatch(allowed.replace("*", ".*"), origin):
+            return True
+    return False
+
 
 def init_canvas_routes(
     store: CanvasEventStore,
@@ -54,6 +101,23 @@ def init_canvas_routes(
     _tab_manager = tab_manager
 
 
+# ── Pydantic request models (W-5) ────────────────────────────
+
+class CreateBranchRequest(BaseModel):
+    session_id: str = Field(..., min_length=1, description="Canvas session ID")
+    parent_branch_id: str = Field("main", min_length=1, description="Parent branch to fork from")
+    fork_tick_id: str = Field("", description="Optional tick ID to fork at")
+
+
+class MergeBranchRequest(BaseModel):
+    branch_id: str = Field(..., min_length=1, description="Branch to merge")
+    target_branch_id: str = Field("main", min_length=1, description="Target branch")
+
+
+class PruneBranchRequest(BaseModel):
+    branch_id: str = Field(..., min_length=1, description="Branch to prune")
+
+
 # ── WebSocket endpoint ─────────────────────────────────────────────
 
 
@@ -65,13 +129,34 @@ async def canvas_websocket(
     """WebSocket endpoint for live canvas events.
 
     Protocol:
-    1. Client connects with ``?session_id=xxx``
-    2. Server replays historical events
-    3. Server pushes live events in real-time
-    4. Client can send JSON commands:
+    1. Client connects with ``?session_id=xxx&token=yyy``
+    2. Server validates token and Origin header
+    3. Server replays historical events
+    4. Server pushes live events in real-time
+    5. Client can send JSON commands:
        - ``{"cmd": "switch_branch", "branch_id": "xxx"}``
        - ``{"cmd": "ping"}``
     """
+    # ── C-2: Authentication ────────────────────────────────
+    token = ws.query_params.get("token", "")
+
+    if not _verify_token(token):
+        await ws.close(code=4001, reason="authentication failed")
+        logger.warning("Canvas WS auth failed: session=%s", session_id)
+        return
+
+    # ── C-2: Origin check ──────────────────────────────────
+    origin = ws.headers.get("origin")
+    if not _verify_origin(origin):
+        await ws.close(code=4003, reason="origin not allowed")
+        logger.warning("Canvas WS origin rejected: origin=%s session=%s", origin, session_id)
+        return
+
+    # ── C-2: session_id validation ─────────────────────────
+    if not session_id or session_id == "default":
+        await ws.close(code=4002, reason="session_id required")
+        return
+
     await ws.accept()
 
     if _emitter is None or _tab_manager is None:
@@ -103,6 +188,9 @@ async def canvas_websocket(
 
             elif cmd == "switch_branch":
                 new_branch_id = msg.get("branch_id", "main")
+                if not new_branch_id:
+                    await ws.send_text(json.dumps({"error": "branch_id required"}))
+                    continue
                 _tab_manager.switch_branch(tab.tab_id, new_branch_id)
                 # Replay events for new branch
                 if _store:
@@ -135,25 +223,23 @@ async def canvas_websocket(
 
 @router.post("/api/canvas/branch/create")
 async def create_branch(
-    session_id: str = Query(...),
-    parent_branch_id: str = Query("main"),
-    fork_tick_id: str = Query(""),
+    req: CreateBranchRequest,
 ) -> dict:
     """Fork a new branch from an existing branch at a tick."""
     branch = Branch.fork(
-        session_id=session_id,
-        parent_branch_id=parent_branch_id,
-        fork_tick_id=fork_tick_id,
+        session_id=req.session_id,
+        parent_branch_id=req.parent_branch_id,
+        fork_tick_id=req.fork_tick_id,
     )
     _branches[branch.branch_id] = branch
 
     # Emit event
     if _emitter:
         event = BranchCreatedEvent.create(
-            session_id=session_id,
+            session_id=req.session_id,
             branch_id=branch.branch_id,
-            parent_branch_id=parent_branch_id,
-            fork_tick_id=fork_tick_id,
+            parent_branch_id=req.parent_branch_id,
+            fork_tick_id=req.fork_tick_id,
         )
         await _emitter.emit(event)
 
@@ -162,15 +248,14 @@ async def create_branch(
 
 @router.post("/api/canvas/branch/merge")
 async def merge_branch(
-    branch_id: str = Query(...),
-    target_branch_id: str = Query("main"),
+    req: MergeBranchRequest,
 ) -> dict:
     """Merge a branch back into its parent."""
-    branch = _branches.get(branch_id)
+    branch = _branches.get(req.branch_id)
     if branch is None:
-        return {"error": "branch not found", "branch_id": branch_id}
+        raise HTTPException(status_code=404, detail=f"branch not found: {req.branch_id}")
     if branch.status != BranchStatus.ACTIVE:
-        return {"error": f"branch is {branch.status.value}, cannot merge"}
+        raise HTTPException(status_code=409, detail=f"branch is {branch.status.value}, cannot merge")
 
     branch.status = BranchStatus.MERGED
     from datetime import datetime, timezone
@@ -180,8 +265,8 @@ async def merge_branch(
     if _emitter:
         event = BranchMergedEvent.create(
             session_id=branch.session_id,
-            branch_id=branch_id,
-            target_branch_id=target_branch_id,
+            branch_id=req.branch_id,
+            target_branch_id=req.target_branch_id,
         )
         await _emitter.emit(event)
 
@@ -190,14 +275,14 @@ async def merge_branch(
 
 @router.post("/api/canvas/branch/prune")
 async def prune_branch(
-    branch_id: str = Query(...),
+    req: PruneBranchRequest,
 ) -> dict:
     """Discard (prune) a branch. Events are retained for audit."""
-    branch = _branches.get(branch_id)
+    branch = _branches.get(req.branch_id)
     if branch is None:
-        return {"error": "branch not found", "branch_id": branch_id}
+        raise HTTPException(status_code=404, detail=f"branch not found: {req.branch_id}")
     if branch.branch_id == "main":
-        return {"error": "cannot prune main branch"}
+        raise HTTPException(status_code=409, detail="cannot prune main branch")
 
     branch.status = BranchStatus.PRUNED
 

@@ -45,12 +45,18 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _require_session_id(session_id: str) -> None:
+    """Raise ValueError if session_id is empty (W-1: no fallback)."""
+    if not session_id:
+        raise ValueError("session_id is required and cannot be empty")
+
+
 class TickTracker:
     """Tracks tick lifecycle and emits canvas events.
 
     This class is the bridge between the existing LLM call layer and
     the canvas event system.  It does **not** modify any existing code;
-    instead, it provides methods that the orchestrator layer can call
+    instead, it provides methods that the LLM call layer can call
     at the appropriate lifecycle points.
 
     Integration points (call these from the LLM call layer):
@@ -88,7 +94,7 @@ class TickTracker:
         This should be called right before the LLM request is sent.
 
         Args:
-            session_id: Canvas session ID.
+            session_id: Canvas session ID (required).
             branch_id: Branch ID (default "main").
             request: The full request text sent to the LLM.
             parent_tick_id: Previous tick in the branch chain.
@@ -96,7 +102,12 @@ class TickTracker:
 
         Returns:
             The created Tick object (also tracked internally).
+
+        Raises:
+            ValueError: If session_id is empty.
         """
+        _require_session_id(session_id)
+
         tick = Tick(
             branch_id=branch_id,
             parent_tick_id=parent_tick_id,
@@ -134,9 +145,14 @@ class TickTracker:
         """Record a streaming token delta.
 
         This should be called during LLM streaming response, once per token.
+
+        Raises:
+            ValueError: If session_id is empty.
         """
+        _require_session_id(session_id)
+
         event = TokenDeltaEvent.create(
-            session_id=session_id or tick.branch_id,
+            session_id=session_id,
             branch_id=branch_id or tick.branch_id,
             tick_id=tick.tick_id,
             token=token,
@@ -159,7 +175,12 @@ class TickTracker:
         """Record a tool invocation within a tick.
 
         Returns the call_id for later matching with record_tool_result.
+
+        Raises:
+            ValueError: If session_id is empty.
         """
+        _require_session_id(session_id)
+
         from src.canvas.tick import ToolCall
 
         cid = call_id or str(uuid.uuid4())
@@ -172,7 +193,7 @@ class TickTracker:
         tick.tool_calls.append(tc)
 
         event = ToolCallEvent.create(
-            session_id=session_id or tick.branch_id,
+            session_id=session_id,
             branch_id=branch_id or tick.branch_id,
             tick_id=tick.tick_id,
             tool_name=tool_name,
@@ -192,7 +213,13 @@ class TickTracker:
         session_id: str = "",
         branch_id: str = "",
     ) -> None:
-        """Record the result of a tool call."""
+        """Record the result of a tool call.
+
+        Raises:
+            ValueError: If session_id is empty.
+        """
+        _require_session_id(session_id)
+
         # Update the ToolCall in the tick
         for tc in tick.tool_calls:
             if tc.call_id == call_id:
@@ -202,7 +229,7 @@ class TickTracker:
                 break
 
         event = ToolResultEvent.create(
-            session_id=session_id or tick.branch_id,
+            session_id=session_id,
             branch_id=branch_id or tick.branch_id,
             tick_id=tick.tick_id,
             call_id=call_id,
@@ -221,14 +248,20 @@ class TickTracker:
         session_id: str = "",
         branch_id: str = "",
     ) -> None:
-        """Mark a tick as completed and emit tick_completed event."""
+        """Mark a tick as completed and emit tick_completed event.
+
+        Raises:
+            ValueError: If session_id is empty.
+        """
+        _require_session_id(session_id)
+
         tick.status = TickStatus.COMPLETED
         tick.completed_at = datetime.now(timezone.utc).isoformat()
         if response:
             tick.response = response
 
         event = TickCompletedEvent.create(
-            session_id=session_id or tick.branch_id,
+            session_id=session_id,
             branch_id=branch_id or tick.branch_id,
             tick_id=tick.tick_id,
             status="completed",
@@ -250,13 +283,19 @@ class TickTracker:
         session_id: str = "",
         branch_id: str = "",
     ) -> None:
-        """Mark a tick as failed and emit tick_completed event with error."""
+        """Mark a tick as failed and emit tick_completed event with error.
+
+        Raises:
+            ValueError: If session_id is empty.
+        """
+        _require_session_id(session_id)
+
         tick.status = TickStatus.FAILED
         tick.error = error
         tick.completed_at = datetime.now(timezone.utc).isoformat()
 
         event = TickCompletedEvent.create(
-            session_id=session_id or tick.branch_id,
+            session_id=session_id,
             branch_id=branch_id or tick.branch_id,
             tick_id=tick.tick_id,
             status="failed",
