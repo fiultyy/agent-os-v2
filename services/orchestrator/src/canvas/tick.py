@@ -108,11 +108,11 @@ class Tick:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "Tick":
-        tool_calls_data = d.pop("tool_calls", [])
+        tool_calls_data = d.get("tool_calls", [])
         tool_calls = [ToolCall(**tc) for tc in tool_calls_data]
-        status_val = d.pop("status", "pending")
-        d.pop("duration_ms", None)
-        d.pop("tool_count", None)
+        status_val = d.get("status", "pending")
+        d.get("duration_ms")
+        d.get("tool_count")
         return cls(
             tool_calls=tool_calls,
             status=TickStatus(status_val),

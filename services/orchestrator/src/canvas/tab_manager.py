@@ -11,6 +11,7 @@ For multi-process, replace with Redis or shared KV store.
 from __future__ import annotations
 
 import logging
+import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -60,6 +61,10 @@ class TabManager:
         self._branch_tabs: Dict[str, set] = {}
         # session_id -> set of tab_ids
         self._session_tabs: Dict[str, set] = {}
+        # Lock to protect state mutations in async context.
+        # threading.Lock suffices because all mutating methods are synchronous
+        # (no await points), so the event loop won't switch coroutines mid-call.
+        self._lock = threading.Lock()
 
     # ── Create ──────────────────────────────────────────────────────
 

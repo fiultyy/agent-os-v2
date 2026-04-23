@@ -14,7 +14,6 @@ export function LODControl() {
   // Note: LOD is currently stored per-tab in viewport; for simplicity using global here
   // In production this would come from active tab's viewport
   const activeTabId = useCanvasStore(s => s.activeTabId);
-  const tabs = useCanvasStore(s => s.tabs);
   const lod = useCanvasStore(s => s.lod);
   const setLOD = useCanvasStore(s => s.setLOD);
 

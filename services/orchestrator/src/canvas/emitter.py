@@ -20,6 +20,9 @@ from src.canvas.event_store import CanvasEventStore
 
 logger = logging.getLogger(__name__)
 
+# Default timeout for each WebSocket send (seconds)
+_WS_SEND_TIMEOUT = 10.0
+
 
 class SessionEventEmitter:
     """Dual-write event emitter: persist + WebSocket broadcast.
@@ -55,29 +58,14 @@ class SessionEventEmitter:
 
         # 2. Broadcast
         payload = json.dumps(event.to_dict(), ensure_ascii=False)
-        dead_clients: List[object] = []
-
-        async with self._lock:
-            clients = self._subscribers.get(event.session_id, set())
-
-        for ws in list(clients):
-            try:
-                await ws.send_text(payload)
-            except Exception:
-                logger.warning("WS send failed for session=%s, removing client", event.session_id)
-                dead_clients.append(ws)
-
-        # Clean up disconnected clients
-        if dead_clients:
-            async with self._lock:
-                for ws in dead_clients:
-                    self._subscribers.get(event.session_id, set()).discard(ws)
+        await self._broadcast_payload(event.session_id, payload)
 
     async def emit_many(self, events: List[CanvasEvent]) -> None:
         """Batch-emit multiple events."""
         await self._store.append_many(events)
         for event in events:
-            await self._broadcast_only(event)
+            payload = json.dumps(event.to_dict(), ensure_ascii=False)
+            await self._broadcast_payload(event.session_id, payload)
 
     # ── Subscribe / Unsubscribe ─────────────────────────────────────
 
@@ -124,8 +112,14 @@ class SessionEventEmitter:
         count = 0
         for ev_dict in events:
             try:
-                await ws_client.send_text(json.dumps(ev_dict, ensure_ascii=False))
+                await asyncio.wait_for(
+                    ws_client.send_text(json.dumps(ev_dict, ensure_ascii=False)),
+                    timeout=_WS_SEND_TIMEOUT,
+                )
                 count += 1
+            except asyncio.TimeoutError:
+                logger.warning("Replay timed out for session=%s", session_id)
+                break
             except Exception:
                 logger.warning("Replay send failed for session=%s", session_id)
                 break
@@ -140,21 +134,37 @@ class SessionEventEmitter:
 
     # ── Private ─────────────────────────────────────────────────────
 
-    async def _broadcast_only(self, event: CanvasEvent) -> None:
-        """Broadcast without persisting (used after batch persist)."""
-        payload = json.dumps(event.to_dict(), ensure_ascii=False)
+    async def _broadcast_payload(self, session_id: str, payload: str) -> None:
+        """Send *payload* to every WS client subscribed to *session_id*.
+
+        Slow clients are skipped after ``_WS_SEND_TIMEOUT`` seconds to
+        avoid blocking the emitter loop.
+        """
         dead_clients: List[object] = []
 
         async with self._lock:
-            clients = self._subscribers.get(event.session_id, set())
+            clients = set(self._subscribers.get(session_id, set()))
 
         for ws in list(clients):
             try:
-                await ws.send_text(payload)
+                await asyncio.wait_for(
+                    ws.send_text(payload),
+                    timeout=_WS_SEND_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "WS send timed out for session=%s, removing client",
+                    session_id,
+                )
+                dead_clients.append(ws)
             except Exception:
+                logger.warning(
+                    "WS send failed for session=%s, removing client",
+                    session_id,
+                )
                 dead_clients.append(ws)
 
         if dead_clients:
             async with self._lock:
                 for ws in dead_clients:
-                    self._subscribers.get(event.session_id, set()).discard(ws)
+                    self._subscribers.get(session_id, set()).discard(ws)

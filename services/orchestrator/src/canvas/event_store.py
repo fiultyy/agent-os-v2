@@ -73,6 +73,24 @@ class CanvasEventStore:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=5000")
+        # Shared cache + WAL lets concurrent readers proceed without blocking
+        conn.execute("PRAGMA cache=shared")
+        return conn
+
+    def _read_connection(self) -> sqlite3.Connection:
+        """Return a short-lived connection for read operations.
+
+        Using a separate read connection avoids the write-lock serialising
+        read queries.  The caller is responsible for closing it.
+        """
+        conn = sqlite3.connect(
+            f"file:{self._db_path}?mode=ro&nolock=1",
+            uri=True,
+            check_same_thread=False,
+        )
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
     async def _init_schema(self) -> None:
@@ -144,25 +162,65 @@ class CanvasEventStore:
         limit: int = 200,
     ) -> List[Dict[str, Any]]:
         """Fetch events for a session, optionally after a cursor."""
-        if after_event_id:
-            row = self._conn.execute(
-                "SELECT timestamp FROM canvas_events WHERE event_id = ?",
-                (after_event_id,),
-            ).fetchone()
-            if row:
-                after_timestamp = row["timestamp"]
-        if after_timestamp:
-            rows = self._conn.execute(
+        conn = self._read_connection()
+        try:
+            if after_event_id:
+                row = conn.execute(
+                    "SELECT timestamp FROM canvas_events WHERE event_id = ?",
+                    (after_event_id,),
+                ).fetchone()
+                if row:
+                    after_timestamp = row["timestamp"]
+            if after_timestamp:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM canvas_events
+                    WHERE session_id = ? AND timestamp > ?
+                    ORDER BY timestamp ASC
+                    LIMIT ?
+                    """,
+                    (session_id, after_timestamp, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM canvas_events
+                    WHERE session_id = ?
+                    ORDER BY timestamp ASC
+                    LIMIT ?
+                    """,
+                    (session_id, limit),
+                ).fetchall()
+            return [self._row_to_event_dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def get_branch_ticks(
+        self, branch_id: str, limit: int = 500
+    ) -> List[Dict[str, Any]]:
+        """Fetch all events for a specific branch, ordered by time."""
+        conn = self._read_connection()
+        try:
+            rows = conn.execute(
                 """
                 SELECT * FROM canvas_events
-                WHERE session_id = ? AND timestamp > ?
+                WHERE branch_id = ?
                 ORDER BY timestamp ASC
                 LIMIT ?
                 """,
-                (session_id, after_timestamp, limit),
+                (branch_id, limit),
             ).fetchall()
-        else:
-            rows = self._conn.execute(
+            return [self._row_to_event_dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def get_session_ticks(
+        self, session_id: str, limit: int = 500
+    ) -> List[Dict[str, Any]]:
+        """Fetch all events for a session (all branches), ordered by time."""
+        conn = self._read_connection()
+        try:
+            rows = conn.execute(
                 """
                 SELECT * FROM canvas_events
                 WHERE session_id = ?
@@ -171,45 +229,21 @@ class CanvasEventStore:
                 """,
                 (session_id, limit),
             ).fetchall()
-        return [self._row_to_event_dict(row) for row in rows]
-
-    def get_branch_ticks(
-        self, branch_id: str, limit: int = 500
-    ) -> List[Dict[str, Any]]:
-        """Fetch all events for a specific branch, ordered by time."""
-        rows = self._conn.execute(
-            """
-            SELECT * FROM canvas_events
-            WHERE branch_id = ?
-            ORDER BY timestamp ASC
-            LIMIT ?
-            """,
-            (branch_id, limit),
-        ).fetchall()
-        return [self._row_to_event_dict(row) for row in rows]
-
-    def get_session_ticks(
-        self, session_id: str, limit: int = 500
-    ) -> List[Dict[str, Any]]:
-        """Fetch all events for a session (all branches), ordered by time."""
-        rows = self._conn.execute(
-            """
-            SELECT * FROM canvas_events
-            WHERE session_id = ?
-            ORDER BY timestamp ASC
-            LIMIT ?
-            """,
-            (session_id, limit),
-        ).fetchall()
-        return [self._row_to_event_dict(row) for row in rows]
+            return [self._row_to_event_dict(row) for row in rows]
+        finally:
+            conn.close()
 
     def get_event_by_id(self, event_id: str) -> Optional[Dict[str, Any]]:
         """Fetch a single event by its ID."""
-        row = self._conn.execute(
-            "SELECT * FROM canvas_events WHERE event_id = ?",
-            (event_id,),
-        ).fetchone()
-        return self._row_to_event_dict(row) if row else None
+        conn = self._read_connection()
+        try:
+            row = conn.execute(
+                "SELECT * FROM canvas_events WHERE event_id = ?",
+                (event_id,),
+            ).fetchone()
+            return self._row_to_event_dict(row) if row else None
+        finally:
+            conn.close()
 
     # ── Utility ─────────────────────────────────────────────────────
 

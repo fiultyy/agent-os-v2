@@ -120,7 +120,7 @@ class KGWriteLock:
         """Remove lock entries for a pruned/archived branch."""
         with self._meta_lock:
             self._sync_locks.pop(branch_id, None)
-        self._async_locks.pop(branch_id, None)
+            self._async_locks.pop(branch_id, None)
 
     def active_branches(self) -> list[str]:
         """Return branch IDs that have locks (may or may not be held)."""

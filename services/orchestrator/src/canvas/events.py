@@ -62,7 +62,11 @@ class CanvasEvent:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "CanvasEvent":
-        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+        # Accept both 'type' (from to_dict / frontend) and 'event_type' (dataclass field)
+        copy = dict(d)
+        if "type" in copy and "event_type" not in copy:
+            copy["event_type"] = copy.pop("type")
+        return cls(**{k: v for k, v in copy.items() if k in cls.__dataclass_fields__})
 
 
 # ── Concrete event types ───────────────────────────────────────────

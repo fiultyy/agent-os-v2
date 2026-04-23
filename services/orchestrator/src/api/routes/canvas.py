@@ -21,7 +21,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field, field_validator
 
-from src.canvas.branch import Branch, BranchStatus
+from src.canvas.branch import Branch, BranchStatus, BranchStore
 from src.canvas.events import (
     BranchCreatedEvent,
     BranchMergedEvent,
@@ -41,8 +41,8 @@ _store: Optional[CanvasEventStore] = None
 _emitter: Optional[SessionEventEmitter] = None
 _tab_manager: Optional[TabManager] = None
 
-# In-memory branch registry (branch_id -> Branch)
-_branches: dict[str, Branch] = {}
+# Branch registry (persistent via SQLite)
+_branch_store: Optional[BranchStore] = None
 
 # ── Auth configuration ────────────────────────────────────────
 
@@ -78,13 +78,15 @@ def _verify_origin(origin: str | None) -> bool:
     """Check the Origin header against allowed origins.
 
     When ``CANVAS_ALLOWED_ORIGINS`` is empty, all origins are allowed.
+    Special regex characters in *origin* are escaped to prevent ReDoS.
     """
     if not _ALLOWED_ORIGINS:
         return True
     if not origin:
         return False
+    safe_origin = re.escape(origin)
     for allowed in _ALLOWED_ORIGINS:
-        if re.fullmatch(allowed.replace("*", ".*"), origin):
+        if re.fullmatch(allowed.replace("*", ".*"), safe_origin):
             return True
     return False
 
@@ -95,10 +97,11 @@ def init_canvas_routes(
     tab_manager: TabManager,
 ) -> None:
     """Wire up dependencies. Called once during app startup."""
-    global _store, _emitter, _tab_manager
+    global _store, _emitter, _tab_manager, _branch_store
     _store = store
     _emitter = emitter
     _tab_manager = tab_manager
+    _branch_store = BranchStore()
 
 
 # ── Pydantic request models (W-5) ────────────────────────────
@@ -254,7 +257,7 @@ async def create_branch(
         parent_branch_id=req.parent_branch_id,
         fork_tick_id=req.fork_tick_id,
     )
-    _branches[branch.branch_id] = branch
+    _branch_store.save(branch)
 
     # Emit event
     if _emitter:
@@ -274,7 +277,7 @@ async def merge_branch(
     req: MergeBranchRequest,
 ) -> dict:
     """Merge a branch back into its parent."""
-    branch = _branches.get(req.branch_id)
+    branch = _branch_store.get(req.branch_id)
     if branch is None:
         raise HTTPException(status_code=404, detail=f"branch not found: {req.branch_id}")
     if branch.status != BranchStatus.ACTIVE:
@@ -301,12 +304,13 @@ async def prune_branch(
     req: PruneBranchRequest,
 ) -> dict:
     """Discard (prune) a branch. Events are retained for audit."""
-    branch = _branches.get(req.branch_id)
+    branch = _branch_store.get(req.branch_id)
     if branch is None:
         raise HTTPException(status_code=404, detail=f"branch not found: {req.branch_id}")
     if branch.branch_id == "main":
         raise HTTPException(status_code=409, detail="cannot prune main branch")
 
     branch.status = BranchStatus.PRUNED
+    _branch_store.save(branch)
 
     return branch.to_dict()
