@@ -51,7 +51,7 @@ class SessionEventEmitter:
     async def emit(self, event: CanvasEvent) -> None:
         """Persist event and broadcast to all subscribed WS clients."""
         # 1. Persist
-        self._store.append(event)
+        await self._store.append(event)
 
         # 2. Broadcast
         payload = json.dumps(event.to_dict(), ensure_ascii=False)
@@ -75,7 +75,7 @@ class SessionEventEmitter:
 
     async def emit_many(self, events: List[CanvasEvent]) -> None:
         """Batch-emit multiple events."""
-        self._store.append_many(events)
+        await self._store.append_many(events)
         for event in events:
             await self._broadcast_only(event)
 

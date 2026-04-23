@@ -54,7 +54,7 @@ export interface Tick {
   /** L1 label */
   label: string;
   tool_calls: ToolCallInfo[];
-  status: "running" | "completed" | "error";
+  status: "pending" | "running" | "completed" | "failed" | "cancelled" | "error";
   created_at: string;
   completed_at: string | null;
 }

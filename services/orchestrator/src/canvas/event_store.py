@@ -8,10 +8,10 @@ SQLite WAL mode for concurrent readers + single writer.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sqlite3
-import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -61,7 +61,7 @@ class CanvasEventStore:
 
     def __init__(self, db_path: Optional[Path] = None) -> None:
         self._db_path: Path = db_path or _default_db_path()
-        self._lock = threading.Lock()
+        self._async_lock = asyncio.Lock()
         self._conn: sqlite3.Connection = self._create_connection()
         self._init_schema()
 
@@ -75,16 +75,16 @@ class CanvasEventStore:
         conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
-    def _init_schema(self) -> None:
-        with self._lock:
+    async def _init_schema(self) -> None:
+        async with self._async_lock:
             self._conn.executescript(SCHEMA)
             self._conn.commit()
 
     # ── Write ──────────────────────────────────────────────────────
 
-    def append(self, event: CanvasEvent) -> None:
+    async def append(self, event: CanvasEvent) -> None:
         """Append a single event to the log (append-only)."""
-        with self._lock:
+        async with self._async_lock:
             self._conn.execute(
                 """
                 INSERT INTO canvas_events
@@ -106,9 +106,9 @@ class CanvasEventStore:
             )
             self._conn.commit()
 
-    def append_many(self, events: List[CanvasEvent]) -> None:
+    async def append_many(self, events: List[CanvasEvent]) -> None:
         """Batch-append multiple events in a single transaction."""
-        with self._lock:
+        async with self._async_lock:
             rows = [
                 (
                     e.event_id,

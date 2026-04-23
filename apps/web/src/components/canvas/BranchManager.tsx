@@ -142,7 +142,7 @@ export function BranchManager() {
       const res = await fetch("/api/canvas/branch/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: sessionId, parent_branch_id: parentBranchId, fork_tick_id: null }),
+        body: JSON.stringify({ session_id: sessionId, parent_branch_id: parentBranchId, fork_tick_id: "" }),
       });
       if (!res.ok) { console.error("[Branch] Create failed:", res.status); return; }
       const branchData = await res.json();

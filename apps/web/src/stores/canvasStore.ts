@@ -79,7 +79,7 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
         nextTicks.set(e.tick_id, {
           ...existing,
           response: (e.data.response as string) || "",
-          status: (e.data.status as "completed" | "error") || "completed",
+          status: (e.data.status as import("@/types/canvas").Tick["status"]) || "completed",
           completed_at: e.timestamp,
         });
       } else {
@@ -92,7 +92,7 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
           summary: "",
           label: "",
           tool_calls: [],
-          status: (e.data.status as "completed" | "error") || "completed",
+          status: (e.data.status as import("@/types/canvas").Tick["status"]) || "completed",
           created_at: e.timestamp,
           completed_at: e.timestamp,
         });
@@ -138,7 +138,36 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
         nextTicks.set(e.tick_id, { ...existing, tool_calls: updatedCalls });
       }
     }
-    return { events: nextEvents, ticks: nextTicks };
+    // ── Branch events ──
+    let nextBranches = s.branches;
+    if (e.type === "branch.created" && e.data) {
+      const newBranch: Branch = {
+        branch_id: (e.data.branch_id as string) || "",
+        session_id: (e.data.session_id as string) || "",
+        parent_branch_id: (e.data.parent_branch_id as string) || "main",
+        fork_tick_id: (e.data.fork_tick_id as string) || null,
+        status: "active" as const,
+        created_at: e.timestamp,
+        merged_at: null,
+      };
+      const exists = nextBranches.some(b => b.branch_id === newBranch.branch_id);
+      nextBranches = exists
+        ? nextBranches.map(b => b.branch_id === newBranch.branch_id ? newBranch : b)
+        : [...nextBranches, newBranch];
+    } else if (e.type === "branch.merged" && e.data) {
+      const bid = (e.data.branch_id as string) || "";
+      nextBranches = nextBranches.map(b =>
+        b.branch_id === bid ? { ...b, status: "merged" as const, merged_at: e.timestamp } : b
+      );
+    } else if (e.type === "branch.pruned" && e.data) {
+      const bid = (e.data.branch_id as string) || "";
+      nextBranches = nextBranches.map(b =>
+        b.branch_id === bid ? { ...b, status: "pruned" as const } : b
+      );
+    }
+    // scoring.signal / committee.vote are stored in events array;
+    // ScoringOverlay reads them from there.
+    return { events: nextEvents, ticks: nextTicks, branches: nextBranches };
   }),
   clearEvents: () => set({ events: [], ticks: new Map() }),
   setConnected: (v) => set({ connected: v }),

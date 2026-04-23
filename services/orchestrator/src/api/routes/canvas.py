@@ -112,10 +112,12 @@ class CreateBranchRequest(BaseModel):
 class MergeBranchRequest(BaseModel):
     branch_id: str = Field(..., min_length=1, description="Branch to merge")
     target_branch_id: str = Field("main", min_length=1, description="Target branch")
+    session_id: Optional[str] = Field(None, description="Session ID for audit logging")
 
 
 class PruneBranchRequest(BaseModel):
     branch_id: str = Field(..., min_length=1, description="Branch to prune")
+    session_id: Optional[str] = Field(None, description="Session ID for audit logging")
 
 
 # ── WebSocket endpoint ─────────────────────────────────────────────
@@ -205,6 +207,27 @@ async def canvas_websocket(
             elif cmd == "replay":
                 after_id = msg.get("after_event_id")
                 await _emitter.replay(session_id, ws, after_event_id)
+
+            elif cmd == "layer2.submit":
+                # Validate required fields
+                nodes = msg.get("nodes")
+                commands = msg.get("commands")
+                if not nodes and not commands:
+                    await ws.send_text(json.dumps({"error": "layer2.submit requires 'nodes' or 'commands'"}))
+                    continue
+                # Emit event for downstream processing
+                if _emitter:
+                    from src.canvas.events import CanvasEvent as CE
+                    evt = CE(
+                        session_id=session_id,
+                        branch_id=_tab_manager.get_branch_for_tab(tab.tab_id) or "main",
+                        tick_id="",
+                        event_type="layer2.submitted",
+                        data={"nodes": nodes or [], "commands": commands or []},
+                        lod=2,
+                    )
+                    await _emitter.emit(evt)
+                await ws.send_text(json.dumps({"cmd": "layer2.submitted", "status": "accepted"}))
 
             else:
                 await ws.send_text(json.dumps({"error": f"unknown cmd: {cmd}"}))
