@@ -83,13 +83,8 @@ class CanvasEventStore:
         Using a separate read connection avoids the write-lock serialising
         read queries.  The caller is responsible for closing it.
         """
-        conn = sqlite3.connect(
-            f"file:{self._db_path}?mode=ro&nolock=1",
-            uri=True,
-            check_same_thread=False,
-        )
+        conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
         return conn
 

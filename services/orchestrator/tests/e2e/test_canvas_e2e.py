@@ -6,7 +6,6 @@ import asyncio
 import json
 import os
 import subprocess
-import threading
 import time
 import uuid
 from pathlib import Path
@@ -20,18 +19,23 @@ DB_PATH = Path(__file__).parent.parent.parent.parent / "data" / "canvas_events.d
 
 
 class BackendProcess:
-    """Context manager: start/stop the backend process."""
+    """Context manager: start/stop the backend process with auth disabled."""
 
     def __init__(self, port: int = 18792):
         self.port = port
         self.proc: subprocess.Popen | None = None
 
     def __enter__(self) -> "BackendProcess":
+        env = os.environ.copy()
+        # Disable token auth and allow all origins for E2E tests
+        env.pop("CANVAS_API_TOKEN", None)
+        env["CANVAS_ALLOWED_ORIGINS"] = "*"
         self.proc = subprocess.Popen(
             [".venv/bin/python3", "start.py"],
             cwd=str(Path(__file__).parent.parent.parent),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=env,
         )
         # Wait for health endpoint
         for _ in range(20):
@@ -126,17 +130,13 @@ class TestL2BranchCRUD:
         )
         assert r.status_code == 404
 
-    def test_prune_main_returns_409(self):
-        # "main" branch is created at startup but lives in BranchStore with UUID.
-        # The 409 only fires when we try to prune a branch that EXISTS.
-        # Create a real branch, then try to prune "main" (doesn't exist in store → 404).
-        # This test documents the current behavior (returns 404 since main not in store).
+    def test_prune_main_returns_404(self):
+        # "main" branch is not in BranchStore (created on-demand), so 404
         r = requests.post(
             f"{BACKEND_URL}/api/canvas/branch/prune",
             json={"branch_id": "main", "session_id": self._session()},
             timeout=5,
         )
-        # Current behavior: main is not in BranchStore, so 404. 409 would require it to exist first.
         assert r.status_code == 404
 
 
@@ -171,22 +171,29 @@ class TestL4WebSocket:
             import websockets
         except ImportError:
             pytest.skip("websockets not installed")
-        # Pass Origin header to satisfy _verify_origin (allows localhost)
         return websockets.connect(
             f"{WS_URL}?session_id={session_id}&tab_id=test-tab",
-            additional_headers={"Origin": "http://127.0.0.1"},
+            origin="http://127.0.0.1:18792",
         )
 
     @pytest.mark.asyncio
     async def test_ws_connect_and_subscribe(self):
-        # NOTE: WS token auth + Origin check are enabled. Skipping for now.
-        # The backend requires CANVAS_WS_TOKEN env var AND matching Origin header.
-        # Set env CANVAS_WS_TOKEN=test_secret and ensure Origin=localhost to enable.
-        pytest.skip("WS token+Origin auth requires env setup — blocking 403. Run manually after configuring CANVAS_WS_TOKEN")
+        sid = f"ws-{uuid.uuid4().hex[:8]}"
+        async with self._ws(sid) as ws:
+            await ws.send(json.dumps({"cmd": "subscribe", "session_id": sid}))
+            resp = await asyncio.wait_for(ws.recv(), timeout=5)
+            data = json.loads(resp)
+            assert data["cmd"] == "subscribed"
+            assert data["session_id"] == sid
 
     @pytest.mark.asyncio
     async def test_ws_ping_pong(self):
-        pytest.skip("WS token+Origin auth requires env setup — blocking 403. Run manually after configuring CANVAS_WS_TOKEN")
+        sid = f"ws-{uuid.uuid4().hex[:8]}"
+        async with self._ws(sid) as ws:
+            await ws.send(json.dumps({"cmd": "ping"}))
+            resp = await asyncio.wait_for(ws.recv(), timeout=5)
+            data = json.loads(resp)
+            assert data["cmd"] == "pong"
 
 
 if __name__ == "__main__":
