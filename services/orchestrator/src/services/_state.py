@@ -30,6 +30,8 @@ knowledge_graph: Any = None
 # NOTE(D-27): vector_store and embedding_provider removed.
 # MemoryService uses KG-based structured recall.
 memory_service: Any = None
+# pg_store removed — was never fully wired; keeping None for graceful if-check compatibility
+pg_store: Any = None
 
 # ── Context & compression ──────────────────────────────────────────
 
