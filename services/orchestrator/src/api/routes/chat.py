@@ -103,15 +103,19 @@ async def _node_llm(state: GraphState) -> GraphState:
 
     conversation = list(state.messages) + [{"role": "user", "content": user_input}]
     system_prompt = (agent.get("system_prompt") if agent else None) or "You are a helpful assistant."
-    llm_messages = await _state.context_compiler.compile(
+    compiled = await _state.context_compiler.compile(
         system_prompt=system_prompt,
         conversation=conversation,
         agent_id=agent_id,
         session_id=session_id,
+        cache_breakpoint=True,
     )
+    llm_messages = compiled.messages
 
     try:
-        response = await _state.llm_client.chat(llm_messages, model=agent_model)
+        response = await _state.llm_client.chat(
+            llm_messages, model=agent_model, static_count=compiled.static_count,
+        )
     except LLMError as exc:
         state.errors.append(f"LLM error: {exc}")
         state.output = f"[LLM unavailable] {exc}"
@@ -216,20 +220,26 @@ async def _node_llm_synthesize(state: GraphState) -> GraphState:
             {"role": "user", "content": state.input},
             {"role": "system", "content": f"Tool results: {tool_result}"},
         ]
-        messages = await _state.context_compiler.compile(
+        compiled = await _state.context_compiler.compile(
             system_prompt=f"{system_prompt}\n\nSynthesize the tool results into a final answer for the user.",
             conversation=conversation,
             agent_id=state.agent_id,
             session_id=state.session_id,
+            cache_breakpoint=True,
         )
+        messages = compiled.messages
+        static_count: int | None = compiled.static_count
     else:
         messages = [
             {"role": "system", "content": "Synthesize the tool results into a final answer for the user."},
             {"role": "user", "content": f"Original question: {state.input}\n\nTool results: {tool_result}"},
         ]
+        static_count = None
 
     try:
-        response = await _state.llm_client.chat(messages, model=agent_model)
+        response = await _state.llm_client.chat(
+            messages, model=agent_model, static_count=static_count,
+        )
     except LLMError as exc:
         state.errors.append(f"LLM synthesize error: {exc}")
         state.output = state.context.get("tool_result", "[no result]")
