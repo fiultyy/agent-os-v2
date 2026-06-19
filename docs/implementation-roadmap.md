@@ -1,7 +1,7 @@
 # Agent OS 100% 完成迭代计划
 
 > 基于 architecture.md + 代码审查（2026-04-21）
-> **当前完成度**: 97%（D-03~D-29 + P4 recall + API /v1/，2026-04-22）
+> **当前完成度**: 98%（D-03~D-29 + P4 recall + API /v1/ + 记忆迭代 P0-P3，2026-06-20）
 > **目标**: 100%
 
 ---
@@ -251,6 +251,34 @@ ScoringCalibrationSystem   ← 支线系统，阈值 F1 自收敛
 
 ---
 
-*文档更新: 2026-04-22*
-*状态: 97% 完成（D-03~D-29 + P4 recall + API /v1/）*
-*新增: D-30 Sideline Agent Prompt System*
+### 迭代 10：改造点对齐（2026-06 记忆迭代）
+
+**设计文档**: `docs/memory-iteration-plan.md`(P0–P4,6 阶段)
+
+**背景**: 基于记忆系统外部研究(第七、八章 hermes 对标),对 agent-os-v2 记忆子系统做 P0–P3 代码改造 + P4 文档对齐。
+
+**子任务**:
+| 子任务 | 内容 | 状态 |
+|--------|------|------|
+| 10.1 | agentskills.io skill bundle 标准对齐(项目暂无 skill,文档化标准) | ✅ P4 |
+| 10.2 | FAISS 真相校准(`vector_store=None`,KG 为主;代码保留为 pgvector 预留) | ✅ P3 |
+| 10.3 | architecture-comparison 补齐主流记忆系统对比(hermes/Letta/Mem0/Zep) | ✅ P4 |
+| 10.4 | P0 origin provenance 产权边界(MemoryOrigin,堵 DreamerAgent 乱改) | ✅ feat/memory-provenance |
+| 10.5 | P1 事件总线(chat.py 11 处调用解耦 → MemoryEventBus) | ✅ feat/memory-event-bus |
+| 10.6 | P2 Anthropic cache 友好化(compiler 三层 + llm_client 双通道) | ✅ feat/memory-cache |
+| 10.7 | P3 状态机 + 在线巩固(MemoryState 三态 + TaskConsolidator) | ✅ feat/memory-state-machine |
+
+**验收**:
+- [x] tech-debt.md 含 TD-007/008/009 且标 P2
+- [x] 四优势(蝴蝶翼/信任域/五维评分/三模式召回)零触碰(P0–P3 红线)
+- [x] FAISS 真相校准:代码保留但运行时未启用,KG 为主
+- [x] architecture-comparison 补齐主流记忆系统对比
+- [x] P0–P3 单元 + e2e 验证全过(60 测试 + cache 命中 + TaskConsolidator 触发)
+
+**遗留**: Phase 6 交叉验收(全链路 origin 一致 + 四优势回归 + migration 双向)。
+
+---
+
+*文档更新: 2026-06-20*
+*状态: 98% 完成（D-03~D-29 + P4 recall + API /v1/ + 记忆迭代 P0-P3）*
+*新增: D-30 Sideline Agent Prompt System;迭代 10 改造点对齐*
