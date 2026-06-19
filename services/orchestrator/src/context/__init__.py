@@ -1,6 +1,6 @@
 """Context engineering module."""
 
-from src.context.compiler import ContextCompiler
+from src.context.compiler import CompiledContext, ContextCompiler
 from src.context.manager import ContextManager
 from src.context.coding_context import (
     CAContextCoding,
@@ -17,6 +17,7 @@ from src.context.git_context import GitContext, GitContextProvider
 from src.context.pitfail_context import PitfailContextBuilder
 
 __all__ = [
+    "CompiledContext",
     "ContextCompiler",
     "ContextManager",
     "CAContextCoding",
