@@ -1,4 +1,16 @@
-"""Lightweight LLM client using OpenAI-compatible chat completions API."""
+"""LLM client — dual-channel (OpenAI-compatible + Anthropic-compatible).
+
+P2 adds an Anthropic-compatible channel alongside the existing
+OpenAI-compatible one:
+
+- ``format=openai`` (default, backward compatible): ``/chat/completions``.
+  ``cache_control`` is NOT sent — Zhipu's OpenAI endpoint ignores it and
+  relies on a stable prefix for server-side auto-caching.
+- ``format=anthropic``: ``/v1/messages`` reusing the claude code config
+  (``ANTHROPIC_BASE_URL`` / ``ANTHROPIC_AUTH_TOKEN`` = Zhipu anthropic
+  endpoint, which honours ``cache_control``). Injects a ``cache_control``
+  breakpoint at the static-prefix boundary when ``static_count`` is given.
+"""
 
 from __future__ import annotations
 
@@ -7,25 +19,70 @@ from typing import Any
 
 import httpx
 
+from src.services.prompt_cache import apply_cache_control
+
 
 class LLMError(Exception):
     """Raised when the LLM call fails."""
 
 
 class LLMClient:
-    """Lightweight LLM client using OpenAI-compatible chat completions API."""
+    """Dual-channel LLM client (OpenAI-compatible + Anthropic-compatible)."""
 
     def __init__(self) -> None:
+        # ── OpenAI-compatible channel ────────────────────────────────
         self.base_url = os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1")
         self.api_key = os.environ.get("LLM_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
         self.default_model = os.environ.get("LLM_MODEL", "gpt-4o-mini")
 
-    async def chat(self, messages: list[dict[str, Any]], model: str | None = None, **kwargs: Any) -> str:
+        # ── Channel selection + cache config ─────────────────────────
+        self.format = os.environ.get("LLM_API_FORMAT", "openai").lower()
+        self.cache_enabled = os.environ.get("LLM_CACHE_ENABLED", "1") == "1"
+        self.cache_ttl = os.environ.get("LLM_CACHE_TTL", "5m")
+
+        # ── Anthropic-compatible channel (reuses claude code config) ─
+        self.anthropic_base_url = os.environ.get(
+            "ANTHROPIC_BASE_URL", "https://open.bigmodel.cn/api/anthropic"
+        )
+        self.anthropic_api_key = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+        self.anthropic_model = os.environ.get(
+            "LLM_ANTHROPIC_MODEL",
+            os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL", "glm-5-turbo"),
+        )
+
+        # Last response usage (Anthropic channel exposes cache fields).
+        self.last_usage: dict[str, Any] | None = None
+
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        model: str | None = None,
+        static_count: int | None = None,
+        **kwargs: Any,
+    ) -> str:
         """Send messages and return the assistant content string.
+
+        Args:
+            messages: Message list (OpenAI-style roles).
+            model: Model name (OpenAI channel only; Anthropic channel uses
+                ``LLM_ANTHROPIC_MODEL`` and ignores this).
+            static_count: Number of leading static messages. Anthropic
+                channel uses it to place the cache_control breakpoint;
+                OpenAI channel ignores it.
 
         Raises:
             LLMError: If the API key is missing or the API call fails.
         """
+        if self.format == "anthropic":
+            return await self._chat_anthropic(messages, static_count, **kwargs)
+        return await self._chat_openai(messages, model, **kwargs)
+
+    async def _chat_openai(
+        self,
+        messages: list[dict[str, Any]],
+        model: str | None,
+        **kwargs: Any,
+    ) -> str:
         if not self.api_key:
             raise LLMError("No API key configured — set LLM_API_KEY or OPENAI_API_KEY")
 
@@ -45,13 +102,114 @@ class LLMClient:
                     json=payload,
                 )
                 resp.raise_for_status()
-                data = resp.json()
-                return data["choices"][0]["message"]["content"]
+                return resp.json()["choices"][0]["message"]["content"]
             except httpx.HTTPStatusError as exc:
                 raise LLMError(f"HTTP {exc.response.status_code}: {exc.response.text[:200]}") from exc
             except httpx.RequestError as exc:
                 raise LLMError(f"Request failed: {exc}") from exc
 
+    async def _chat_anthropic(
+        self,
+        messages: list[dict[str, Any]],
+        static_count: int | None,
+        **kwargs: Any,
+    ) -> str:
+        if not self.anthropic_api_key:
+            raise LLMError("No Anthropic key configured — set ANTHROPIC_AUTH_TOKEN")
 
-# Module-level singleton
-llm_client = LLMClient()
+        # Inject cache_control at the static-prefix boundary (Zhipu anthropic
+        # endpoint honours it).
+        sc = static_count or 0
+        if self.cache_enabled and sc > 0:
+            messages = apply_cache_control(messages, sc, self.cache_ttl)
+
+        system, anthropic_msgs = self._to_anthropic(messages, sc)
+
+        url = f"{self.anthropic_base_url}/v1/messages"
+        payload: dict[str, Any] = {
+            "model": self.anthropic_model,  # ignore OpenAI agent model
+            "messages": anthropic_msgs,
+            "max_tokens": kwargs.get("max_tokens", 1024),
+        }
+        if system is not None:
+            payload["system"] = system
+        if "temperature" in kwargs:
+            payload["temperature"] = kwargs["temperature"]
+
+        headers = {
+            "x-api-key": self.anthropic_api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            try:
+                resp = await client.post(url, headers=headers, json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+                self.last_usage = data.get("usage")
+                # content is a list of blocks; return first text block
+                content = data.get("content", [])
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        return block.get("text", "")
+                return ""
+            except httpx.HTTPStatusError as exc:
+                raise LLMError(f"HTTP {exc.response.status_code}: {exc.response.text[:200]}") from exc
+            except httpx.RequestError as exc:
+                raise LLMError(f"Request failed: {exc}") from exc
+
+    @staticmethod
+    def _to_anthropic(
+        messages: list[dict[str, Any]],
+        static_count: int,
+    ) -> tuple[Any, list[dict[str, Any]]]:
+        """Convert OpenAI-style messages to Anthropic (system, messages).
+
+        - Static system messages (``messages[:static_count]`` with role=system)
+          → Anthropic top-level ``system``. cache_control markers preserved
+          (emitted as a content-block list when any block carries one).
+        - Dynamic system messages (memory, after the static boundary) →
+          demoted to a ``user`` message prefixed ``[Memory context]``
+          (Anthropic ``messages`` has no system role; keeping memory out of
+          the top-level system preserves the cacheable static prefix).
+        - user/assistant messages → kept as-is (content str or list).
+        """
+        system_blocks: list[dict[str, Any]] = []
+        convo: list[dict[str, Any]] = []
+
+        for i, msg in enumerate(messages):
+            role = msg.get("role")
+            content = msg.get("content")
+
+            if role == "system" and i < static_count:
+                # static system (base/tools) → top-level system
+                if isinstance(content, list):
+                    system_blocks.extend(content)
+                elif isinstance(content, str):
+                    system_blocks.append({"type": "text", "text": content})
+            elif role == "system":
+                # dynamic memory system → demote to user (preserve cache prefix)
+                if isinstance(content, list):
+                    text = " ".join(
+                        b.get("text", "") for b in content if isinstance(b, dict)
+                    )
+                else:
+                    text = content or ""
+                convo.append({"role": "user", "content": f"[Memory context]\n{text}"})
+            else:
+                convo.append({"role": role, "content": content if content is not None else ""})
+
+        has_cache = any(
+            isinstance(b, dict) and "cache_control" in b for b in system_blocks
+        )
+        if has_cache:
+            system: Any = system_blocks
+        elif system_blocks:
+            system = "\n\n".join(
+                b.get("text", "") for b in system_blocks if isinstance(b, dict)
+            )
+        else:
+            system = None
+
+        return system, convo
