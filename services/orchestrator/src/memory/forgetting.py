@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from src.memory.types import MemoryItem, MemoryType, MemoryFilter, MemoryOrigin
+from src.memory.types import MemoryItem, MemoryType, MemoryFilter, MemoryOrigin, MemoryState
 from src.memory.store import InMemoryStore
 from src.memory.service import MemoryService
 from src.memory.scorer import ImportanceScorer
@@ -130,6 +130,15 @@ class ActiveForgetting:
                     )
                     # Fall through to importance check below.
 
+            # P3: STALE items (pruner-marked cold) → archive deterministically,
+            # bypassing the importance threshold. ACTIVE items fall through to
+            # the importance-based path below.
+            if item.state == MemoryState.STALE:
+                await self._archive(item)
+                result.archived += 1
+                result.archived_ids.append(item.id)
+                continue
+
             # Check importance score
             score = self._scorer.score(item)
             if score.total >= self._forget_threshold:
@@ -225,10 +234,12 @@ class ActiveForgetting:
         return False
 
     async def _archive(self, item: MemoryItem) -> None:
-        """Mark a memory item as archived."""
+        """Mark a memory item as archived (state=ARCHIVED + legacy flag)."""
         await self._memory.update(
             item.id,
             archived=True,
+            state=MemoryState.ARCHIVED,
+            last_state_transition=datetime.now(timezone.utc).isoformat(),
             metadata={
                 **item.metadata,
                 "archived_at": True,
