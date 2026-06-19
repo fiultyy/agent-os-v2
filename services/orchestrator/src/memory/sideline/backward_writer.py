@@ -19,6 +19,8 @@ from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from src.memory.service import MemoryService
 
+from src.memory.types import MemoryOrigin
+
 logger = logging.getLogger(__name__)
 
 
@@ -137,6 +139,7 @@ class BackwardWriter:
                 memory_type=MemoryType.WORKING,
                 scope=MemoryScope.AGENT,
                 importance=0.9,
+                origin=MemoryOrigin.AGENT,
                 metadata={"source": "sideline_verifier", "channel": "fast"},
             )
             return WriteBackResult(
@@ -184,6 +187,7 @@ class BackwardWriter:
                 memory_type=MemoryType.SEMANTIC,
                 scope=MemoryScope.SESSION,
                 importance=0.6,
+                origin=MemoryOrigin.AGENT,
                 metadata={
                     "source": "sideline_verifier",
                     "channel": "medium",
@@ -287,6 +291,7 @@ class BackwardWriter:
                 memory_type=MemoryType.EPISODIC,
                 scope=MemoryScope.SESSION,
                 importance=0.4,
+                origin=MemoryOrigin.AGENT,
                 metadata={
                     "source": "sideline_verifier",
                     "channel": "slow",
