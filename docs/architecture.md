@@ -1603,6 +1603,7 @@ backward_memories ─┘                        ↓                             
 - **决策**: SKILL.md 标准化 + 渐进式注入 + 三层优先级
 - **评分**: 9.6/10 PASS
 - **位置**: `services/orchestrator/src/skills/`
+- **agentskills.io 对齐**(P4, 2026-06-20): D-28 的 SKILL.md 标准化(YAML frontmatter `name` + `description` + Markdown body)与 [agentskills.io 开放标准](https://agentskills.io/specification) 一致 —— 跨 agent 互通 skill 的行业标准。后续新增 skill 遵循该规范(见 TD-009)。
 
 **核心模块（8个）**:
 

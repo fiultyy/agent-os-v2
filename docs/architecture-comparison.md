@@ -303,8 +303,8 @@ mindmap
                 SQLite 持久化
                 会话完整历史
             L2 Episodic Memory
-                向量数据库
-                语义检索
+                KG 为主(向量代码保留未启用)
+                关键词 + KG unified 召回
                 时间衰减
             L3 Semantic Memory
                 Knowledge Graph
@@ -353,6 +353,25 @@ flowchart TB
 ```
 
 ---
+
+## 主流记忆系统对比（P4 补齐,2026-06-20）
+
+> 引用记忆研究报告第七、八章结论。补充 hermes-agent / Letta / Mem0 / Zep 对比,凸显 agent-os-v2 差异化优势。
+
+| 维度 | agent-os-v2 | hermes-agent | Letta | Mem0 | Zep |
+|------|-------------|--------------|-------|------|-----|
+| **记忆分层** | 四层(Working/Session/Episodic/Semantic)+ 状态机(P3) | provider 总线,无分层 | core memory blocks + archival | 事实/偏好自动提取 | 时间感知 graph + 向量 |
+| **召回** | 关键词 + KG unified(向量代码保留未启用) | provider prefetch | 检索 + blocks | 向量 + LLM 提取 | Graphiti 时间图谱 |
+| **巩固** | Dreamer(离线 L2→L3)+ TaskConsolidator(任务后在线)+ 状态机 | sync_all 后台单 worker | agent 自管理 | 自动 fact extraction | 自动 episodic → semantic |
+| **产权边界** | origin(FOREGROUND/AGENT)保护用户记忆(P0) | skill_provenance | 无 | 无 | 无 |
+| **事件解耦** | MemoryEventBus 6 钩子(P1) | MemoryManager 6 钩子 | 无 | 无 | 无 |
+| **cache** | compiler 三层 + Anthropic cache_control(P2) | prompt_caching system_and_3 | 无 | 无 | 无 |
+
+**agent-os-v2 四优势**(研究报告第八章 8.5,P0-P3 严守红线未推倒):🦋 蝴蝶翼双向联想 / 🛡️ 信任域 5 级权限 / 📊 五维评分(recency/frequency/relevance/emotional/actionable)/ 🔍 语义召回三模式。
+
+## FAISS 真相校准（P4,2026-06-20）
+
+文档早期(D-12/D-27)声明"已移除 FAISS",但代码(`vector.py` + `embedding.py`,all-MiniLM-L6-v2)仍存在。**真相:运行时未启用** —— `MemoryService` 传 `vector_store=None`,召回走关键词 + KG unified(`service.py` docstring 已校准)。FAISS 代码保留为 V2 pgvector 预留,不强启用(详见 TD-007)。
 
 ## 总结
 
