@@ -51,6 +51,11 @@ concurrency_controller: Any = None
 
 # ── Memory event bus ──────────────────────────────────────────────
 
+# P1: internal lifecycle event bus (structured events + hooks). Decoupled
+# from the SSE push below — DefaultMemoryHook calls emit_memory_event as
+# a side-effect of handling an event.
+memory_event_bus: Any = None
+
 memory_event_subscribers: list[asyncio.Queue[str]] = []
 
 

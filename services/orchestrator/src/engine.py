@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +19,13 @@ logger = logging.getLogger(__name__)
 
 from fastapi import FastAPI
 
-from src.memory import MemoryService, InMemoryStore, SQLiteStore
+from src.memory import (
+    MemoryService,
+    InMemoryStore,
+    SQLiteStore,
+    MemoryEventBus,
+    DefaultMemoryHook,
+)
 from src.memory.knowledge_graph import KnowledgeGraph
 from src.memory.compressor import AsyncCompressor, SyncCompressor, ContextMonitor
 from src.memory.migrator import MemoryMigrator
@@ -64,6 +71,24 @@ _state.context_compiler = ContextCompiler(_state.context_manager)
 _state.tool_executor = ToolExecutor(ToolRegistry())
 _state.communication_bus = CommunicationBus()
 _state.concurrency_controller = ConcurrencyController()
+
+# P1: memory event bus + default lifecycle hook. chat.py emits lifecycle
+# events instead of calling memory_service/memory_migrator directly.
+_state.memory_event_bus = MemoryEventBus()
+_state.memory_event_bus.register(
+    DefaultMemoryHook(
+        memory_service=_state.memory_service,
+        memory_migrator=_state.memory_migrator,
+        sync_compressor=_state.sync_compressor,
+        async_compressor=_state.async_compressor,
+        context_monitor=_state.context_monitor,
+    )
+)
+# Degradation switch: MEMORY_EVENT_BUS_ENABLED=0 keeps only the SYSTEM
+# (DefaultMemoryHook) hooks and skips observer hooks — equivalent to
+# pre-P1 behaviour. chat.py always goes through bus.emit.
+if os.getenv("MEMORY_EVENT_BUS_ENABLED", "1") != "1":
+    _state.memory_event_bus.set_enabled(False)
 
 # Ensure data directory exists for SQLite databases
 Path("data").mkdir(exist_ok=True)
