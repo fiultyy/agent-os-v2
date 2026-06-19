@@ -7,6 +7,11 @@ Provides the main API used by the orchestrator and graph nodes:
 - Session lifecycle management.
 - Cross-agent shared memory with permission control.
 - Access logging for audit trail.
+
+FAISS / vector recall (D-27 / P3): the ``vector_store`` is intentionally
+``None`` — runtime recall uses Keyword + KG unified mode only. The FAISS
+code (``vector.py`` / ``embedding.py``) is retained but not wired; a future
+V2 may switch to pgvector. Do not assume semantic recall is active.
 """
 
 from typing import Any

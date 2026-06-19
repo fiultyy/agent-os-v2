@@ -443,6 +443,14 @@ async def execute(req: ExecuteRequest) -> StreamingResponse:
                     "session_id": final_state.session_id,
                     "memory_count": len(final_state.memory_refs),
                 }))
+                # P3: task-post online consolidation (fire-and-forget, non-blocking).
+                # Extracts key decisions/pitfalls and writes back via BackwardWriter.
+                if _state.task_consolidator is not None and final_state.messages:
+                    asyncio.create_task(_state.task_consolidator.consolidate_task(
+                        agent_id=final_state.agent_id,
+                        session_id=final_state.session_id,
+                        messages=list(final_state.messages),
+                    ))
             except Exception as exc:
                 agent["status"] = "idle"
                 await event_queue.put(_sse("error", {"message": str(exc)}))

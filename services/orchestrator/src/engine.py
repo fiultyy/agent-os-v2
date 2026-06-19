@@ -30,6 +30,9 @@ from src.memory.knowledge_graph import KnowledgeGraph
 from src.memory.compressor import AsyncCompressor, SyncCompressor, ContextMonitor
 from src.memory.migrator import MemoryMigrator
 from src.memory.forgetting import ActiveForgetting
+from src.memory.state_pruner import TimeBasedStatePruner
+from src.memory.sideline.task_consolidator import TaskConsolidationAgent
+from src.memory.sideline.backward_writer import BackwardWriter
 from src.communication.bus import CommunicationBus
 from src.concurrency.controller import ConcurrencyController
 from src.tools.executor import ToolExecutor
@@ -90,6 +93,15 @@ _state.memory_event_bus.register(
 if os.getenv("MEMORY_EVENT_BUS_ENABLED", "1") != "1":
     _state.memory_event_bus.set_enabled(False)
 
+# P3: deterministic state pruner (zero-LLM-cost膨胀控制) + task-post
+# consolidator (background_review style online consolidation).
+_state.state_pruner = TimeBasedStatePruner(_state.memory_service)
+_state.task_consolidator = TaskConsolidationAgent(
+    _state.memory_service,
+    _state.llm_client,
+    BackwardWriter(_state.memory_service, _state.llm_client),
+)
+
 # Ensure data directory exists for SQLite databases
 Path("data").mkdir(exist_ok=True)
 
@@ -111,6 +123,16 @@ async def _start_forgetting_sweep() -> None:
             await asyncio.sleep(86400)  # 24 hours
             try:
                 for agent_id in list(_state.agents.keys()):
+                    # P3: deterministic state pruning first (zero-LLM-cost
+                    #膨胀控制), then importance-based forgetting, then migration.
+                    if _state.state_pruner is not None:
+                        prune_result = await _state.state_pruner.prune(agent_id=agent_id)
+                        _state.emit_memory_event("prune", {
+                            "agent_id": agent_id,
+                            "scanned": prune_result.scanned,
+                            "stale": prune_result.to_stale,
+                            "archived": prune_result.to_archived,
+                        })
                     forget_result = await _state.active_forgetting.run_sweep(agent_id=agent_id)
                     _state.emit_memory_event("forget", {
                         "agent_id": agent_id,

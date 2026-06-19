@@ -56,6 +56,10 @@ concurrency_controller: Any = None
 # a side-effect of handling an event.
 memory_event_bus: Any = None
 
+# P3: deterministic state pruner + task-post consolidator
+state_pruner: Any = None
+task_consolidator: Any = None
+
 memory_event_subscribers: list[asyncio.Queue[str]] = []
 
 
