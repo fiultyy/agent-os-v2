@@ -16,7 +16,13 @@ from src.api.models import ChatRequest, ExecuteRequest
 from src.graph import StateGraph, GraphState, InMemoryCheckpointStore
 from src.graph.nodes import FunctionNode
 from src.memory import MemoryType, MemoryScope
-from src.memory.compressor import CompressionLevel
+from src.memory.event_bus import EventType
+from src.memory.hooks import (
+    SessionContext,
+    TurnContext,
+    CompressContext,
+)
+from src.memory.types import MemoryItem
 from src.communication.message import AgentMessage, MessageType
 from src.services import _state
 from src.services.llm_client import LLMClient, LLMError
@@ -118,7 +124,6 @@ async def _node_llm(state: GraphState) -> GraphState:
     state.output = response
     state.current_node = "llm"
 
-    from src.memory.types import MemoryItem
     working_item = MemoryItem(
         content=f"User: {user_input}\nAssistant: {response}",
         agent_id=agent_id,
@@ -126,7 +131,11 @@ async def _node_llm(state: GraphState) -> GraphState:
         memory_type=MemoryType.WORKING,
         scope=MemoryScope.AGENT,
     )
-    await _state.memory_migrator.migrate_working_to_session(working_item, session_id, agent_id)
+    # migrate working→session via the event bus (was: memory_migrator call)
+    await _state.memory_event_bus.emit(
+        EventType.TURN_END,
+        TurnContext(agent_id=agent_id, session_id=session_id, working_item=working_item),
+    )
     state.memory_refs.append(working_item.id)
 
     _trigger_kg_extraction(
@@ -135,75 +144,20 @@ async def _node_llm(state: GraphState) -> GraphState:
         session_id=working_item.id,
     )
 
-    # Context compression
-    total_tokens = sum(len(m.get("content", "")) // 4 for m in state.messages)
-    trigger_level = _state.context_monitor.check_trigger(total_tokens)
-
-    if trigger_level == CompressionLevel.SYNC:
-        try:
-            items = await _state.memory_service.recall(
-                query="", agent_id=agent_id, session_id=session_id, top_k=50
-            )
-            result = await _state.sync_compressor.compress(items)
-            for summary_item in result.summaries:
-                await _state.memory_service.store(
-                    content=summary_item.content,
-                    agent_id=summary_item.agent_id,
-                    session_id=summary_item.session_id,
-                    memory_type=summary_item.memory_type,
-                    scope=summary_item.scope,
-                    importance=summary_item.importance,
-                    metadata=summary_item.metadata,
-                )
-                state.memory_refs.append(summary_item.id)
-            if result.summaries:
-                retained_ids = {r.id for r in result.retained}
-                for item in items:
-                    if item.id not in retained_ids:
-                        await _state.memory_service.update(
-                            item.id, accessor_id=agent_id, archived=True,
-                        )
-        except asyncio.TimeoutError:
-            pass
-        else:
-            _state.emit_memory_event("compress", {
-                "agent_id": agent_id,
-                "level": "sync",
-                "original_count": result.original_count,
-                "retained_count": result.compressed_count,
-                "summary_count": len(result.summaries),
-            })
-    elif trigger_level == CompressionLevel.ASYNC:
-        items = await _state.memory_service.recall(
-            query="", agent_id=agent_id, session_id=session_id, top_k=50
-        )
-
-        async def _on_compressed(retained: list, summaries: list) -> None:
-            for summary_item in summaries:
-                await _state.memory_service.store(
-                    content=summary_item.content,
-                    agent_id=summary_item.agent_id,
-                    session_id=summary_item.session_id,
-                    memory_type=summary_item.memory_type,
-                    scope=summary_item.scope,
-                    importance=summary_item.importance,
-                    metadata=summary_item.metadata,
-                )
-            retained_ids = {r.id for r in retained}
-            for item in items:
-                if item.id not in retained_ids:
-                    await _state.memory_service.update(
-                        item.id, accessor_id=agent_id, archived=True,
-                    )
-            _state.emit_memory_event("compress", {
-                "agent_id": agent_id,
-                "level": "async",
-                "original_count": len(items),
-                "retained_count": len(retained),
-                "summary_count": len(summaries),
-            })
-
-        await _state.async_compressor.trigger(items, on_compressed=_on_compressed)
+    # Context compression via the event bus (was: inline recall/compress/
+    # store/update + emit_memory_event). The hook returns any SYNC summary
+    # ids so memory_refs stays in sync; ASYNC fires in the background.
+    compress_result = await _state.memory_event_bus.emit(
+        EventType.PRE_COMPRESS,
+        CompressContext(
+            agent_id=agent_id,
+            session_id=session_id,
+            accessor_id=agent_id,
+            messages=list(state.messages),
+        ),
+    )
+    if compress_result is not None and compress_result.summary_ids:
+        state.memory_refs.extend(compress_result.summary_ids)
 
     if state.context.get("tool_call") or _has_tool_invocation(response):
         state.context["needs_tool"] = True
@@ -230,13 +184,18 @@ async def _node_tool(state: GraphState) -> GraphState:
     state.tool_results.append({"tool": tool_name, "result": state.context["tool_result"]})
 
     result_preview = str(result["output"])[:200] if result["status"] == "success" else error_msg
-    await _state.memory_service.store(
+    tool_item = MemoryItem(
         content=f"Tool {tool_name} result: {result_preview}",
         agent_id=state.agent_id,
         session_id=state.session_id,
         memory_type=MemoryType.WORKING,
         scope=MemoryScope.AGENT,
         metadata={"safety_deadline": True, "tool_result": True},
+    )
+    # store tool-result working memory via the event bus
+    await _state.memory_event_bus.emit(
+        EventType.TURN_END,
+        TurnContext(agent_id=state.agent_id, session_id=state.session_id, tool_result_item=tool_item),
     )
 
     state.current_node = "tool"
@@ -367,25 +326,26 @@ async def chat(req: ChatRequest) -> dict:
     except LLMError as exc:
         return JSONResponse({"error": str(exc)}, status_code=502)
 
-    await _state.memory_service.store(
+    conversation_item = MemoryItem(
         content=f"User: {req.message}\nAssistant: {response}",
         agent_id=agent_id,
         session_id=session_id,
         memory_type=MemoryType.SESSION,
         scope=MemoryScope.AGENT,
     )
+    # store the turn as session memory via the event bus
+    await _state.memory_event_bus.emit(
+        EventType.TURN_END,
+        TurnContext(agent_id=agent_id, session_id=session_id, conversation_item=conversation_item),
+    )
 
-    async def _migrate_and_emit() -> None:
-        ids = await _state.memory_migrator.migrate_session_to_episodic(session_id, agent_id)
-        if ids:
-            _state.emit_memory_event("migrate", {
-                "agent_id": agent_id,
-                "path": "session_to_episodic",
-                "count": len(ids),
-                "ids": ids[:10],
-            })
-
-    asyncio.create_task(_migrate_and_emit())
+    # session→episodic migration, fire-and-forget (was: _migrate_and_emit)
+    asyncio.create_task(
+        _state.memory_event_bus.emit(
+            EventType.SESSION_END,
+            SessionContext(agent_id=agent_id, session_id=session_id),
+        )
+    )
 
     _trigger_kg_extraction(
         user_message=req.message,
@@ -407,7 +367,10 @@ async def execute(req: ExecuteRequest) -> StreamingResponse:
         return JSONResponse({"error": "Agent not found"}, status_code=404)
 
     session_id = req.session_id or str(uuid.uuid4())
-    await _state.memory_service.create_session(session_id, req.agent_id)
+    await _state.memory_event_bus.emit(
+        EventType.SESSION_START,
+        SessionContext(agent_id=req.agent_id, session_id=session_id),
+    )
 
     graph = _build_execution_graph()
     initial_state = GraphState(
