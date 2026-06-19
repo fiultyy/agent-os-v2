@@ -3,6 +3,8 @@
 Defines the core data types used across all memory operations:
 - :class:`MemoryScope` — trust-domain isolation levels.
 - :class:`MemoryType` — four-layer memory tier classification.
+- :class:`MemoryOrigin` — provenance (foreground vs agent) [P0].
+- :class:`MemoryState` — deterministic lifecycle state [P3].
 - :class:`MemoryRef` — lightweight reference to a stored memory.
 - :class:`MemoryItem` — a single memory record with content and metadata.
 - :class:`MemoryBlock` — fixed-size context block (persona, user profile, etc.).
@@ -64,6 +66,26 @@ class MemoryOrigin(str, Enum):
     AGENT = "agent"
 
 
+class MemoryState(str, Enum):
+    """Deterministic lifecycle state of a memory item [P3].
+
+    Time-driven state machine (managed by TimeBasedStatePruner), decoupled
+    from the legacy boolean ``archived`` flag. Only ``origin=AGENT`` items
+    transition (FOREGROUND is protected by P0).
+
+    ACTIVE: recently accessed, fully participatable in recall/consolidation.
+    STALE: not accessed within ``stale_days`` (default 30) — still recallable
+        but flagged for review; pruner will archive it next if still cold.
+    ARCHIVED: not accessed within ``archive_days`` (default 90) or below
+        archive importance — excluded from regular recall, equivalent to
+        ``archived=True`` (kept for backward compat).
+    """
+
+    ACTIVE = "active"
+    STALE = "stale"
+    ARCHIVED = "archived"
+
+
 @dataclass
 class MemoryRef:
     """Lightweight reference to a stored memory item.
@@ -101,7 +123,10 @@ class MemoryItem:
         accessed_at: ISO-8601 last access timestamp.
         origin: Who created this memory (foreground vs agent). Foreground
             memories are protected from autonomous consolidation.
-        archived: Whether this memory has been archived.
+        archived: Legacy boolean archive flag (backward compat). Equivalent
+            to ``state == ARCHIVED``; kept in sync by the store layer.
+        state: Deterministic lifecycle state [P3] (active/stale/archived).
+        last_state_transition: ISO-8601 timestamp of the last state change.
     """
 
     id: str = ""
@@ -116,6 +141,8 @@ class MemoryItem:
     accessed_at: str = ""
     origin: MemoryOrigin = MemoryOrigin.FOREGROUND
     archived: bool = False
+    state: MemoryState = MemoryState.ACTIVE
+    last_state_transition: str = ""
 
     def __post_init__(self) -> None:
         now = datetime.now(timezone.utc).isoformat()
@@ -123,6 +150,13 @@ class MemoryItem:
             self.created_at = now
         if not self.accessed_at:
             self.accessed_at = now
+        # Keep legacy archived flag consistent with state on construction.
+        if self.archived and self.state == MemoryState.ACTIVE:
+            self.state = MemoryState.ARCHIVED
+            if not self.last_state_transition:
+                self.last_state_transition = now
+        elif self.state == MemoryState.ARCHIVED:
+            self.archived = True
 
     def touch(self) -> None:
         """Update the accessed_at timestamp to now."""
@@ -200,11 +234,12 @@ class MemoryFilter:
         agent_id: Filter by owning agent.
         session_id: Filter by session.
         memory_type: Filter by memory tier.
-        scope: Filter by trust-domain scope.
+        scope: Filter by trust-domain.
         keyword: Text keyword for content matching.
         min_importance: Minimum importance score threshold.
         origin: Filter by memory provenance (foreground vs agent).
-        archived: Include archived memories (default ``False``).
+        state: Filter by lifecycle state [P3] (active/stale/archived).
+        archived: Include legacy-archived memories (default ``False``).
     """
 
     agent_id: str = ""
@@ -214,4 +249,5 @@ class MemoryFilter:
     keyword: str = ""
     min_importance: float = 0.0
     origin: MemoryOrigin | None = None
+    state: MemoryState | None = None
     archived: bool = False
