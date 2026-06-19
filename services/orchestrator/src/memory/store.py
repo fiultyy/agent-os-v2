@@ -143,6 +143,8 @@ class InMemoryStore:
             return False
         if f.origin and item.origin != f.origin:
             return False
+        if f.state and item.state != f.state:
+            return False
         if f.keyword and f.keyword.lower() not in item.content.lower():
             return False
         if f.min_importance and item.importance < f.min_importance:

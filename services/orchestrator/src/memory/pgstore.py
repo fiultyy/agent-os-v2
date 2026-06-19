@@ -28,6 +28,7 @@ from src.memory.types import (
     MemoryItem,
     MemoryOrigin,
     MemoryScope,
+    MemoryState,
     MemoryType,
 )
 
@@ -52,6 +53,8 @@ memory_items = sa.Table(
     sa.Column("accessed_at", sa.String(40), nullable=False),
     sa.Column("origin", sa.Text, nullable=False, server_default="foreground"),
     sa.Column("archived", sa.Boolean, nullable=False, server_default=sa.text("false")),
+    sa.Column("state", sa.Text, nullable=False, server_default="active"),
+    sa.Column("last_state_transition", sa.Text, nullable=False, server_default=""),
     sa.Index("ix_memory_agent_id", "agent_id"),
     sa.Index("ix_memory_session_id", "session_id"),
 )
@@ -113,6 +116,8 @@ def _row_to_memory_item(row: sa.Row) -> MemoryItem:
         accessed_at=row[memory_items.c.accessed_at],
         origin=MemoryOrigin(row[memory_items.c.origin]) if row[memory_items.c.origin] else MemoryOrigin.FOREGROUND,
         archived=bool(row[memory_items.c.archived]),
+        state=MemoryState(row[memory_items.c.state]) if row[memory_items.c.state] else MemoryState.ACTIVE,
+        last_state_transition=row[memory_items.c.last_state_transition] or "",
     )
 
 
@@ -205,6 +210,8 @@ class PostgresStore:
                     accessed_at=item.accessed_at,
                     origin=item.origin.value,
                     archived=item.archived,
+                    state=item.state.value,
+                    last_state_transition=item.last_state_transition,
                 )
             )
         return item.id
@@ -261,6 +268,12 @@ class PostgresStore:
                 origin_val = kwargs["origin"]
                 values["origin"] = origin_val.value if isinstance(origin_val, MemoryOrigin) else origin_val
 
+            if "state" in kwargs:
+                state_val = kwargs["state"]
+                values["state"] = state_val.value if isinstance(state_val, MemoryState) else state_val
+            if "last_state_transition" in kwargs:
+                values["last_state_transition"] = kwargs["last_state_transition"]
+
             if "metadata" in kwargs:
                 values["metadata_json"] = json.dumps(kwargs["metadata"], default=str)
 
@@ -294,6 +307,8 @@ class PostgresStore:
             query = query.where(memory_items.c.scope == filter.scope.value)
         if filter.origin:
             query = query.where(memory_items.c.origin == filter.origin.value)
+        if filter.state:
+            query = query.where(memory_items.c.state == filter.state.value)
         if filter.keyword:
             # Escape SQL LIKE wildcards to prevent unintended pattern matching
             escaped = filter.keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

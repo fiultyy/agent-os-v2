@@ -29,6 +29,7 @@ from src.memory.types import (
     MemoryType,
     MemoryScope,
     MemoryOrigin,
+    MemoryState,
 )
 
 
@@ -74,7 +75,9 @@ class SQLiteStore:
                     accessed_at TEXT,
                     updated_at TEXT,
                     archived INTEGER DEFAULT 0,
-                    origin TEXT DEFAULT 'foreground'
+                    origin TEXT DEFAULT 'foreground',
+                    state TEXT DEFAULT 'active',
+                    last_state_transition TEXT DEFAULT ''
                 )
             """)
             self._conn.execute("""
@@ -113,19 +116,33 @@ class SQLiteStore:
     def _migrate_schema(self) -> None:
         """Apply incremental schema changes for older databases.
 
-        Adds the ``origin`` column to ``memories`` if it is missing
-        (introduced by the provenance / P0 change). Existing rows backfill
-        to ``'foreground'`` so user-entered memories stay protected from
-        autonomous consolidation.
+        Adds ``origin`` (P0) and ``state`` + ``last_state_transition`` (P3
+        state machine) columns to ``memories`` if missing. Existing rows
+        backfill origin→'foreground', state→'active' (archived rows→
+        'archived'). Wrapped in a transaction so all ALTERs commit atomically.
         """
-        existing_cols = {
-            row[1]
-            for row in self._conn.execute("PRAGMA table_info(memories)").fetchall()
-        }
-        if "origin" not in existing_cols:
-            self._conn.execute(
-                "ALTER TABLE memories ADD COLUMN origin TEXT DEFAULT 'foreground'"
-            )
+        with self._conn:
+            existing_cols = {
+                row[1]
+                for row in self._conn.execute("PRAGMA table_info(memories)").fetchall()
+            }
+            if "origin" not in existing_cols:
+                self._conn.execute(
+                    "ALTER TABLE memories ADD COLUMN origin TEXT DEFAULT 'foreground'"
+                )
+            # P3 state machine: deterministic lifecycle columns. Backfill legacy
+            # archived rows to ARCHIVED so the new state field matches the old flag.
+            if "state" not in existing_cols:
+                self._conn.execute(
+                    "ALTER TABLE memories ADD COLUMN state TEXT DEFAULT 'active'"
+                )
+                self._conn.execute(
+                    "UPDATE memories SET state = 'archived' WHERE archived = 1"
+                )
+            if "last_state_transition" not in existing_cols:
+                self._conn.execute(
+                    "ALTER TABLE memories ADD COLUMN last_state_transition TEXT DEFAULT ''"
+                )
 
     # ── Serialization helpers ─────────────────────────────────────────
 
@@ -146,6 +163,8 @@ class SQLiteStore:
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "archived": 1 if item.archived else 0,
             "origin": item.origin.value if isinstance(item.origin, MemoryOrigin) else item.origin,
+            "state": item.state.value if isinstance(item.state, MemoryState) else item.state,
+            "last_state_transition": item.last_state_transition,
         }
 
     @staticmethod
@@ -166,6 +185,8 @@ class SQLiteStore:
             accessed_at=row["accessed_at"] or "",
             archived=bool(row["archived"]),
             origin=MemoryOrigin(row["origin"]) if row["origin"] else MemoryOrigin.FOREGROUND,
+            state=MemoryState(row["state"]) if row["state"] else MemoryState.ACTIVE,
+            last_state_transition=row["last_state_transition"] or "",
         )
 
     # ── Memory Item CRUD ──────────────────────────────────────────────
@@ -186,9 +207,11 @@ class SQLiteStore:
             self._conn.execute(
                 """INSERT OR REPLACE INTO memories
                    (id, content, scope, memory_type, importance, metadata,
-                    agent_id, session_id, created_at, accessed_at, updated_at, archived, origin)
+                    agent_id, session_id, created_at, accessed_at, updated_at, archived, origin,
+                    state, last_state_transition)
                    VALUES (:id, :content, :scope, :memory_type, :importance, :metadata,
-                    :agent_id, :session_id, :created_at, :accessed_at, :updated_at, :archived, :origin)""",
+                    :agent_id, :session_id, :created_at, :accessed_at, :updated_at, :archived, :origin,
+                    :state, :last_state_transition)""",
                 row,
             )
         return item.id
@@ -239,7 +262,8 @@ class SQLiteStore:
                    importance = :importance, metadata = :metadata,
                    agent_id = :agent_id, session_id = :session_id,
                    accessed_at = :accessed_at, updated_at = :updated_at,
-                   archived = :archived, origin = :origin
+                   archived = :archived, origin = :origin,
+                   state = :state, last_state_transition = :last_state_transition
                    WHERE id = :id""",
                 updated,
             )
@@ -308,6 +332,9 @@ class SQLiteStore:
         if filter.origin:
             clauses.append("origin = ?")
             params.append(filter.origin.value)
+        if filter.state:
+            clauses.append("state = ?")
+            params.append(filter.state.value)
         if filter.keyword:
             clauses.append("content LIKE ?")
             params.append(f"%{filter.keyword}%")
