@@ -53,3 +53,6 @@ services/data/*.db-wal
 services/orchestrator/data/*.db-shm
 services/orchestrator/data/*.db-wal
 services/orchestrator/data/*.db
+
+# Tools / MCP caches
+.serena/
