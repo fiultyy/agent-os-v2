@@ -19,6 +19,17 @@ from src.memory.permissions import (
     AccessGrant,
     AccessLogEntry,
 )
+from src.memory.event_bus import EventType, MemoryEventBus
+from src.memory.hooks import (
+    HookPriority,
+    MemoryHook,
+    SessionContext,
+    TurnContext,
+    CompressContext,
+    CompressResult,
+    DelegateContext,
+)
+from src.memory.default_hook import DefaultMemoryHook
 from src.memory.kg_query_interface import KGQueryInterface
 from src.memory.sideline.transcriber import SidelineTranscriber
 from src.memory.experience_kg import ExperienceKG
@@ -41,6 +52,17 @@ __all__ = [
     "PermissionLevel",
     "AccessGrant",
     "AccessLogEntry",
+    # P1 event bus + hooks
+    "EventType",
+    "MemoryEventBus",
+    "HookPriority",
+    "MemoryHook",
+    "SessionContext",
+    "TurnContext",
+    "CompressContext",
+    "CompressResult",
+    "DelegateContext",
+    "DefaultMemoryHook",
     "KGQueryInterface",
     "SidelineTranscriber",
     "KGMemoryTool",
