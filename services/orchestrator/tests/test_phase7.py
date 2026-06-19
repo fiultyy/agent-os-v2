@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.memory.types import (
     MemoryItem, MemoryRef, MemoryBlock, MemoryFilter,
-    MemoryType, MemoryScope, RecallMode,
+    MemoryType, MemoryScope, MemoryOrigin, RecallMode,
 )
 from src.memory.store import InMemoryStore
 from src.memory.service import MemoryService
@@ -513,6 +513,7 @@ class TestActiveForgetting:
             content=" mundane observation about nothing ",
             agent_id="a1",
             importance=0.01,
+            origin=MemoryOrigin.AGENT,
         )).id
 
         # Manually set old creation time
@@ -536,6 +537,7 @@ class TestActiveForgetting:
             content="Critical: must fix the urgent production bug immediately",
             agent_id="a1",
             importance=0.95,
+            origin=MemoryOrigin.AGENT,
         )
 
         result = await forgetting.run_sweep(agent_id="a1")
@@ -554,6 +556,7 @@ class TestActiveForgetting:
             content="simple note",
             agent_id="a1",
             importance=0.01,
+            origin=MemoryOrigin.AGENT,
         )).id
 
         # Age it
@@ -583,6 +586,7 @@ class TestActiveForgetting:
                 content=f"old note {i}",
                 agent_id="a1",
                 importance=0.01,
+                origin=MemoryOrigin.AGENT,
             )).id
             item = await svc.get(mid)
             item.created_at = (
@@ -607,6 +611,7 @@ class TestActiveForgetting:
             content="forgettable content about deployment",
             agent_id="a1",
             importance=0.01,
+            origin=MemoryOrigin.AGENT,
         )).id
         item = await svc.get(mid)
         item.created_at = (

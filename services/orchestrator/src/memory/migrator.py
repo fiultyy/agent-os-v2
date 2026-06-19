@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from src.memory.types import MemoryItem, MemoryType, MemoryScope, MemoryFilter
+from src.memory.types import MemoryItem, MemoryType, MemoryScope, MemoryFilter, MemoryOrigin
 from src.memory.store import InMemoryStore
 from src.memory.service import MemoryService
 from src.memory.scorer import ImportanceScorer
@@ -117,6 +117,7 @@ class WorkingToSessionMigrator:
                 memory_type=MemoryType.SESSION,
                 scope=item.scope,
                 importance=scored.total,
+                origin=MemoryOrigin.AGENT,
                 metadata={
                     **item.metadata,
                     "migrated_from": "working",
@@ -182,6 +183,7 @@ class SessionToEpisodicMigrator:
                 memory_type=MemoryType.EPISODIC,
                 scope=MemoryScope.AGENT,
                 importance=max(i.importance for i in items),
+                origin=MemoryOrigin.AGENT,
                 metadata={
                     "migrated_from": "session",
                     "source_count": len(items),
@@ -279,6 +281,7 @@ class EpisodicToSemanticMigrator:
                     memory_type=MemoryType.SEMANTIC,
                     scope=MemoryScope.AGENT,
                     importance=item.importance,
+                    origin=MemoryOrigin.AGENT,
                     metadata={
                         "migrated_from": "episodic",
                         "source_episode": item.id,
@@ -300,6 +303,7 @@ class EpisodicToSemanticMigrator:
                     memory_type=MemoryType.SEMANTIC,
                     scope=MemoryScope.AGENT,
                     importance=item.importance * 0.9,
+                    origin=MemoryOrigin.AGENT,
                     metadata={
                         "migrated_from": "episodic",
                         "source_episode": item.id,
@@ -354,12 +358,14 @@ class MemoryMigrator:
         self, session_id: str, agent_id: str,
     ) -> list[str]:
         """Migrate all session items to episodic memory."""
-        items = await self._memory.recall(
-            query="",
+        # P0 provenance: only migrate agent-self-sedimented session
+        # memories; FOREGROUND (user-entered) memories are left untouched.
+        f = MemoryFilter(
             session_id=session_id,
             memory_type=MemoryType.SESSION,
-            top_k=100,
+            origin=MemoryOrigin.AGENT,
         )
+        items = await self._memory._store.search(f)
         self._s2e.buffer_session_items(items)
         return await self._s2e.migrate(agent_id)
 
@@ -367,10 +373,12 @@ class MemoryMigrator:
         self, agent_id: str,
     ) -> list[str]:
         """Migrate episodic memories to semantic knowledge."""
-        items = await self._memory.recall(
-            query="",
+        # P0 provenance: only promote agent-self-sedimented episodic
+        # memories to semantic; FOREGROUND (user-entered) are left alone.
+        f = MemoryFilter(
             agent_id=agent_id,
             memory_type=MemoryType.EPISODIC,
-            top_k=100,
+            origin=MemoryOrigin.AGENT,
         )
+        items = await self._memory._store.search(f)
         return await self._e2sem.migrate(agent_id, items)

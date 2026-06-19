@@ -10,6 +10,7 @@ from src.memory.types import (
     MemoryFilter,
     MemoryType,
     MemoryScope,
+    MemoryOrigin,
     RecallMode,
 )
 from src.memory.permissions import (
@@ -34,6 +35,7 @@ __all__ = [
     "MemoryFilter",
     "MemoryType",
     "MemoryScope",
+    "MemoryOrigin",
     "RecallMode",
     "PermissionManager",
     "PermissionLevel",

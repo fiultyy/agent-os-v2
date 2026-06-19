@@ -47,6 +47,23 @@ class MemoryType(str, Enum):
     SEMANTIC = "semantic"
 
 
+class MemoryOrigin(str, Enum):
+    """Provenance of a memory item — who created it.
+
+    Determines whether a memory is eligible for autonomous consolidation.
+
+    FOREGROUND: user- or system-directed input (manual entry, prompts,
+        tool results a foreground agent was asked to persist). Belongs to
+        the user; must never be auto-forgotten / merged / migrated.
+    AGENT: agent self-sedimented memory produced by an autonomous
+        consolidation path (migrator / reflect / dreamer). Eligible for
+        further automatic consolidation.
+    """
+
+    FOREGROUND = "foreground"
+    AGENT = "agent"
+
+
 @dataclass
 class MemoryRef:
     """Lightweight reference to a stored memory item.
@@ -82,6 +99,8 @@ class MemoryItem:
         metadata: Arbitrary key-value metadata.
         created_at: ISO-8601 creation timestamp.
         accessed_at: ISO-8601 last access timestamp.
+        origin: Who created this memory (foreground vs agent). Foreground
+            memories are protected from autonomous consolidation.
         archived: Whether this memory has been archived.
     """
 
@@ -95,6 +114,7 @@ class MemoryItem:
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: str = ""
     accessed_at: str = ""
+    origin: MemoryOrigin = MemoryOrigin.FOREGROUND
     archived: bool = False
 
     def __post_init__(self) -> None:
@@ -183,6 +203,7 @@ class MemoryFilter:
         scope: Filter by trust-domain scope.
         keyword: Text keyword for content matching.
         min_importance: Minimum importance score threshold.
+        origin: Filter by memory provenance (foreground vs agent).
         archived: Include archived memories (default ``False``).
     """
 
@@ -192,4 +213,5 @@ class MemoryFilter:
     scope: MemoryScope | None = None
     keyword: str = ""
     min_importance: float = 0.0
+    origin: MemoryOrigin | None = None
     archived: bool = False

@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from src.memory.types import MemoryItem, MemoryType, MemoryFilter
+from src.memory.types import MemoryItem, MemoryType, MemoryFilter, MemoryOrigin
 from src.memory.store import InMemoryStore
 from src.memory.service import MemoryService
 from src.memory.scorer import ImportanceScorer
@@ -77,13 +77,14 @@ class ActiveForgetting:
         """
         result = ForgetResult()
 
-        # Get all non-archived items
-        items = await self._memory.recall(
-            query="",
+        # P0 provenance: only sweep agent-self-sedimented memories.
+        # FOREGROUND (user-entered) memories are never auto-archived.
+        f = MemoryFilter(
             agent_id=agent_id,
             memory_type=memory_type,
-            top_k=1000,
+            origin=MemoryOrigin.AGENT,
         )
+        items = await self._memory._store.search(f)
 
         result.scanned = len(items)
 

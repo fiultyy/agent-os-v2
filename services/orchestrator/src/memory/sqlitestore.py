@@ -28,6 +28,7 @@ from src.memory.types import (
     MemoryFilter,
     MemoryType,
     MemoryScope,
+    MemoryOrigin,
 )
 
 
@@ -72,7 +73,8 @@ class SQLiteStore:
                     created_at TEXT,
                     accessed_at TEXT,
                     updated_at TEXT,
-                    archived INTEGER DEFAULT 0
+                    archived INTEGER DEFAULT 0,
+                    origin TEXT DEFAULT 'foreground'
                 )
             """)
             self._conn.execute("""
@@ -106,6 +108,24 @@ class SQLiteStore:
                     message_count INTEGER DEFAULT 0
                 )
             """)
+        self._migrate_schema()
+
+    def _migrate_schema(self) -> None:
+        """Apply incremental schema changes for older databases.
+
+        Adds the ``origin`` column to ``memories`` if it is missing
+        (introduced by the provenance / P0 change). Existing rows backfill
+        to ``'foreground'`` so user-entered memories stay protected from
+        autonomous consolidation.
+        """
+        existing_cols = {
+            row[1]
+            for row in self._conn.execute("PRAGMA table_info(memories)").fetchall()
+        }
+        if "origin" not in existing_cols:
+            self._conn.execute(
+                "ALTER TABLE memories ADD COLUMN origin TEXT DEFAULT 'foreground'"
+            )
 
     # ── Serialization helpers ─────────────────────────────────────────
 
@@ -125,6 +145,7 @@ class SQLiteStore:
             "accessed_at": item.accessed_at,
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "archived": 1 if item.archived else 0,
+            "origin": item.origin.value if isinstance(item.origin, MemoryOrigin) else item.origin,
         }
 
     @staticmethod
@@ -144,6 +165,7 @@ class SQLiteStore:
             created_at=row["created_at"] or "",
             accessed_at=row["accessed_at"] or "",
             archived=bool(row["archived"]),
+            origin=MemoryOrigin(row["origin"]) if row["origin"] else MemoryOrigin.FOREGROUND,
         )
 
     # ── Memory Item CRUD ──────────────────────────────────────────────
@@ -164,9 +186,9 @@ class SQLiteStore:
             self._conn.execute(
                 """INSERT OR REPLACE INTO memories
                    (id, content, scope, memory_type, importance, metadata,
-                    agent_id, session_id, created_at, accessed_at, updated_at, archived)
+                    agent_id, session_id, created_at, accessed_at, updated_at, archived, origin)
                    VALUES (:id, :content, :scope, :memory_type, :importance, :metadata,
-                    :agent_id, :session_id, :created_at, :accessed_at, :updated_at, :archived)""",
+                    :agent_id, :session_id, :created_at, :accessed_at, :updated_at, :archived, :origin)""",
                 row,
             )
         return item.id
@@ -217,7 +239,7 @@ class SQLiteStore:
                    importance = :importance, metadata = :metadata,
                    agent_id = :agent_id, session_id = :session_id,
                    accessed_at = :accessed_at, updated_at = :updated_at,
-                   archived = :archived
+                   archived = :archived, origin = :origin
                    WHERE id = :id""",
                 updated,
             )
@@ -283,6 +305,9 @@ class SQLiteStore:
         if filter.scope:
             clauses.append("scope = ?")
             params.append(filter.scope.value)
+        if filter.origin:
+            clauses.append("origin = ?")
+            params.append(filter.origin.value)
         if filter.keyword:
             clauses.append("content LIKE ?")
             params.append(f"%{filter.keyword}%")

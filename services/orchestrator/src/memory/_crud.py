@@ -8,7 +8,7 @@ from src.memory.vector import VectorStore
 from src.memory.permissions import PermissionManager, PermissionLevel
 from src.memory.permissions import ACTION_READ, ACTION_WRITE, ACTION_DELETE
 from src.memory.scorer import ImportanceScorer
-from src.memory.types import MemoryItem, MemoryRef, MemoryType, MemoryScope
+from src.memory.types import MemoryItem, MemoryRef, MemoryType, MemoryScope, MemoryOrigin
 
 
 class CrudOperations:
@@ -37,6 +37,7 @@ class CrudOperations:
         scope: MemoryScope = MemoryScope.AGENT,
         importance: float = 0.5,
         metadata: dict[str, Any] | None = None,
+        origin: MemoryOrigin = MemoryOrigin.FOREGROUND,
     ) -> MemoryRef:
         """Store a new memory item and return a reference."""
         item = MemoryItem(
@@ -48,6 +49,7 @@ class CrudOperations:
             content=content,
             importance=importance,
             metadata=metadata or {},
+            origin=origin,
         )
 
         if self._auto_score and importance == 0.5 and self._scorer is not None:

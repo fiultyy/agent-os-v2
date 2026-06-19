@@ -3,7 +3,7 @@
 from typing import Any
 
 from src.memory.store import InMemoryStore
-from src.memory.types import MemoryItem, MemoryRef, MemoryType
+from src.memory.types import MemoryItem, MemoryRef, MemoryType, MemoryFilter, MemoryOrigin
 
 from ._blocks import BlockOperations
 
@@ -45,7 +45,6 @@ class SessionOperations:
         agent_id: str,
         trigger: str = "periodic",
         top_k: int = 20,
-        recall_func=None,
     ) -> list[MemoryRef]:
         """Consolidate recent episodic memories into semantic knowledge.
 
@@ -53,22 +52,28 @@ class SessionOperations:
         inspects them for duplicates and contradictions, then merges
         related items into new SEMANTIC memories.
 
+        Only agent-self-sedimented (``origin=AGENT``) episodic memories
+        are consolidated; user-entered FOREGROUND memories are never
+        merged or modified (P0 provenance).
+
         Args:
             agent_id: The agent whose memories to consolidate.
             trigger: Reason for the consolidation.
             top_k: How many recent episodic items to consider.
-            recall_func: Callable for the recall operation.
 
         Returns:
             A list of :class:`MemoryRef` for the newly created semantic
             memories.
         """
-        episodic_items: list[MemoryItem] = await recall_func(
-            query="",
+        # P0 provenance: reflect only agent-origin episodic items, fetched
+        # directly from the store (bypasses the semantic recall facade and
+        # _recall strategies) so FOREGROUND memories are never merged.
+        f = MemoryFilter(
             agent_id=agent_id,
             memory_type=MemoryType.EPISODIC,
-            top_k=top_k,
+            origin=MemoryOrigin.AGENT,
         )
+        episodic_items: list[MemoryItem] = (await self._store.search(f))[:top_k]
 
         if not episodic_items:
             return []
@@ -119,6 +124,7 @@ class SessionOperations:
                 agent_id=agent_id,
                 memory_type=MemoryType.SEMANTIC,
                 importance=max_importance,
+                origin=MemoryOrigin.AGENT,
                 metadata={
                     "consolidation_trigger": trigger,
                     "source_ids": source_ids,

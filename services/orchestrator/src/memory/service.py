@@ -17,6 +17,7 @@ from src.memory.types import (
     MemoryBlock,
     MemoryType,
     MemoryScope,
+    MemoryOrigin,
     RecallMode,
 )
 from src.memory.store import InMemoryStore
@@ -118,6 +119,7 @@ class MemoryService:
         scope: MemoryScope = MemoryScope.AGENT,
         importance: float = 0.5,
         metadata: dict[str, Any] | None = None,
+        origin: MemoryOrigin = MemoryOrigin.FOREGROUND,
     ) -> MemoryRef:
         """Store a new memory item and return a reference."""
         return await self._crud.store(
@@ -128,6 +130,7 @@ class MemoryService:
             scope=scope,
             importance=importance,
             metadata=metadata,
+            origin=origin,
         )
 
     async def get(
@@ -282,7 +285,6 @@ class MemoryService:
             agent_id=agent_id,
             trigger=trigger,
             top_k=top_k,
-            recall_func=self.recall,
         )
 
     async def archive_session(self, session_id: str) -> bool:

@@ -26,6 +26,7 @@ from src.memory.types import (
     MemoryBlock,
     MemoryFilter,
     MemoryItem,
+    MemoryOrigin,
     MemoryScope,
     MemoryType,
 )
@@ -40,8 +41,8 @@ memory_items = sa.Table(
     "memory_items",
     metadata,
     sa.Column("id", sa.String(36), primary_key=True),
-    sa.Column("agent_id", sa.String(36), sa.Index("ix_memory_agent_id"), nullable=False),
-    sa.Column("session_id", sa.String(36), sa.Index("ix_memory_session_id"), nullable=False, server_default=""),
+    sa.Column("agent_id", sa.String(36), nullable=False),
+    sa.Column("session_id", sa.String(36), nullable=False, server_default=""),
     sa.Column("memory_type", sa.String(20), nullable=False),
     sa.Column("scope", sa.String(20), nullable=False),
     sa.Column("content", sa.Text, nullable=False),
@@ -49,18 +50,22 @@ memory_items = sa.Table(
     sa.Column("metadata_json", sa.Text, nullable=False, server_default="{}"),
     sa.Column("created_at", sa.String(40), nullable=False),
     sa.Column("accessed_at", sa.String(40), nullable=False),
+    sa.Column("origin", sa.Text, nullable=False, server_default="foreground"),
     sa.Column("archived", sa.Boolean, nullable=False, server_default=sa.text("false")),
+    sa.Index("ix_memory_agent_id", "agent_id"),
+    sa.Index("ix_memory_session_id", "session_id"),
 )
 
 memory_blocks = sa.Table(
     "memory_blocks",
     metadata,
     sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
-    sa.Column("agent_id", sa.String(36), sa.Index("ix_blocks_agent_id"), nullable=False),
+    sa.Column("agent_id", sa.String(36), nullable=False),
     sa.Column("label", sa.String(100), nullable=False),
     sa.Column("content", sa.Text, nullable=False, server_default=""),
     sa.Column("char_limit", sa.Integer, nullable=False, server_default="2000"),
     sa.UniqueConstraint("agent_id", "label", name="uq_block_agent_label"),
+    sa.Index("ix_blocks_agent_id", "agent_id"),
 )
 
 sessions = sa.Table(
@@ -106,6 +111,7 @@ def _row_to_memory_item(row: sa.Row) -> MemoryItem:
         metadata=metadata_dict,
         created_at=row[memory_items.c.created_at],
         accessed_at=row[memory_items.c.accessed_at],
+        origin=MemoryOrigin(row[memory_items.c.origin]) if row[memory_items.c.origin] else MemoryOrigin.FOREGROUND,
         archived=bool(row[memory_items.c.archived]),
     )
 
@@ -197,6 +203,7 @@ class PostgresStore:
                     metadata_json=json.dumps(item.metadata, default=str),
                     created_at=item.created_at,
                     accessed_at=item.accessed_at,
+                    origin=item.origin.value,
                     archived=item.archived,
                 )
             )
@@ -250,6 +257,10 @@ class PostgresStore:
                 if attr in kwargs:
                     values[col] = kwargs[attr]
 
+            if "origin" in kwargs:
+                origin_val = kwargs["origin"]
+                values["origin"] = origin_val.value if isinstance(origin_val, MemoryOrigin) else origin_val
+
             if "metadata" in kwargs:
                 values["metadata_json"] = json.dumps(kwargs["metadata"], default=str)
 
@@ -281,6 +292,8 @@ class PostgresStore:
             query = query.where(memory_items.c.memory_type == filter.memory_type.value)
         if filter.scope:
             query = query.where(memory_items.c.scope == filter.scope.value)
+        if filter.origin:
+            query = query.where(memory_items.c.origin == filter.origin.value)
         if filter.keyword:
             # Escape SQL LIKE wildcards to prevent unintended pattern matching
             escaped = filter.keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
