@@ -63,7 +63,7 @@ class TaskConsolidationAgent:
         agent_id: str,
         session_id: str,
         messages: list[dict[str, Any]] | None = None,
-        timeout: float = 2.0,
+        timeout: float = 8.0,  # was 2.0 — real LLM calls (~2-3s) always timed out → degraded
     ) -> ConsolidateResult:
         """Extract key experience from a completed task and write it back.
 
