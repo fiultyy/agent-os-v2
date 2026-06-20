@@ -1,0 +1,34 @@
+# Agent OS Orchestrator — 本地 podman 镜像(精简运行时依赖)
+#
+# 与官方 Dockerfile 的区别:不装 sentence-transformers(→torch ~800MB)/faiss-cpu/
+# grpcio —— 这些运行时未启用(FAISS 已切 KG,embedding 未启用,gRPC 未接)。
+# python:3.12-slim 的 stdlib sqlite3 健康,无需 pysqlite3 hack(区别于 miniconda3)。
+#
+# 构建: podman build -t agent-os-orchestrator:latest -f Containerfile . (context=services/orchestrator)
+# 运行: bash scripts/container-run.sh  (或见 docs/memory-integration-guide.md)
+
+FROM python:3.12-slim
+
+# 精简运行时依赖(均纯 wheel,无 torch,构建快、镜像小)
+RUN pip install --no-cache-dir \
+    "fastapi>=0.115" \
+    "uvicorn[standard]>=0.34" \
+    "pydantic>=2.10" \
+    "httpx>=0.27" \
+    "sqlalchemy[asyncio]>=2.0" \
+    "alembic>=1.14" \
+    "greenlet>=3.0" \
+    "networkx>=3.3" \
+    "numpy>=1.26" \
+    "pyyaml>=6.0"
+
+WORKDIR /app
+COPY src/ src/
+
+# data/ 运行时用 named volume 挂载(独立持久化,不与 host 服务共享);
+# LLM key 运行时 -e 注入(绝不 baked 进镜像)。
+RUN mkdir -p data
+EXPOSE 8000
+
+# uvicorn src.engine:app —— cwd=/app 在 sys.path,src/__init__.py 使 src 成包
+CMD ["uvicorn", "src.engine:app", "--host", "0.0.0.0", "--port", "8000"]
