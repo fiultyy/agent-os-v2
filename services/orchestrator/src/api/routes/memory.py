@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Query
 
-from src.api.models import StoreMemoryRequest, GrantPermissionRequest, SendMessageRequest
+from src.api.models import (
+    StoreMemoryRequest,
+    GrantPermissionRequest,
+    SendMessageRequest,
+    MemoryNotifyRequest,
+    MemoryConsolidateRequest,
+)
 from src.memory import MemoryType, MemoryScope
 from src.services import _state
 from src.communication.message import AgentMessage, MessageType, MessagePriority
@@ -80,6 +88,79 @@ async def delete_memory(memory_id: str) -> dict:
     """Delete a memory item."""
     deleted = await _state.memory_service.delete(memory_id)
     return {"deleted": deleted}
+
+
+# ── External Maintenance API ───────────────────────────────────────
+
+
+@router.post("/memory/notify")
+async def notify_maintenance(req: MemoryNotifyRequest) -> dict:
+    """Trigger deterministic maintenance (zero LLM) on demand.
+
+    For external apps sharing the memories DB: call this after writing to the
+    ``memories`` table to immediately run prune → forget → migrate (the SAME
+    chain as the 60s poll). Only touches ``origin=AGENT`` memories; FOREGROUND
+    (user / external-app-authored) memories are P0-protected and never
+    auto-touched. Set ``force=True`` to run unconditionally (bypasses the
+    updated_at change check).
+    """
+    if _state.db_watcher is None:
+        return {"status": "unavailable", "results": []}
+    agent_ids = [req.agent_id] if req.agent_id else list(_state.agents.keys())
+    results: list[dict] = []
+    for aid in agent_ids:
+        try:
+            if req.force:
+                run = True
+            else:
+                changed = await asyncio.to_thread(_state.db_watcher.has_external_changes)
+                run = changed is not None
+            if run:
+                r = await _state.db_watcher.run_maintenance(agent_id=aid, emit=True, trigger="notify")
+                results.append(r)
+            else:
+                results.append({"agent_id": aid, "status": "noop", "reason": "no_external_changes"})
+        except Exception as exc:
+            results.append({"agent_id": aid, "status": "error", "error": str(exc)})
+    processed = sum(1 for r in results if r.get("status") == "ok")
+    return {"status": "ok", "processed": processed, "results": results}
+
+
+@router.post("/memory/consolidate")
+async def consolidate_memory(req: MemoryConsolidateRequest) -> dict:
+    """Trigger LLM consolidation on demand (reuses ``task_consolidator``).
+
+    Extracts key decisions / pitfalls from ``messages`` and writes them back
+    via BackwardWriter. Timeout is clamped to 8s; degrades to a heuristic
+    EPISODIC summary on LLM failure. Rejects empty ``messages`` (would write
+    junk) and no-ops when no LLM is configured (avoids memory pollution).
+    """
+    if _state.task_consolidator is None:
+        return {"status": "unavailable"}
+    if not req.messages:
+        return {"triggered": False, "written": False, "error": "messages_required"}
+    llm = _state.llm_client
+    if llm is not None and not getattr(llm, "api_key", None) and not getattr(llm, "anthropic_api_key", None):
+        return {"triggered": False, "degraded": True, "written": False, "error": "llm_unconfigured"}
+    timeout = min(float(req.timeout or 8.0), 8.0)
+    try:
+        result = await _state.task_consolidator.consolidate_task(
+            agent_id=req.agent_id,
+            session_id=req.session_id,
+            messages=req.messages,
+            timeout=timeout,
+        )
+        return {
+            "triggered": result.triggered,
+            "degraded": getattr(result, "degraded", False),
+            "confidence": result.confidence,
+            "written": result.written,
+            "memory_id": result.memory_id,
+            "channel": result.channel,
+            "error": getattr(result, "error", None) or None,
+        }
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
 
 
 # ── Permission API ─────────────────────────────────────────────────

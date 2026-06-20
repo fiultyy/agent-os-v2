@@ -50,3 +50,15 @@ class GrantPermissionRequest(BaseModel):
     target_agent_id: str
     level: int = 2
     expires_at: str | None = None
+
+
+class MemoryNotifyRequest(BaseModel):
+    agent_id: str = ""
+    force: bool = False
+
+
+class MemoryConsolidateRequest(BaseModel):
+    agent_id: str = ""
+    session_id: str = ""
+    messages: list[dict] | None = None
+    timeout: float = 8.0
