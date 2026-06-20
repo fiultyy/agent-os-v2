@@ -32,10 +32,10 @@ podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
 podman run -d --name "$CONTAINER" \
   -p "$HOST_PORT:8000" \
   -v "$DATA_DIR":/app/data \
-  -e LLM_API_FORMAT=openai \
-  -e LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4 \
-  -e LLM_API_KEY="$ANTHROPIC_AUTH_TOKEN" \
-  -e LLM_MODEL=glm-4-flash \
+  -e LLM_API_FORMAT=anthropic \
+  -e ANTHROPIC_BASE_URL=https://open.bigmodel.cn/api/anthropic \
+  -e ANTHROPIC_AUTH_TOKEN="$ANTHROPIC_AUTH_TOKEN" \
+  -e LLM_ANTHROPIC_MODEL=glm-5-turbo \
   -e MEMORY_EVENT_BUS_ENABLED=1 \
   -e HTTP_PROXY= -e HTTPS_PROXY= -e ALL_PROXY= \
   -e http_proxy= -e https_proxy= -e all_proxy= \
