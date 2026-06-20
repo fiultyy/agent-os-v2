@@ -153,6 +153,15 @@ class InMemoryStore:
             return False
         return True
 
+    def max_updated_at(self) -> str | None:
+        """Return the maximum ``updated_at`` over all items, or ``None``.
+
+        Mirror of :meth:`SQLiteStore.max_updated_at` for incremental change
+        detection (MemoryDBWatcher watermark). Returns ``None`` when empty.
+        """
+        stamps = [i.updated_at for i in self._items.values() if i.updated_at]
+        return max(stamps) if stamps else None
+
     # ── Memory Block Management ───────────────────────────────────
 
     def _block_key(self, agent_id: str, label: str) -> str:

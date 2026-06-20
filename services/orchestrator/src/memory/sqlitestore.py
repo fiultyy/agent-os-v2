@@ -111,6 +111,10 @@ class SQLiteStore:
                     message_count INTEGER DEFAULT 0
                 )
             """)
+            # Index for incremental change detection (MemoryDBWatcher watermark).
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memories_updated_at ON memories(updated_at)"
+            )
         self._migrate_schema()
 
     def _migrate_schema(self) -> None:
@@ -143,6 +147,19 @@ class SQLiteStore:
                 self._conn.execute(
                     "ALTER TABLE memories ADD COLUMN last_state_transition TEXT DEFAULT ''"
                 )
+
+    def max_updated_at(self) -> str | None:
+        """Return the maximum ``updated_at`` over all memories, or ``None``.
+
+        Used by :class:`~src.memory.db_watcher.MemoryDBWatcher` for
+        incremental change detection (external DB writes). Backed by
+        ``idx_memories_updated_at`` so it is an index-only scan. Returns
+        ``None`` for an empty table.
+        """
+        row = self._conn.execute(
+            "SELECT MAX(updated_at) FROM memories"
+        ).fetchone()
+        return row[0] if row else None
 
     # ── Serialization helpers ─────────────────────────────────────────
 
