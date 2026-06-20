@@ -110,7 +110,7 @@ class IngestorAgent:
         agent_id: str,
         session_id: str,
         origin: str | MemoryOrigin,
-        timeout: float = 8.0,
+        timeout: float = 20.0,  # was 8.0 — ingest prompt 复杂(实体/关系/五维/identity JSON),实测 ~17s
     ) -> IngestorResult:
         """Extract entities/relations, score importance, tag identity_category.
 
