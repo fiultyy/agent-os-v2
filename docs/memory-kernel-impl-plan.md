@@ -43,6 +43,24 @@
 
 ---
 
+## Part 1 对外 API 调整（随 side agent 同步暴露）
+
+> side agent 是内部 hook，**对外必须同步开 API**，否则外部用不上新能力。当前 API 是"机械记忆"时代设计（`GET /memories` 全量、无 query），需调整 5 处：
+
+| API | 调整 | 对应 step |
+|---|---|---|
+| **`GET /v1/memories`** | 加 `?query=&sort=importance&top_k=` → 走 **③RetrieverAgent** 语义召回，返回带 score 的排序结果（**修"召回残废"死穴**：当前硬编码 `recall(query="")` 全量） | ③ |
+| **`GET /v1/identity`** | **新 endpoint**，四问（what_i_remember/who_am_i/my_goals/my_traits），依赖①的 identity_category 标签 | ⑧ |
+| **`POST /v1/memory/consolidate`** | 加 `?mode=merge` → 触发 **②ConsolidatorAgent**（episodic→semantic 合并），区别于 task_consolidator（任务后经验） | ② |
+| **`POST /v1/memory/notify`** | 加 `?curate=true` → 触发 **④CuratorAgent**（LLM 筛查），区别于确定性维护（prune/forget/migrate） | ④ |
+| **`POST /v1/memories`** | 加 `sync_extract` 选项（等 **①IngestorAgent** 抽取完）+ 返回 entities/identity_category | ① |
+
+**核心**：③召回 API 是最关键调整——之前 `MemoryService.recall` 内部支持 query（compiler 用 `system_prompt[:200]`），但 `GET /memories` 对外硬编码 `query=""` 全量拉取，**内部能力没对外开**。③ 做成召回计算引擎后必须把 query + importance 排序暴露，否则 side agent 白做。⑧身份 endpoint 是闭环出口（第 6 章"记忆涌现身份"对外可达）。
+
+**解耦边界**：API 层只做**参数解析 + 调 side agent/hook + 返回程序化结果**，不掺请求方处理逻辑（LLM 综合涌现是请求方 agent 的事，API 只返回记忆群 + score）。每个 API 的实现并入对应 step，files 含 `api/routes/memory.py`。
+
+---
+
 ## Part 2：神经状态场（LIF + 蝴蝶翼融合）
 
 ### ⑤ NeuralState 状态场（地基）+ ⑥ 鲁棒回退（安全网）—— ⚠️ 合并交付
