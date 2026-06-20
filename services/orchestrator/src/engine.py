@@ -33,6 +33,7 @@ from src.memory.forgetting import ActiveForgetting
 from src.memory.state_pruner import TimeBasedStatePruner
 from src.memory.sideline.task_consolidator import TaskConsolidationAgent
 from src.memory.sideline.backward_writer import BackwardWriter
+from src.memory.db_watcher import MemoryDBWatcher
 from src.communication.bus import CommunicationBus
 from src.concurrency.controller import ConcurrencyController
 from src.tools.executor import ToolExecutor
@@ -101,6 +102,12 @@ _state.task_consolidator = TaskConsolidationAgent(
     _state.llm_client,
     BackwardWriter(_state.memory_service, _state.llm_client),
 )
+# External-memory watcher: detects external DB writes (other harnesses sharing
+# the sqlite DB) and runs the deterministic maintenance chain. Zero LLM.
+_state.db_watcher = MemoryDBWatcher(
+    _state.memory_service,
+    poll_interval=float(os.getenv("MEMORY_DB_WATCH_INTERVAL", "60")),
+)
 
 # Ensure data directory exists for SQLite databases
 Path("data").mkdir(exist_ok=True)
@@ -151,6 +158,30 @@ async def _start_forgetting_sweep() -> None:
                 pass
 
     asyncio.create_task(_sweep_loop())
+
+
+@app.on_event("startup")
+async def _start_db_watch() -> None:
+    """Poll for external memory DB writes and run deterministic maintenance."""
+
+    if _state.db_watcher is None:
+        logger.error("db_watcher not initialized — skipping db_watch_loop")
+        return
+    interval = _state.db_watcher.poll_interval
+
+    async def _watch_loop():
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                # Offload the synchronous MAX(updated_at) query off the event loop.
+                changed = await asyncio.to_thread(_state.db_watcher.has_external_changes)
+                if changed is None:
+                    continue
+                await _state.db_watcher.run_once_all(emit=True, trigger="poll")
+            except Exception:
+                logger.exception("db_watch_loop iteration failed")
+
+    _state._db_watch_task = asyncio.create_task(_watch_loop())
 
 
 @app.on_event("shutdown")

@@ -60,6 +60,10 @@ memory_event_bus: Any = None
 state_pruner: Any = None
 task_consolidator: Any = None
 
+# External-memory watcher: 60s poll for external DB writes + on-demand maintenance.
+db_watcher: Any = None
+_db_watch_task: Any = None  # asyncio task handle (liveness)
+
 memory_event_subscribers: list[asyncio.Queue[str]] = []
 
 
