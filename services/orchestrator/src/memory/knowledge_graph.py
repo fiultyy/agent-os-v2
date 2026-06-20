@@ -113,6 +113,19 @@ class EntityExtractor:
     _CAMEL_CASE = re.compile(
         r'\b([a-z]+(?:[A-Z][a-z]+)+)\b'
     )
+    # PascalCase technical terms with an internal uppercase boundary, e.g.
+    # FastAPI, PostgreSQL (a lowercase run followed by another uppercase).
+    _PASCAL_TECH = re.compile(
+        r'\b([A-Z][a-z]+[A-Z][A-Za-z0-9]*)\b'
+    )
+    # ALL-CAPS prefix fused with PascalCase, e.g. SQLAlchemy, JSONParser.
+    _ALLCAPS_PASCAL = re.compile(
+        r'\b([A-Z]{2,}[a-z][A-Za-z0-9]*)\b'
+    )
+    # snake_case identifiers, e.g. pool_pre_ping, connection_pool.
+    _SNAKE_CASE = re.compile(
+        r'\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b'
+    )
 
     # Relation patterns: (regex, predicate)
     _RELATION_PATTERNS: list[tuple[re.Pattern, str]] = [
@@ -173,6 +186,39 @@ class EntityExtractor:
 
         # CamelCase identifiers
         for match in self._CAMEL_CASE.finditer(text):
+            name = match.group(1).strip()
+            if name not in seen_names and len(name) > 4:
+                seen_names.add(name)
+                entities.append(Entity(
+                    name=name,
+                    entity_type="identifier",
+                    source_memory_ids=[memory_id] if memory_id else [],
+                ))
+
+        # PascalCase technical terms (FastAPI, PostgreSQL, ...)
+        for match in self._PASCAL_TECH.finditer(text):
+            name = match.group(1).strip()
+            if name not in seen_names and len(name) > 3:
+                seen_names.add(name)
+                entities.append(Entity(
+                    name=name,
+                    entity_type="technical_term",
+                    source_memory_ids=[memory_id] if memory_id else [],
+                ))
+
+        # ALL-CAPS + PascalCase fused (SQLAlchemy, JSONParser, ...)
+        for match in self._ALLCAPS_PASCAL.finditer(text):
+            name = match.group(1).strip()
+            if name not in seen_names and len(name) > 3:
+                seen_names.add(name)
+                entities.append(Entity(
+                    name=name,
+                    entity_type="technical_term",
+                    source_memory_ids=[memory_id] if memory_id else [],
+                ))
+
+        # snake_case identifiers (pool_pre_ping, connection_pool, ...)
+        for match in self._SNAKE_CASE.finditer(text):
             name = match.group(1).strip()
             if name not in seen_names and len(name) > 4:
                 seen_names.add(name)
