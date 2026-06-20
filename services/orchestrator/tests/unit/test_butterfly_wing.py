@@ -656,3 +656,264 @@ class TestDefaultStore:
         store1.close()
         if os.path.exists(temp_path):
             os.unlink(temp_path)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Part 2 ⑦ — compute_forward_wing relevance 改造 + match×lif 召回
+# ─────────────────────────────────────────────────────────────────
+
+class _FakeKG:
+    """Minimal KG stub mirroring KnowledgeGraph's relevance-read surface.
+
+    Exposes ``_resolve_entity_id`` + ``get_entity_relations`` returning
+    relation dicts with a ``confidence`` field, exactly what
+    ``ButterflyEngine._resolve_forward_relevance`` reads.
+    """
+
+    def __init__(self, relations: dict[str, list[dict]]) -> None:
+        # relations: entity_name -> [{confidence: float, ...}, ...]
+        self._relations = {k.lower(): v for k, v in relations.items()}
+
+    def _resolve_entity_id(self, name_or_id: str) -> str | None:
+        key = (name_or_id or "").lower()
+        return key if key in self._relations else None
+
+    def get_entity_relations(self, entity_id: str) -> list[dict]:
+        return list(self._relations.get((entity_id or "").lower(), []))
+
+
+class TestForwardWingRelevanceProvenance:
+    """Part 2 ⑦: compute_forward_wing relevance 从 KG relations.confidence 取。"""
+
+    def test_relevance_defaults_to_class_const_without_kg(self):
+        """No KG ⇒ relevance == _RELEVANCE_WEIGHT (0.5). Backward compat."""
+        engine = ButterflyEngine()
+        meta, score, assoc = engine.compute_forward_wing(
+            content="meeting notes",
+            temporal_context=["monday"],
+            entity_context=[],
+            thematic_context=[],
+            recency=1.0,
+            activation_freq=1.0,
+        )
+        # score = _RELEVANCE_WEIGHT(0.5) * 1.0 * 1.0 = 0.5
+        assert score == pytest.approx(engine._RELEVANCE_WEIGHT)
+        assert meta.confidence == pytest.approx(engine._RELEVANCE_WEIGHT)
+
+    def test_relevance_read_from_kg_confidence_mean(self):
+        """KG present with edges ⇒ relevance = mean(relations.confidence)."""
+        engine = ButterflyEngine()
+        kg = _FakeKG({
+            "alice": [{"confidence": 0.9}, {"confidence": 0.3}],
+        })
+        _, score, _ = engine.compute_forward_wing(
+            content="alice deployed the service",
+            temporal_context=[],
+            entity_context=["alice"],
+            thematic_context=[],
+            recency=1.0,
+            activation_freq=1.0,
+            kg=kg,
+        )
+        # mean([0.9, 0.3]) = 0.6; score = 0.6 * 1.0 * 1.0
+        assert score == pytest.approx(0.6)
+
+    def test_relevance_clamped_to_unit_interval(self):
+        """confidence > 1 in KG is clamped to 1.0."""
+        engine = ButterflyEngine()
+        kg = _FakeKG({"x": [{"confidence": 5.0}]})
+        _, score, _ = engine.compute_forward_wing(
+            content="x",
+            temporal_context=[],
+            entity_context=["x"],
+            thematic_context=[],
+            recency=1.0,
+            activation_freq=1.0,
+            kg=kg,
+        )
+        # clamped relevance = 1.0
+        assert score == pytest.approx(1.0)
+
+    def test_relevance_falls_back_when_kg_has_no_edges(self):
+        """KG present but entity has zero edges ⇒ fallback to class const."""
+        engine = ButterflyEngine()
+        kg = _FakeKG({"lonely": []})  # entity exists, no relations
+        _, score, _ = engine.compute_forward_wing(
+            content="lonely concept",
+            temporal_context=[],
+            entity_context=["lonely"],
+            thematic_context=[],
+            recency=1.0,
+            activation_freq=1.0,
+            kg=kg,
+        )
+        assert score == pytest.approx(engine._RELEVANCE_WEIGHT)
+
+    def test_forward_relevance_explicit_override_wins(self):
+        """forward_relevance kwarg wins over KG lookup."""
+        engine = ButterflyEngine()
+        kg = _FakeKG({"x": [{"confidence": 0.9}]})
+        _, score, _ = engine.compute_forward_wing(
+            content="x",
+            temporal_context=[],
+            entity_context=["x"],
+            thematic_context=[],
+            recency=1.0,
+            activation_freq=1.0,
+            kg=kg,
+            forward_relevance=0.2,  # explicit override
+        )
+        assert score == pytest.approx(0.2)
+
+    def test_forward_associations_are_entity_ids_when_given(self):
+        """Part 2 ⑦: forward_associations become entity ID list."""
+        engine = ButterflyEngine()
+        _, _, assoc = engine.compute_forward_wing(
+            content="content",
+            temporal_context=["monday"],
+            entity_context=["alice", "bob"],
+            thematic_context=[],
+            entity_ids=["ent_alice", "ent_bob"],
+        )
+        assert assoc == ["ent_alice", "ent_bob"]
+
+    def test_class_const_relevance_weight_unchanged(self):
+        """审查修正: _RELEVANCE_WEIGHT 类常量未被污染 (0.5)."""
+        assert ButterflyEngine._RELEVANCE_WEIGHT == 0.5
+
+
+class TestBackwardWingUnaffected:
+    """审查修正回归：backward wing 不受 relevance 改造影响。"""
+
+    def test_backward_wing_score_formula_unchanged(self):
+        """B2 formula = min(citations*0.1,1.0) * recency * _UNIQUENESS_WEIGHT."""
+        engine = ButterflyEngine()
+        # citations=5 ⇒ 0.5; * recency 0.8 * uniqueness 0.9 = 0.36
+        _, score, _ = engine.compute_backward_wing(
+            content="x", citations=5, usage_context=[], recency=0.8,
+        )
+        assert score == pytest.approx(min(5 * 0.1, 1.0) * 0.8 * engine._UNIQUENESS_WEIGHT)
+
+    def test_backward_wing_ignores_kg_param(self):
+        """compute_backward_wing has no kg param — relevance reform is forward-only."""
+        import inspect
+        sig = inspect.signature(ButterflyEngine.compute_backward_wing)
+        assert "kg" not in sig.parameters
+        assert "forward_relevance" not in sig.parameters
+
+    def test_backward_wing_uses_uniqueness_not_relevance(self):
+        """B2 still multiplies _UNIQUENESS_WEIGHT, never _RELEVANCE_WEIGHT."""
+        engine = ButterflyEngine()
+        # With zero citations score = 0 (citation_score=0), so relevance
+        # const is irrelevant to backward — assert the path is uniqueness-driven.
+        _, score_zero, _ = engine.compute_backward_wing(
+            content="x", citations=0, usage_context=[], recency=1.0,
+        )
+        assert score_zero == pytest.approx(0.0)
+        # With 10 citations → citation_score saturates at 1.0; result
+        # depends only on _UNIQUENESS_WEIGHT (0.9), NOT _RELEVANCE_WEIGHT.
+        _, score_sat, _ = engine.compute_backward_wing(
+            content="x", citations=10, usage_context=[], recency=1.0,
+        )
+        assert score_sat == pytest.approx(1.0 * 1.0 * engine._UNIQUENESS_WEIGHT)
+        assert score_sat != pytest.approx(1.0 * engine._RELEVANCE_WEIGHT)
+
+
+class TestButterflyRecallWeighted:
+    """Part 2 ⑦: ButterflyRecallStrategy.recall match×lif re-ranking."""
+
+    def setup_method(self):
+        self.db_fd, self.db_path = tempfile.mkstemp(suffix=".db")
+        self.store = ButterflyStore(db_path=self.db_path)
+
+    def teardown_method(self):
+        self.store.close()
+        os.close(self.db_fd)
+        os.unlink(self.db_path)
+
+    def _run_sync(self, coro, *args, **kwargs):
+        import asyncio
+        return asyncio.get_event_loop().run_until_complete(coro(*args, **kwargs))
+
+    def _memitem(self, mid: str, content: str):
+        from memory.types import MemoryItem
+        return MemoryItem(id=mid, content=content, agent_id="a")
+
+    def test_weighted_rank_orders_by_match_times_lif(self):
+        """weighted=True + field ⇒ items re-ordered by match × lif.
+
+        Two items both match 'language' (equal match); the one whose
+        content touches a higher-potential concept ranks first."""
+        item_high = self._memitem("mem_rust", "rust language primer")
+        item_low = self._memitem("mem_py", "python language primer")
+        mock = MockRecallStrategy([item_high, item_low])
+        strategy = ButterflyRecallStrategy(mock, self.store)
+
+        results = self._run_sync(
+            strategy.recall,
+            "language",
+            top_k=2,
+            wing=None,
+            weighted=True,
+            field={"rust": 0.9, "python": 0.05},
+        )
+        assert len(results) == 2
+        assert results[0].id == "mem_rust"
+
+    def test_weighted_without_field_falls_back_to_match_order(self):
+        """weighted=True but no field ⇒ pure match order (Part 1 equivalent)."""
+        items = [
+            self._memitem("m1", "deploy rust"),
+            self._memitem("m2", "deploy rust deploy"),
+        ]
+        mock = MockRecallStrategy(items)
+        strategy = ButterflyRecallStrategy(mock, self.store)
+        results = self._run_sync(
+            strategy.recall,
+            "deploy rust",
+            top_k=2,
+            wing=None,
+            weighted=True,
+            field=None,
+        )
+        # both fully match; no lif ⇒ order preserved by score (tie), stable.
+        assert len(results) == 2
+
+    def test_weighted_still_applies_wing_filter(self):
+        """weighted mode keeps the forward/backward wing positive screen."""
+        # Give mem1 a forward wing so it passes; mem2 has no wing.
+        item1 = self._memitem("mem1", "rust language primer")
+        item2 = self._memitem("mem2", "python language primer")
+        wing1 = ButterflyWing(
+            forward_metadata=WingMetadata(wing=WingType.FORWARD, strength=0.9),
+            forward_score=0.9,
+            composite_score=0.75,
+            is_active=False,
+        )
+        self.store.save_wing("mem1", wing1)
+
+        mock = MockRecallStrategy([item1, item2])
+        strategy = ButterflyRecallStrategy(mock, self.store)
+        # wing='forward' ⇒ only mem1 survives the filter.
+        results = self._run_sync(
+            strategy.recall,
+            "language",
+            top_k=5,
+            wing="forward",
+            weighted=True,
+            field={"rust": 0.9, "python": 0.05},
+        )
+        assert len(results) == 1
+        assert results[0].id == "mem1"
+
+    def test_non_weighted_path_unchanged(self):
+        """Default weighted=False ⇒ identical to legacy filtering behaviour."""
+        item1 = {"id": "mem1", "content": "rust language primer"}
+        item2 = {"id": "mem2", "content": "python language primer"}
+        mock = MockRecallStrategy([item1, item2])
+        strategy = ButterflyRecallStrategy(mock, self.store)
+        # No wings, wing=None, weighted=False ⇒ both returned in base order.
+        results = self._run_sync(
+            strategy.recall, "language", top_k=5, wing=None,
+        )
+        assert [r["id"] for r in results] == ["mem1", "mem2"]

@@ -11,12 +11,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 
-from src.memory.event_bus import EventType, MemoryEventBus
+from src.memory.event_bus import EventType, MemoryEventBus, _EVENT_CONTEXT
 from src.memory.hooks import (
     CompressContext,
     CompressResult,
+    ConsolidateContext,
+    CurateContext,
     HookPriority,
+    IngestContext,
     MemoryHook,
+    RecallContext,
     SessionContext,
     TurnContext,
 )
@@ -164,3 +168,140 @@ class TestResilience:
         bus.unregister(h)
         await bus.emit(EventType.SESSION_START, SessionContext("a", "s"))
         assert h.calls == []
+
+
+class TestSideAgentEvents:
+    """Step0 public base — INGEST / CONSOLIDATE / RECALL / CURATE.
+
+    Side-agent hooks MUST register explicitly for their event; the default
+    all-events mount would fan out 10 events to every hook.
+    """
+
+    def test_four_new_event_types_exist(self) -> None:
+        assert EventType.INGEST.value == "ingest"
+        assert EventType.CONSOLIDATE.value == "consolidate"
+        assert EventType.RECALL.value == "recall"
+        assert EventType.CURATE.value == "curate"
+
+    def test_event_context_registers_new_types(self) -> None:
+        assert _EVENT_CONTEXT[EventType.INGEST] is IngestContext
+        assert _EVENT_CONTEXT[EventType.CONSOLIDATE] is ConsolidateContext
+        assert _EVENT_CONTEXT[EventType.RECALL] is RecallContext
+        assert _EVENT_CONTEXT[EventType.CURATE] is CurateContext
+
+    def test_explicit_register_does_not_fan_out_to_other_events(self) -> None:
+        # Red-line: a side-agent hook registered for INGEST must NOT receive
+        # the other 9 events (no default all-events mount for side agents).
+        bus = MemoryEventBus()
+
+        class _IngestOnly(MemoryHook):
+            def __init__(self) -> None:
+                self.fired = False
+
+            async def on_ingest(self, ctx: IngestContext) -> None:
+                self.fired = True
+
+        h = _IngestOnly()
+        bus.register(h, EventType.INGEST)
+        # registered only for INGEST
+        assert h in bus.hooks(EventType.INGEST)
+        for ev in EventType:
+            if ev is EventType.INGEST:
+                continue
+            assert h not in bus.hooks(ev), f"leaked into {ev}"
+
+    @pytest.mark.asyncio
+    async def test_emit_ingest_calls_on_ingest(self) -> None:
+        bus = MemoryEventBus()
+
+        class _H(MemoryHook):
+            def __init__(self) -> None:
+                self.got: IngestContext | None = None
+
+            async def on_ingest(self, ctx: IngestContext) -> None:
+                self.got = ctx
+
+        h = _H()
+        bus.register(h, EventType.INGEST)
+        ctx = IngestContext(memory_id="m1", content="hello", agent_id="a", session_id="s")
+        await bus.emit(EventType.INGEST, ctx)
+        assert h.got is ctx
+
+    @pytest.mark.asyncio
+    async def test_emit_consolidate_calls_on_consolidate(self) -> None:
+        bus = MemoryEventBus()
+
+        class _H(MemoryHook):
+            def __init__(self) -> None:
+                self.got: ConsolidateContext | None = None
+
+            async def on_consolidate(self, ctx: ConsolidateContext) -> None:
+                self.got = ctx
+
+        h = _H()
+        bus.register(h, EventType.CONSOLIDATE)
+        ctx = ConsolidateContext(agent_id="a", session_id="s")
+        assert ctx.trigger == "periodic"  # default
+        assert ctx.top_k == 20  # default
+        await bus.emit(EventType.CONSOLIDATE, ctx)
+        assert h.got is ctx
+
+    @pytest.mark.asyncio
+    async def test_emit_recall_calls_on_recall(self) -> None:
+        bus = MemoryEventBus()
+
+        class _H(MemoryHook):
+            def __init__(self) -> None:
+                self.got: RecallContext | None = None
+
+            async def on_recall(self, ctx: RecallContext) -> None:
+                self.got = ctx
+
+        h = _H()
+        bus.register(h, EventType.RECALL)
+        ctx = RecallContext(query="q", agent_id="a")
+        assert ctx.top_k == 10  # default
+        assert ctx.lif_state is None  # Part1: pure match ranking
+        await bus.emit(EventType.RECALL, ctx)
+        assert h.got is ctx
+
+    @pytest.mark.asyncio
+    async def test_emit_curate_calls_on_curate(self) -> None:
+        bus = MemoryEventBus()
+
+        class _H(MemoryHook):
+            def __init__(self) -> None:
+                self.got: CurateContext | None = None
+
+            async def on_curate(self, ctx: CurateContext) -> None:
+                self.got = ctx
+
+        h = _H()
+        bus.register(h, EventType.CURATE)
+        ctx = CurateContext(agent_id="a")
+        assert ctx.scope == "all"  # default
+        await bus.emit(EventType.CURATE, ctx)
+        assert h.got is ctx
+
+    @pytest.mark.asyncio
+    async def test_side_agent_hook_skipped_under_degradation(self) -> None:
+        # MEMORY_EVENT_BUS_ENABLED=0 → OBSERVER side-agent hooks skipped,
+        # behaviourally equivalent to pre-Step0 (zero regression).
+        bus = MemoryEventBus()
+
+        class _Obs(MemoryHook):
+            priority = HookPriority.OBSERVER
+
+            def __init__(self) -> None:
+                self.fired = False
+
+            async def on_ingest(self, ctx: IngestContext) -> None:
+                self.fired = True
+
+        h = _Obs()
+        bus.register(h, EventType.INGEST)
+        bus.set_enabled(False)
+        await bus.emit(
+            EventType.INGEST, IngestContext(memory_id="m", content="c", agent_id="a", session_id="s")
+        )
+        assert h.fired is False  # observer skipped under degradation
