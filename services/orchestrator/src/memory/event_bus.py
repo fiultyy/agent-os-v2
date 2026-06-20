@@ -22,9 +22,13 @@ from typing import Any
 from src.memory.hooks import (
     CompressContext,
     CompressResult,
+    ConsolidateContext,
+    CurateContext,
     DelegateContext,
     HookPriority,
+    IngestContext,
     MemoryHook,
+    RecallContext,
     SessionContext,
     TurnContext,
 )
@@ -41,6 +45,13 @@ class EventType(str, Enum):
     PRE_COMPRESS = "pre_compress"
     SESSION_END = "session_end"
     DELEGATE = "delegate"  # reserved (P3/P4)
+    # Step0 public base — side-agent (LLM) events. Side-agent hooks MUST
+    # register explicitly for these (register(hook, EventType.INGEST)); the
+    # default all-events mount would fan out 10 events to every hook.
+    INGEST = "ingest"  # IngestorAgent: raw text → KG entities/relations + score
+    CONSOLIDATE = "consolidate"  # ConsolidatorAgent: episodic → semantic merge
+    RECALL = "recall"  # RetrieverAgent: match × lif_weight ranking
+    CURATE = "curate"  # CuratorAgent: offline LLM QA (archive/merge/correct)
 
 
 _ALL_EVENTS: tuple[EventType, ...] = tuple(EventType)
@@ -53,6 +64,10 @@ _EVENT_CONTEXT: dict[EventType, type] = {
     EventType.PRE_COMPRESS: CompressContext,
     EventType.SESSION_END: SessionContext,
     EventType.DELEGATE: DelegateContext,
+    EventType.INGEST: IngestContext,
+    EventType.CONSOLIDATE: ConsolidateContext,
+    EventType.RECALL: RecallContext,
+    EventType.CURATE: CurateContext,
 }
 
 

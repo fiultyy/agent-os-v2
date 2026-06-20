@@ -26,6 +26,10 @@ class StoreMemoryRequest(BaseModel):
     memory_type: str = "session"
     scope: str = "agent"
     importance: float = 0.5
+    # When True the route awaits the ① IngestorAgent LLM extraction and
+    # returns entities/identity_category; when False (default) ingestion is
+    # fire-and-forget.
+    sync_extract: bool = False
 
 
 class ChatRequest(BaseModel):
@@ -55,6 +59,10 @@ class GrantPermissionRequest(BaseModel):
 class MemoryNotifyRequest(BaseModel):
     agent_id: str = ""
     force: bool = False
+    # When True fire a ④ CuratorAgent pass as an independent fire-and-forget
+    # task (NEVER inserted into the synchronous run_maintenance Zero-LLM
+    # chain). Distinct from the default deterministic prune/forget/migrate.
+    curate: bool = False
 
 
 class MemoryConsolidateRequest(BaseModel):
@@ -62,3 +70,6 @@ class MemoryConsolidateRequest(BaseModel):
     session_id: str = ""
     messages: list[dict] | None = None
     timeout: float = 8.0
+    # mode=merge → trigger ② ConsolidatorAgent (episodic→semantic merge).
+    # default (task_consolidator) → task-post experience sedimentation.
+    mode: str = "task_consolidator"

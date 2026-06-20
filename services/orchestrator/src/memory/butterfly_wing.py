@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 try:
     from pysqlite3 import dbapi2 as sqlite3  # type: ignore[import-untyped]
@@ -188,6 +188,10 @@ class ButterflyEngine:
         thematic_context: list[str],
         recency: float = 0.8,
         activation_freq: float = 1.0,
+        *,
+        kg: Any | None = None,
+        forward_relevance: float | None = None,
+        entity_ids: list[str] | None = None,
     ) -> tuple[WingMetadata, float, list[str]]:
         """Compute the forward wing (inductive/generalization).
 
@@ -195,8 +199,19 @@ class ButterflyEngine:
         F2: Computes association score = relevance * recency * activation_freq.
         F3: Uses forward activation threshold (0.5).
         F4: Determines trigger type (temporal/entity/thematic).
-        F5: Returns associations as temporal + entity context.
+        F5: Returns associations as entity IDs when available (Part 2 ⑦:
+            from string-concatenation → entity ID list), else temporal +
+            entity context strings for backward compatibility.
         F6: Caching is handled by the caller.
+
+        Part 2 ⑦ relevance provenance (审查修正：只改本方法**局部取值**，
+        绝不动类常量 ``_RELEVANCE_WEIGHT``——它被 backward wing 复用，改了污染):
+
+          relevance 来源优先级：
+            1. 显式 ``forward_relevance``（调用方直接给值，最高优先）。
+            2. ``kg`` + ``entity_ids`` / ``entity_context``：查 KG relations
+               表中相关边的 ``confidence`` 均值（真实联想强度，Hebbian/LTP 学出来的）。
+            3. 退化：类常量 ``_RELEVANCE_WEIGHT`` (0.5)——保持现状，老调用者零回归。
 
         Args:
             content: The memory content being processed.
@@ -205,6 +220,15 @@ class ButterflyEngine:
             thematic_context: Theme-related associated concepts.
             recency: Recency factor 0-1 (default 0.8).
             activation_freq: How frequently this pattern activates (default 1.0).
+            kg: Optional KG handle to read relations.confidence. KG 满足
+                ``_resolve_entity_id`` / ``get_entity_relations``（KnowledgeGraph
+                天然满足）。None → 退化到 ``_RELEVANCE_WEIGHT``。
+            forward_relevance: Optional explicit relevance value. Wins over KG
+                lookup when provided.
+            entity_ids: Optional explicit entity IDs to look up in the KG.
+                Falls back to ``entity_context`` (treated as names/IDs) when
+                omitted. Drives both relevance lookup and the F5 output list
+                (entity IDs replace the old string-concatenation).
 
         Returns:
             Tuple of (WingMetadata, score, list of associations).
@@ -221,22 +245,91 @@ class ButterflyEngine:
             metadata.trigger_type = "thematic"
 
         # F2: Association score = relevance * recency * activation_freq
-        # Simple relevance based on how much context we have
-        relevance = self._RELEVANCE_WEIGHT
+        # Part 2 ⑦: relevance 从 KG relations.confidence 取（局部取值，
+        # 不动类常量 _RELEVANCE_WEIGHT）。无 KG / 无边 → 退化到常量。
+        relevance = self._resolve_forward_relevance(
+            kg=kg,
+            forward_relevance=forward_relevance,
+            entity_ids=entity_ids,
+            entity_context=entity_context,
+        )
         score = relevance * recency * activation_freq
 
         # F1: Strength and confidence from score
         metadata.strength = min(score, 1.0)
         metadata.confidence = score
 
-        # F5: Output format — temporal + entity associations
-        associations = list(temporal_context) + list(entity_context)
+        # F5: Output format — Part 2 ⑦ entity ID list when entity_ids given,
+        # else legacy temporal + entity string-concatenation (backward compat).
+        if entity_ids:
+            associations = [eid for eid in entity_ids if eid]
+            if not associations:
+                associations = list(temporal_context) + list(entity_context)
+        else:
+            associations = list(temporal_context) + list(entity_context)
         if thematic_context and not associations:
             associations = list(thematic_context)
 
         metadata.association_desc = f"forward[{metadata.trigger_type}]: {', '.join(associations[:3])}"
 
         return metadata, score, associations
+
+    def _resolve_forward_relevance(
+        self,
+        *,
+        kg: Any | None,
+        forward_relevance: float | None,
+        entity_ids: list[str] | None,
+        entity_context: list[str],
+    ) -> float:
+        """Part 2 ⑦: resolve forward-wing relevance from KG relations.confidence.
+
+        审查修正（critical/high）：
+          - **只改 compute_forward_wing 局部取值**，绝不动类常量
+            ``_RELEVANCE_WEIGHT``（被 backward wing 复用）。
+          - KG 不可用 / 查不到边 → 退化到 ``_RELEVANCE_WEIGHT``（零回归）。
+          - relevance clamp 到 ``[0, 1]``，防 confidence > 1 越界。
+
+        Returns a float relevance ``∈ [0, 1]``.
+        """
+        # 1. 显式注入优先
+        if forward_relevance is not None:
+            return float(max(0.0, min(1.0, forward_relevance)))
+
+        # 2. 无 KG → 退化到类常量
+        if kg is None:
+            return self._RELEVANCE_WEIGHT
+
+        # 3. 从 KG relations.confidence 取相关边均值
+        candidates = list(entity_ids) if entity_ids else list(entity_context)
+        if not candidates:
+            return self._RELEVANCE_WEIGHT
+
+        confidences: list[float] = []
+        for name_or_id in candidates:
+            if not name_or_id:
+                continue
+            try:
+                eid = kg._resolve_entity_id(name_or_id)
+            except Exception:
+                eid = None
+            if not eid:
+                continue
+            try:
+                rels = kg.get_entity_relations(eid)
+            except Exception:
+                rels = []
+            for r in rels or []:
+                try:
+                    confidences.append(float(r.get("confidence") or 0.0))
+                except (TypeError, ValueError):
+                    continue
+
+        if not confidences:
+            # KG 有但无边 → 退化到类常量（不让 score 因 0 relevance 全灭）
+            return self._RELEVANCE_WEIGHT
+
+        return float(max(0.0, min(1.0, sum(confidences) / len(confidences))))
 
     def compute_backward_wing(
         self,
@@ -596,6 +689,12 @@ class ButterflyRecallStrategy:
 
     C5: Butterfly wing API — filters recall results by wing type.
 
+    Part 2 ⑦ reform (审查修正 high)：recall 不再是纯过滤——当 ``weighted=True``
+    且提供神经场 ``field`` / ``lif_state`` 时，改用 **match × lif** 乘积排序
+    （``score = match_item(query, item) × lif_item(field, item.涉及概念)``）。
+    score 对 **memory item** 算（非"关系组 g"）。wing 过滤作为正向筛选保留，
+    backward wing 路径不受影响（见 :meth:`_passes_wing_filter`）。
+
     This strategy wraps a base recall strategy and applies butterfly
     wing filtering on top of the results.
     """
@@ -620,10 +719,21 @@ class ButterflyRecallStrategy:
         top_k: int = 10,
         wing: Literal["forward", "backward"] | None = None,
         threshold: float = 0.7,
+        *,
+        weighted: bool = False,
+        lif_state: Any | None = None,
+        field: dict[str, float] | None = None,
     ) -> list:
-        """Recall memories with optional butterfly wing filtering.
+        """Recall memories with optional butterfly wing filtering / match×lif ranking.
 
         B5: Butterfly wing API — filters by wing type and threshold.
+
+        Part 2 ⑦: when ``weighted=True`` and a neural ``field`` /
+        ``lif_state`` is provided, items are **re-ranked by
+        ``match × lif``** (``rank_items``). The wing filter is still
+        applied as a positive screen (so backward-wing items stay
+        anchor-only, forward-wing items stay inductive-only), but the
+        ordering is now score-driven instead of base-recall order.
 
         Args:
             query: Search query.
@@ -634,9 +744,18 @@ class ButterflyRecallStrategy:
             top_k: Maximum results.
             wing: Filter by "forward", "backward", or None (both).
             threshold: Minimum composite score threshold (default 0.7).
+            weighted: Part 2 ⑦ switch — enable ``match × lif`` re-ranking.
+                Default ``False`` ⇒ legacy pure-filter behaviour (zero
+                regression for existing callers / tests).
+            lif_state: Optional neural state (any object exposing a
+                ``field: dict[str, float]`` attribute, e.g. NeuralState).
+                Ignored unless ``weighted=True``.
+            field: Optional explicit potential field override. Wins over
+                ``lif_state.field`` when both are given.
 
         Returns:
-            List of memory items filtered by wing criteria.
+            List of memory items filtered by wing criteria, optionally
+            re-ordered by ``match × lif`` score.
         """
         # Get base recall results
         if hasattr(self._base_recall, "recall"):
@@ -653,40 +772,116 @@ class ButterflyRecallStrategy:
 
         result: list = []
         for item in items:
-            # Support both dict items and objects with .id
-            item_id = item.get("id") if isinstance(item, dict) else getattr(item, "id", None)
-            if item_id is None:
-                continue
-            wing_data = self._store.load_wing(item_id)
-            if wing_data is None:
-                # No butterfly wing yet — include by default
-                if wing is None:
-                    result.append(item)
-                continue
-
-            # Check composite threshold
-            if wing_data.composite_score < threshold:
-                continue
-
-            # Filter by specific wing
-            if wing == "forward":
-                if wing_data.forward_score > 0.5:
-                    result.append(item)
-            elif wing == "backward":
-                if wing_data.backward_score > 0.5:
-                    result.append(item)
-            else:
-                # Both wings — include if either passes threshold
+            if self._passes_wing_filter(item, wing, threshold):
                 result.append(item)
+                if len(result) >= top_k * 2:  # over-collect then re-rank/truncate
+                    break
 
-            if len(result) >= top_k:
-                break
+        if not weighted:
+            return result[:top_k]
 
-        return result[:top_k]
+        # Part 2 ⑦: match × lif re-ranking.
+        field_map = field if field is not None else self._extract_field(lif_state)
+        return self._rank_by_match_lif(result, query, field_map, top_k)
+
+    # ── wing filtering (extracted, backward-compatible) ────────────
+    def _passes_wing_filter(
+        self,
+        item: Any,
+        wing: Literal["forward", "backward"] | None,
+        threshold: float,
+    ) -> bool:
+        """Legacy wing-filter predicate (review correction: backward wing
+        path is byte-for-byte preserved — see ``test_backward_wing_unaffected``)."""
+        item_id = item.get("id") if isinstance(item, dict) else getattr(item, "id", None)
+        if item_id is None:
+            return False
+        wing_data = self._store.load_wing(item_id)
+        if wing_data is None:
+            # No butterfly wing yet — include by default (only when both wings)
+            return wing is None
+
+        # Check composite threshold
+        if wing_data.composite_score < threshold:
+            return False
+
+        # Filter by specific wing
+        if wing == "forward":
+            return wing_data.forward_score > 0.5
+        if wing == "backward":
+            return wing_data.backward_score > 0.5
+        # Both wings — include if either passes threshold
+        return True
+
+    # ── Part 2 ⑦ match × lif ranking ───────────────────────────────
+    @staticmethod
+    def _extract_field(lif_state: Any | None) -> dict[str, float]:
+        if lif_state is None:
+            return {}
+        try:
+            field = getattr(lif_state, "field", None) or {}
+        except Exception:  # pragma: no cover - defensive
+            return {}
+        return dict(field)
+
+    def _rank_by_match_lif(
+        self,
+        items: list,
+        query: str,
+        field: dict[str, float],
+        top_k: int,
+    ) -> list:
+        """Re-rank filtered items by ``match_item × lif_item``.
+
+        Items come back from base recall as either ``MemoryItem`` objects
+        (preferred — ``rank_items`` uses ``item.content``) or dict items
+        (we coerce to a lightweight stand-in). Missing field ⇒ falls
+        back to pure match order (Part 1 equivalent).
+        """
+        if not items:
+            return []
+
+        from src.memory._recall.weighted_recall import rank_items
+
+        # Convert dict items to a MemoryItem-like object so weighted_recall
+        # (which reads item.content / item.id) can operate uniformly.
+        MemoryItem = _get_memory_item_cls()
+        memory_items: list = []
+        for it in items:
+            if isinstance(it, dict):
+                memory_items.append(MemoryItem(
+                    id=it.get("id", ""),
+                    content=it.get("content", ""),
+                ))
+            else:
+                memory_items.append(it)
+
+        ranked = rank_items(memory_items, query, field or None, top_k=top_k)
+        # Map back to the original item objects (prefer original so callers
+        # see the same item instances they passed in).
+        original_by_id: dict[str, Any] = {}
+        for it in items:
+            iid = it.get("id") if isinstance(it, dict) else getattr(it, "id", None)
+            if iid is not None:
+                original_by_id[iid] = it
+
+        out: list = []
+        for r in ranked:
+            scored_item = r["item"]
+            sid = getattr(scored_item, "id", None)
+            out.append(original_by_id.get(sid, scored_item))
+        return out
 
     def get_wing_details(self, memory_id: str) -> dict:
         """B5: Return wing details for a specific memory item."""
         return self._store.get_wing_details(memory_id)
+
+
+def _get_memory_item_cls():
+    """Lazy import of MemoryItem to avoid a hard top-level dependency
+    (butterfly_wing is a low-level module imported broadly)."""
+    from src.memory.types import MemoryItem
+    return MemoryItem
 
 
 # ─────────────────────────────────────────────────────────────────

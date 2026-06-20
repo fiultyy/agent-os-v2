@@ -106,6 +106,69 @@ class DelegateContext:
     result: str = ""
 
 
+# ── Step0 side-agent contexts (INGEST / CONSOLIDATE / RECALL / CURATE) ──
+
+
+@dataclass
+class IngestContext:
+    """Payload for ``EventType.INGEST`` (IngestorAgent).
+
+    Carries the raw memory content for the LLM to extract entities/relations,
+    score on five dimensions, and tag ``identity_category``. ``origin`` is the
+    P0 red-line gate: FOREGROUND memories are returned early by the hook and
+    never modified.
+    """
+
+    memory_id: str
+    content: str
+    agent_id: str
+    session_id: str
+    origin: str = "agent"
+
+
+@dataclass
+class ConsolidateContext:
+    """Payload for ``EventType.CONSOLIDATE`` (ConsolidatorAgent).
+
+    Episodic → semantic understanding-driven merge. Reuses the session_end
+    path; ``trigger`` distinguishes periodic sweep from session-bound close.
+    """
+
+    agent_id: str
+    session_id: str
+    trigger: str = "periodic"  # periodic / session_end
+    top_k: int = 20
+
+
+@dataclass
+class RecallContext:
+    """Payload for ``EventType.RECALL`` (RetrieverAgent).
+
+    Recall ranking engine: ``match × lif_weight``. Part 1 keeps
+    ``lif_state=None`` (pure match ranking, ``lif_weight=1.0``); Part 2
+    injects the real neural field ``V``.
+    """
+
+    query: str
+    agent_id: str
+    session_id: str = ""
+    top_k: int = 10
+    lif_state: Any = None
+
+
+@dataclass
+class CurateContext:
+    """Payload for ``EventType.CURATE`` (CuratorAgent).
+
+    Offline LLM quality-assurance pass: archive / merge / correct. Runs as an
+    independent fire-and-forget task after the db-watcher lock is released
+    (never inserted into the synchronous ``run_maintenance`` Zero-LLM chain).
+    """
+
+    agent_id: str
+    scope: str = "all"  # all / episodic / semantic
+
+
 # ── Hook contract ──────────────────────────────────────────────────
 
 
@@ -137,4 +200,21 @@ class MemoryHook(ABC):
 
     async def on_delegate(self, ctx: DelegateContext) -> None:
         # Reserved for P3/P4 sub-agent delegation.
+        ...
+
+    # ── Step0 side-agent events ────────────────────────────────────
+    # Side-agent hooks MUST register explicitly for the corresponding
+    # EventType (e.g. register(hook, EventType.INGEST)); these no-ops let the
+    # bus getattr any on_* handler safely for hooks that don't participate.
+
+    async def on_ingest(self, ctx: IngestContext) -> None:
+        ...
+
+    async def on_consolidate(self, ctx: ConsolidateContext) -> None:
+        ...
+
+    async def on_recall(self, ctx: RecallContext) -> None:
+        ...
+
+    async def on_curate(self, ctx: CurateContext) -> None:
         ...

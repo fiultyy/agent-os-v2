@@ -21,8 +21,9 @@ from src.memory.hooks import (
     SessionContext,
     TurnContext,
     CompressContext,
+    IngestContext,
 )
-from src.memory.types import MemoryItem
+from src.memory.types import MemoryItem, MemoryOrigin
 from src.communication.message import AgentMessage, MessageType
 from src.services import _state
 from src.services.llm_client import LLMClient, LLMError
@@ -77,6 +78,33 @@ def _trigger_kg_extraction(
             )
     except Exception:
         logger.warning("KG extraction failed", exc_info=True)
+
+
+def _trigger_ingest(
+    memory_id: str,
+    content: str,
+    agent_id: str,
+    session_id: str,
+    origin: MemoryOrigin,
+) -> None:
+    """Fire-and-forget ① IngestorAgent via ``EventType.INGEST``.
+
+    Runs as an independent ``asyncio.create_task`` so the request hot-path
+    never waits on LLM extraction. No-op when the MEMORY_INGESTOR_ENABLED
+    feature gate is off (no INGEST hook registered → bus.emit returns None).
+    The P0 FOREGROUND red-line is enforced inside the hook.
+    """
+    try:
+        ctx = IngestContext(
+            memory_id=memory_id,
+            content=content,
+            agent_id=agent_id,
+            session_id=session_id,
+            origin=origin.value if isinstance(origin, MemoryOrigin) else str(origin),
+        )
+        asyncio.create_task(_state.memory_event_bus.emit(EventType.INGEST, ctx))
+    except Exception:
+        logger.warning("INGEST trigger failed", exc_info=True)
 
 
 # ── Graph node handlers ───────────────────────────────────────────
@@ -142,6 +170,21 @@ async def _node_llm(state: GraphState) -> GraphState:
     )
     state.memory_refs.append(working_item.id)
 
+    # Fire-and-forget LLM semantic ingestion (IngestorAgent): after the
+    # core store (TURN_END above) completes, hand the stored memory to the
+    # ① side agent for KG entity/relation extraction + importance scoring +
+    # identity_category tagging. The hook is a no-op when the
+    # MEMORY_INGESTOR_ENABLED feature gate is off (no INGEST hook registered).
+    # P0 red-line is enforced inside the agent (origin=FOREGROUND → early
+    # return); working_item here is agent-self-sedimented.
+    _trigger_ingest(
+        memory_id=working_item.id,
+        content=working_item.content,
+        agent_id=agent_id,
+        session_id=session_id,
+        origin=MemoryOrigin.AGENT,
+    )
+
     _trigger_kg_extraction(
         user_message=user_input,
         assistant_response=response,
@@ -200,6 +243,15 @@ async def _node_tool(state: GraphState) -> GraphState:
     await _state.memory_event_bus.emit(
         EventType.TURN_END,
         TurnContext(agent_id=state.agent_id, session_id=state.session_id, tool_result_item=tool_item),
+    )
+
+    # Fire-and-forget LLM semantic ingestion for the tool-result memory.
+    _trigger_ingest(
+        memory_id=tool_item.id,
+        content=tool_item.content,
+        agent_id=state.agent_id,
+        session_id=state.session_id,
+        origin=MemoryOrigin.AGENT,
     )
 
     state.current_node = "tool"

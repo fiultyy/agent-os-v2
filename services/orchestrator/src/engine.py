@@ -109,6 +109,86 @@ _state.db_watcher = MemoryDBWatcher(
     poll_interval=float(os.getenv("MEMORY_DB_WATCH_INTERVAL", "60")),
 )
 
+# ── Memory-kernel side agents (Part 1) + neural field (Part 2) ─────
+# Five feature-gated singletons. Each is default-OFF (grey-rollout):
+#  MEMORY_INGESTOR_ENABLED / MEMORY_CONSOLIDATOR_ENABLED /
+#  MEMORY_RETRIEVER_ENABLED / MEMORY_CURATOR_ENABLED /
+#  MEMORY_NEURAL_FIELD_ENABLED. When off the hook is not registered, so the
+# bus emit for that event is a no-op and behaviour matches the deterministic
+# baseline (zero regression). Review correction #12: each hook is registered
+# explicitly for ONE event (register(hook, EventType.X)) — never the default
+# all-events mount, which would fan all 10 events to every hook.
+
+from src.memory.event_bus import EventType
+from src.memory.sideline.ingestor_agent import IngestorAgent, IngestorHook
+from src.memory.sideline.consolidator_agent import ConsolidatorAgent, ConsolidatorHook
+from src.memory.sideline.retriever_agent import RetrieverAgent, RetrieverHook
+from src.memory.sideline.curator_agent import CuratorAgent, CuratorHook
+from src.memory.neural_field import (
+    NeuralFieldEngine,
+    NeuralFieldStore,
+    NeuralFieldRobustness,
+    NeuralHook,
+)
+
+_neural_store = NeuralFieldStore("data/neural_field.db")
+_neural_engine = NeuralFieldEngine()
+_neural_robustness = NeuralFieldRobustness(_neural_store, _neural_engine)
+
+if os.getenv("MEMORY_INGESTOR_ENABLED", "0") == "1":
+    _state.ingestor = IngestorAgent(
+        memory_service=_state.memory_service,
+        llm_client=_state.llm_client,
+        kg=_state.knowledge_graph,
+    )
+    # Review correction #12: explicit single-event registration.
+    _state.memory_event_bus.register(
+        IngestorHook(_state.ingestor), EventType.INGEST
+    )
+
+if os.getenv("MEMORY_CONSOLIDATOR_ENABLED", "0") == "1":
+    _state.consolidator = ConsolidatorAgent(
+        memory_service=_state.memory_service,
+        llm_client=_state.llm_client,
+    )
+    # Consolidator fires on both CONSOLIDATE (periodic) and SESSION_END.
+    _state.memory_event_bus.register(
+        ConsolidatorHook(_state.consolidator),
+        EventType.CONSOLIDATE,
+        EventType.SESSION_END,
+    )
+
+if os.getenv("MEMORY_RETRIEVER_ENABLED", "0") == "1":
+    _state.retriever = RetrieverAgent(
+        memory_service=_state.memory_service,
+        kg=_state.knowledge_graph,
+    )
+    _state.memory_event_bus.register(
+        RetrieverHook(_state.retriever), EventType.RECALL
+    )
+
+if os.getenv("MEMORY_CURATOR_ENABLED", "0") == "1":
+    _state.curator = CuratorAgent(
+        memory_service=_state.memory_service,
+        llm_client=_state.llm_client,
+    )
+    _state.memory_event_bus.register(
+        CuratorHook(_state.curator), EventType.CURATE
+    )
+
+if os.getenv("MEMORY_NEURAL_FIELD_ENABLED", "0") == "1":
+    _state.neural_store = _neural_store
+    _state.neural_engine = _neural_engine
+    _state.neural_hook = NeuralHook(
+        engine=_neural_engine,
+        store=_neural_store,
+        robustness=_neural_robustness,
+        kg=_state.knowledge_graph,
+    )
+    _state.memory_event_bus.register(
+        _state.neural_hook, EventType.TURN_END
+    )
+
 # Ensure data directory exists for SQLite databases
 Path("data").mkdir(exist_ok=True)
 

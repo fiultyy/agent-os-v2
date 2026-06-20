@@ -64,6 +64,19 @@ task_consolidator: Any = None
 db_watcher: Any = None
 _db_watch_task: Any = None  # asyncio task handle (liveness)
 
+# ── Memory-kernel side agents (Part 1) + neural field (Part 2) ─────
+# Feature-gated singletons wired by engine.py. Each is None when its
+# MEMORY_*_ENABLED env var is "0" (default, grey-rollout). Route layers
+# guard with ``is not None`` before touching these; a None agent means the
+# feature is off → the deterministic baseline path runs.
+ingestor: Any = None
+consolidator: Any = None
+retriever: Any = None
+curator: Any = None
+neural_store: Any = None
+neural_engine: Any = None
+neural_hook: Any = None
+
 memory_event_subscribers: list[asyncio.Queue[str]] = []
 
 
