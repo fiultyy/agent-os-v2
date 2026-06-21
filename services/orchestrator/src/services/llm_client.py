@@ -166,13 +166,18 @@ class LLMClient:
     ) -> tuple[Any, list[dict[str, Any]]]:
         """Convert OpenAI-style messages to Anthropic (system, messages).
 
-        - Static system messages (``messages[:static_count]`` with role=system)
-          → Anthropic top-level ``system``. cache_control markers preserved
-          (emitted as a content-block list when any block carries one).
-        - Dynamic system messages (memory, after the static boundary) →
-          demoted to a ``user`` message prefixed ``[Memory context]``
-          (Anthropic ``messages`` has no system role; keeping memory out of
-          the top-level system preserves the cacheable static prefix).
+        - System messages within the static prefix
+          (``messages[:static_count]``) → Anthropic top-level ``system``.
+          cache_control markers preserved (emitted as a content-block list
+          when any block carries one).
+        - R2: the compiler injects recalled memory into the *user message
+          tail* (fenced), so there are no dynamic system messages anymore.
+          A system message beyond the static boundary now raises — it means
+          the compiler contract was broken (pre-R2 this was silently
+          demoted to a ``[Memory context]`` user message, which masked the
+          bug and broke the OpenAI channel's prefix). When
+          ``static_count == 0`` (no cache hint) every system message lifts
+          to top-level system.
         - user/assistant messages → kept as-is (content str or list).
         """
         system_blocks: list[dict[str, Any]] = []
@@ -182,21 +187,25 @@ class LLMClient:
             role = msg.get("role")
             content = msg.get("content")
 
-            if role == "system" and i < static_count:
-                # static system (base/tools) → top-level system
+            if role == "system":
+                # R2: compiler injects recalled memory into the user message
+                # tail (fenced), so every system message belongs to the static
+                # prefix (base + tools). A system message beyond the boundary
+                # means the compiler contract was broken — raise rather than
+                # silently demote (the pre-R2 ``[Memory context]`` fallback
+                # masked the bug and broke the OpenAI channel prefix). When
+                # static_count == 0 (no cache hint) every system message lifts.
+                if static_count > 0 and i >= static_count:
+                    raise ValueError(
+                        f"system message at index {i} is beyond the static "
+                        f"prefix (static_count={static_count}); the compiler "
+                        f"should inject dynamic content into the user message "
+                        f"tail (R2), not as a system message"
+                    )
                 if isinstance(content, list):
                     system_blocks.extend(content)
                 elif isinstance(content, str):
                     system_blocks.append({"type": "text", "text": content})
-            elif role == "system":
-                # dynamic memory system → demote to user (preserve cache prefix)
-                if isinstance(content, list):
-                    text = " ".join(
-                        b.get("text", "") for b in content if isinstance(b, dict)
-                    )
-                else:
-                    text = content or ""
-                convo.append({"role": "user", "content": f"[Memory context]\n{text}"})
             else:
                 convo.append({"role": role, "content": content if content is not None else ""})
 

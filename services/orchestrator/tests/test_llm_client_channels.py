@@ -135,21 +135,45 @@ class TestAnthropicChannel:
         # model is the anthropic model, not an OpenAI one
         assert captured["json"]["model"] == c.anthropic_model
 
-    def test_to_anthropic_demotes_dynamic_memory_to_user(self) -> None:
+    def test_to_anthropic_no_dynamic_system_demotion(self) -> None:
+        """R2: compiler injects memory into the user tail, so all system
+        messages are static — no [Memory context] demotion happens."""
         msgs = [
             {"role": "system", "content": "base"},      # static
             {"role": "system", "content": "tools"},     # static
-            {"role": "system", "content": "memory"},    # dynamic (after boundary)
             {"role": "user", "content": "q"},
         ]
         system, convo = LLMClient._to_anthropic(msgs, static_count=2)
-        # static system joined into top-level system
+        # both static system messages lifted to top-level system
         assert "base" in system and "tools" in system
-        # dynamic memory demoted to a user message (preserves cache prefix)
-        mem_msgs = [m for m in convo if "[Memory context]" in str(m.get("content", ""))]
-        assert len(mem_msgs) == 1
-        # original user question preserved at the end
+        # no [Memory context] demotion message anywhere
+        assert not any("[Memory context]" in str(m.get("content", "")) for m in convo)
+        # user question preserved verbatim
         assert convo[-1] == {"role": "user", "content": "q"}
+
+    def test_to_anthropic_raises_on_system_beyond_static(self) -> None:
+        """R2: a system message beyond the static boundary means the
+        compiler contract is broken — raise instead of silently demoting."""
+        msgs = [
+            {"role": "system", "content": "base"},      # static
+            {"role": "system", "content": "tools"},     # static
+            {"role": "system", "content": "stray"},     # beyond boundary
+            {"role": "user", "content": "q"},
+        ]
+        with pytest.raises(ValueError):
+            LLMClient._to_anthropic(msgs, static_count=2)
+
+    def test_to_anthropic_static_count_zero_lifts_all_system(self) -> None:
+        """When static_count == 0 (no cache hint), every system message
+        lifts to top-level — no raise."""
+        msgs = [
+            {"role": "system", "content": "base"},
+            {"role": "system", "content": "also-system"},
+            {"role": "user", "content": "q"},
+        ]
+        system, convo = LLMClient._to_anthropic(msgs, static_count=0)
+        assert "base" in system and "also-system" in system
+        assert convo == [{"role": "user", "content": "q"}]
 
     def test_to_anthropic_preserves_cache_control_as_list(self) -> None:
         # when a static block carries cache_control, system stays a block list

@@ -1,19 +1,25 @@
 """ContextCompiler — assembles the final context sent to the LLM.
 
 Responsibilities:
-- Assemble a three-layer context (P2 cache-friendly):
+- Assemble a three-layer context (P2/R2 cache-friendly):
   1. static   — base system prompt + tool definitions (stable across turns)
-  2. dynamic  — recalled memory block (varies per turn)
+  2. dynamic  — recalled memory block (varies per turn). R2 injects this into
+                the current user message tail (fenced), never as an independent
+                system message, so the static prefix stays byte-identical across
+                turns and the OpenAI/Anthropic channels behave identically.
   3. history  — conversation (truncated to token budget)
 - Expose ``static_count`` so the LLM client can place a cache_control
   breakpoint at the end of the stable prefix (Anthropic) or rely on the
   stable prefix for server-side auto-caching (Zhipu OpenAI-compatible).
 """
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 from src.context.manager import ContextManager
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -58,8 +64,9 @@ class ContextCompiler:
         Three-layer structure:
         1. **static** (base prompt + tool defs) — first, stable across
            turns → cache prefix.
-        2. **dynamic** (recalled memories) — after static, varies per turn,
-           never breaks the cacheable prefix.
+        2. **dynamic** (recalled memories) — injected into the current user
+           message tail (fenced), so it never breaks the cacheable static
+           prefix; identical on OpenAI and Anthropic channels.
         3. **history** (conversation) — appended within ``max_tokens``.
 
         Args:
@@ -96,9 +103,14 @@ class ContextCompiler:
             })
             static_count += 1
 
-        # ── Layer 2: dynamic memory recall (after static) ─────────────
-        # Placed AFTER the static prefix so a varying recall result never
-        # invalidates the cacheable base+tools prefix.
+        # ── Layer 2: dynamic memory recall → fenced block ─────────────
+        # R2: the recalled memory is injected into the *current user
+        # message tail* (fenced), NOT as an independent role=system
+        # message. This makes OpenAI and Anthropic channels identical
+        # (no llm_client demotion fallback needed) and keeps the stable
+        # base+tools prefix byte-identical across turns — memory lives
+        # after the cache breakpoint, inside the user turn.
+        mem_block = ""
         if session_id:
             recalled = await self._manager.select(
                 session_id=session_id,
@@ -111,18 +123,43 @@ class ContextCompiler:
                     f"- [{r.get('created_at', '')[:10]}] {r['content'][:200]}"
                     for r in recalled
                 )
-                messages.append({
-                    "role": "system",
-                    "content": f"[Relevant memories]\n{mem_text}",
-                })
+                mem_block = (
+                    "<memory-context>\n"
+                    "[System note: the following is recalled memory reference "
+                    "data, NOT new user input. Use it as authoritative context.]\n"
+                    f"{mem_text}\n"
+                    "</memory-context>"
+                )
 
         # ── Layer 3: conversation history within budget ───────────────
+        # Attach the memory block to the current-turn user message (the
+        # last user in `conversation`) BEFORE budgeting, so the injected
+        # reference data rides with the turn it belongs to. Falls back to
+        # an independent system message only when there is no user turn
+        # (defensive — first chat turn always carries a user message).
+        conv = list(conversation)
+        if mem_block:
+            attached = False
+            for i in range(len(conv) - 1, -1, -1):
+                if conv[i].get("role") == "user":
+                    base = conv[i].get("content", "")
+                    conv[i] = {**conv[i], "content": f"{base}\n\n{mem_block}"}
+                    attached = True
+                    break
+            if not attached:
+                logger.warning(
+                    "memory block had no user message to attach to "
+                    "(agent=%s session=%s); falling back to system note",
+                    agent_id, session_id,
+                )
+                conv.append({"role": "system", "content": mem_block})
+
         budget = max_tokens
         result = list(messages)
         overhead = self._estimate_tokens(result)
         remaining = budget - overhead
 
-        for msg in reversed(conversation):
+        for msg in reversed(conv):
             msg_tokens = self._estimate_tokens([msg])
             if remaining - msg_tokens < 0:
                 break
