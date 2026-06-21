@@ -69,6 +69,8 @@ class RetrieverAgent:
         top_k: int = 10,
         lif_state: Any = None,
         scope: str = "",
+        *,
+        detail: bool = False,
     ) -> list[dict[str, Any]]:
         """Rank candidate memories by ``match_score × lif_weight``.
 
@@ -78,10 +80,19 @@ class RetrieverAgent:
             top_k: Maximum candidates to fetch / return.
             lif_state: Part 2 neural field handle (``None`` ⇒ Part 1
                 pure-match mode, ``lif_weight == 1.0``).
+            detail: Opt-in graph-assembly明细开关。默认 ``False`` ⇒ 老契约
+                ``[{"item", "score"}]``(RECALL hook / GET /memories / 现有单测
+                全部不传此参数 = 老行为,**契约零回归**)。置 ``True`` 时每个 result
+                dict 追加只读明细字段 ``match_score`` / ``lif_weight`` / ``score``
+                及 query 命中的 KG 实体列表 ``activated_entities``——这些值本就在
+                本方法内部已算,只是额外透出供图端点组装,**不引入任何新的打分/
+                扩散逻辑**(红线:不改 ``match_score × lif_weight`` 排序权重)。
 
         Returns:
             ``[{"item": MemoryItem, "score": float}, ...]`` sorted by
-            ``score`` descending. Programmatic — no LLM in the loop.
+            ``score`` descending。``detail=True`` 时每项额外携带
+            ``match_score`` / ``lif_weight`` / ``activated_entities``。
+            Programmatic — no LLM in the loop.
         """
         # Pull a slightly wider candidate pool so the rank-based
         # lif_weight has something to order before truncation. The bus
@@ -115,12 +126,25 @@ class RetrieverAgent:
             # the raw lif magnitude (review correction, high severity).
             weights = self._rank_percentile_weights(scored, weights)
 
-        results: list[dict[str, Any]] = [
-            {"item": item, "score": float(match * w)}
-            for (match, item), w in zip(scored, weights)
-        ]
+        results: list[dict[str, Any]] = []
+        for (match, item), w in zip(scored, weights):
+            entry: dict[str, Any] = {"item": item, "score": float(match * w)}
+            if detail:
+                # 只读透出已算的 match/lif 明细,供图端点组装节点
+                # (composite_score = match × lif_weight = entry["score"])。
+                # 不参与排序——排序仍由上面 entry["score"] 驱动(红线未动)。
+                entry["match_score"] = float(match)
+                entry["lif_weight"] = float(w)
+            results.append(entry)
         results.sort(key=lambda r: r["score"], reverse=True)
-        return results[:top_k]
+        results = results[:top_k]
+
+        if detail:
+            # query 命中的 KG 实体(图端点 activated_path / kg_relation 边来源)。
+            activated_entities = self._query_activated_entities(q_tokens)
+            for r in results:
+                r.setdefault("activated_entities", activated_entities)
+        return results
 
     # ── match_score ─────────────────────────────────────────────────
 
@@ -228,6 +252,28 @@ class RetrieverAgent:
             return 0.0
         # 0.1 per hit, capped at 0.3 — bonus, not a dominant signal.
         return min(0.3, 0.1 * hits)
+
+    def _query_activated_entities(self, query_tokens: list[str]) -> list[str]:
+        """query 命中的 KG 实体名列表(图端点 activated_path / entity 节点来源)。
+
+        只读消费 KG——复用 ``_kg_entity_hit_bonus`` 已做的 ``find_entity_by_name``
+        查询,不新增打分。KG 不可用或无命中时返回空列表。结果去重保持插入序。
+        """
+        if self._kg is None or not query_tokens:
+            return []
+        activated: list[str] = []
+        seen: set[str] = set()
+        for tok in query_tokens:
+            if not tok or tok in seen:
+                continue
+            try:
+                ent = self._kg.find_entity_by_name(tok)
+            except Exception:
+                ent = None
+            if ent is not None:
+                seen.add(tok)
+                activated.append(tok)
+        return activated
 
     def _aggregate_potential(self, item: MemoryItem, field: dict[str, float]) -> float:
         """Best-effort aggregate potential of an item over the field.

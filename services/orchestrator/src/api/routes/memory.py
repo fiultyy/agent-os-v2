@@ -165,6 +165,366 @@ async def list_memories(
     return [_mem_to_dict(m) for m in items]
 
 
+@router.get("/memory/graph")
+async def memory_graph(
+    entities: str = "",
+    agent_id: str = "",
+    scope: str = "",
+    top_k: int = Query(default=8, ge=1, le=50),
+) -> dict:
+    """图召回端点(阶段1,spec §2):组装 LIF + KG + 蝴蝶翼图结构返回。
+
+    只读消费内部已算的中间结果,**不新增打分/扩散逻辑**(红线):
+      - match/composite ← RetrieverAgent.retrieve(detail=True)
+      - lif_activation ← NeuralState.field[concept]
+      - wing ← ButterflyRecallStrategy 过滤结果(forward/backward/none)
+      - edges.kg_relation ← KnowledgeGraph.get_entity_relations
+      - edges.lif_spread ← _kg_neighbors 扩散邻居
+      - edges.butterfly_assoc ← ButterflyWing 双向联想(forward/backward)
+      - activated_path ← KG 实体 + 召回 memory 激活序列
+      - origin/state ← _mem_to_dict(d7823d7 已透出)
+
+    降级:schema 透出 + 空节点(节点来源各组件均 feature-gated,未启用时返回
+    ``total_nodes=0`` 的合法图骨架,而非 500)。
+    """
+    query_entities = [e.strip() for e in (entities or "").split(",") if e.strip()]
+    # scope 透传到 RetrieverAgent.retrieve → service.recall 候选层过滤(d7823d7)。
+    query = " ".join(query_entities)
+
+    nodes: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    activated_path: list[str] = []
+    lif_snapshot_id: str | None = None
+
+    # ── 神经场态(LIF 激活值 + 快照)─────────────────────────────────
+    field: dict[str, float] = {}
+    neural_state: Any = None
+    if _state.neural_store is not None and agent_id:
+        try:
+            neural_state = _state.neural_store.load_state(agent_id)
+        except Exception:
+            neural_state = None
+        if neural_state is not None:
+            field = dict(getattr(neural_state, "field", {}) or {})
+            try:
+                lif_snapshot_id = _state.neural_store.latest_stable_snapshot_id(agent_id)
+            except Exception:
+                lif_snapshot_id = None
+
+    kg = _state.knowledge_graph
+
+    # ── 召回 ranked items(match × lif,含明细)─────────────────────
+    ranked: list[dict[str, Any]] = []
+    if _state.retriever is not None and (query_entities or query):
+        try:
+            ranked = await _state.retriever.retrieve(
+                query=query,
+                agent_id=agent_id,
+                top_k=top_k,
+                lif_state=neural_state,
+                scope=scope,
+                detail=True,
+            )
+        except Exception:
+            ranked = []
+
+    query_activated_entities: list[str] = (
+        ranked[0].get("activated_entities", []) if ranked else []
+    )
+
+    # ── 激活阈值过滤(spec §6 风险2:防大 KG 膨胀)──────────────────
+    LIF_THRESHOLD = 0.05
+
+    memory_node_ids: dict[str, str] = {}  # memory_id -> node_id
+    entity_node_ids: dict[str, str] = {}  # entity_name -> node_id
+
+    def _entity_node_id(name: str) -> str:
+        nid = f"ent::{name}"
+        entity_node_ids.setdefault(name, nid)
+        return entity_node_ids[name]
+
+    # ── entity 节点(query 命中的 KG 实体 + 场中高电位概念)────────
+    candidate_entities: list[str] = []
+    for name in query_activated_entities:
+        if name and name not in candidate_entities:
+            candidate_entities.append(name)
+    # 场中电位 > 阈值的概念也作为 entity 节点(神经场投影)。
+    if field:
+        for concept, pot in sorted(field.items(), key=lambda kv: kv[1], reverse=True):
+            if pot > LIF_THRESHOLD and concept and concept not in candidate_entities:
+                candidate_entities.append(concept)
+
+    butterfly_store = _get_butterfly_store()
+
+    for name in candidate_entities:
+        lif_act = float(field.get(name, 0.0))
+        if lif_act <= 0.0 and name not in query_activated_entities:
+            continue
+        node_id = _entity_node_id(name)
+        # 关联回 source memory(KG 反查),kind=entity 时 memory_id 可空。
+        memory_id = _entity_source_memory_id(kg, name)
+        wing = _wing_for_entity(butterfly_store, memory_id) if memory_id else "none"
+        nodes.append({
+            "id": node_id,
+            "kind": "entity",
+            "content": name,
+            "memory_id": memory_id,
+            "lif_activation": round(lif_act, 4),
+            "match_score": 0.0,
+            "composite_score": 0.0,
+            "origin": None,
+            "state": None,
+            "scope": scope or None,
+            "wing": wing,
+        })
+        activated_path.append(name)
+
+    # ── memory 节点(ranked items)+ composite_score = match × lif ─
+    for r in ranked:
+        item = r.get("item")
+        if item is None:
+            continue
+        match = float(r.get("match_score", 0.0))
+        lif_w = float(r.get("lif_weight", 1.0))
+        composite = float(r.get("score", match * lif_w))
+        node_id = f"mem::{item.id}"
+        memory_node_ids[item.id] = node_id
+        # 该 memory 涉及概念在场中的最高电位(节点 lif_activation)。
+        lif_act = _item_lif_activation(item, field)
+        wing = _wing_for_memory(butterfly_store, item.id)
+        nodes.append({
+            "id": node_id,
+            "kind": "memory",
+            "content": item.content,
+            "memory_id": item.id,
+            "lif_activation": round(lif_act, 4),
+            "match_score": round(match, 4),
+            "composite_score": round(composite, 4),
+            "origin": getattr(item.origin, "value", None),
+            "state": getattr(getattr(item, "state", None), "value", None),
+            "scope": getattr(item.scope, "value", None),
+            "wing": wing,
+        })
+        activated_path.append(node_id)
+
+    # ── edges ─────────────────────────────────────────────────────
+    # (1) kg_relation:query/场中 entity 之间的 KG 关系(结构边)。
+    seen_edges: set[tuple[str, str, str]] = set()
+
+    def _add_edge(src: str, dst: str, rel: str, weight: float, label: str = "") -> None:
+        key = (src, dst, rel)
+        if key in seen_edges or src == dst:
+            return
+        seen_edges.add(key)
+        edge: dict[str, Any] = {"src": src, "dst": dst, "rel": rel, "weight": round(float(weight), 4)}
+        if label:
+            edge["label"] = label
+        edges.append(edge)
+
+    for name in list(entity_node_ids.keys()):
+        relations = _entity_relations(kg, name)
+        for rel in relations:
+            other = rel.get("other_name")
+            if not other:
+                continue
+            # 只在两端至少一端入了图(entity 节点或场中概念)时连边,防膨胀。
+            if other not in entity_node_ids and other not in field:
+                continue
+            _add_edge(
+                _entity_node_id(name),
+                _entity_node_id(other),
+                "kg_relation",
+                float(rel.get("confidence", 0.5)),
+                label=str(rel.get("relation_type", "") or ""),
+            )
+
+    # (2) lif_spread:神经场扩散沿 KG 邻居的注入边(复用 _kg_neighbors,只读)。
+    try:
+        from src.memory.neural_field import _kg_neighbors
+    except Exception:  # pragma: no cover - defensive import
+        _kg_neighbors = None  # type: ignore[assignment]
+    if _kg_neighbors is not None and kg is not None:
+        for name in list(entity_node_ids.keys()):
+            try:
+                neighbors = _kg_neighbors(kg, name)
+            except Exception:
+                neighbors = []
+            for neighbor_name, w in neighbors:
+                if neighbor_name not in entity_node_ids and neighbor_name not in field:
+                    continue
+                _add_edge(
+                    _entity_node_id(name),
+                    _entity_node_id(neighbor_name),
+                    "lif_spread",
+                    float(w),
+                )
+
+    # (3) butterfly_assoc:蝴蝶翼双向联想(forward/backward 关联)。
+    for mid, m_node_id in memory_node_ids.items():
+        assoc = _butterfly_associations(butterfly_store, mid)
+        for other_mid, wing_type, strength in assoc:
+            if other_mid not in memory_node_ids:
+                continue
+            _add_edge(
+                m_node_id,
+                memory_node_ids[other_mid],
+                "butterfly_assoc",
+                float(strength),
+                label=wing_type,
+            )
+
+    return {
+        "query_entities": query_entities,
+        "nodes": nodes,
+        "edges": edges,
+        "activated_path": activated_path,
+        "meta": {
+            "agent_id": agent_id,
+            "scope": scope,
+            "lif_snapshot_id": lif_snapshot_id,
+            "total_nodes": len(nodes),
+        },
+    }
+
+
+# ── graph assembly helpers (只读消费,不含打分/扩散) ───────────────
+
+
+def _get_butterfly_store() -> Any:
+    """只读获取已实例化的全局 ButterflyStore(未创建则 None,不主动实例化)。
+
+    ButterflyStore 是 lazy 单例(``butterfly_wing.get_default_store``);此处只读消费
+    它的 ``_default_store`` 模块属性,避免在图端点副作用地创建一个新的 SQLite 文件
+    (保持图端点对持久化的零副作用,红线:图组装只读)。
+    """
+    try:
+        from src.memory import butterfly_wing
+    except Exception:
+        return None
+    return getattr(butterfly_wing, "_default_store", None)
+
+
+def _entity_source_memory_id(kg: Any, name: str) -> str:
+    """KG 反查 entity 关联的首个 source_memory_id(无则空串)。"""
+    if kg is None or not name:
+        return ""
+    try:
+        eid = kg._resolve_entity_id(name)
+    except Exception:
+        return ""
+    if not eid:
+        return ""
+    try:
+        ent = kg.get_entity(eid)
+    except Exception:
+        return ""
+    if not ent:
+        return ""
+    src = ent.get("source_memory_ids") or []
+    return src[0] if src else ""
+
+
+def _entity_relations(kg: Any, name: str) -> list[dict[str, Any]]:
+    """取 entity 的 KG 关系边,规范化为 {other_name, relation_type, confidence}。
+
+    无向看待(source/target 两侧都算邻居),与 neural_field._kg_neighbors 一致。
+    """
+    if kg is None or not name:
+        return []
+    try:
+        eid = kg._resolve_entity_id(name)
+    except Exception:
+        return []
+    if not eid:
+        return []
+    try:
+        rels = kg.get_entity_relations(eid)
+    except Exception:
+        return []
+    out: list[dict[str, Any]] = []
+    for r in rels or []:
+        src = r.get("source_id")
+        tgt = r.get("target_id")
+        other_id = tgt if src == eid else src
+        if not other_id or other_id == eid:
+            continue
+        try:
+            ent = kg.get_entity(other_id)
+        except Exception:
+            ent = None
+        other_name = ent.get("name") if ent else None
+        if not other_name:
+            continue
+        out.append({
+            "other_name": other_name,
+            "relation_type": r.get("relation_type", "") or "",
+            "confidence": float(r.get("confidence") or 0.5),
+        })
+    return out
+
+
+def _item_lif_activation(item: Any, field: dict[str, float]) -> float:
+    """memory item 在场中涉及概念的最高电位(best-effort,只读)。"""
+    if not field:
+        return 0.0
+    content_lower = (getattr(item, "content", "") or "").lower()
+    matched = [pot for concept, pot in field.items() if concept and concept.lower() in content_lower]
+    if not matched:
+        return 0.0
+    return float(max(matched))
+
+
+def _wing_for_entity(butterfly_store: Any, memory_id: str) -> str:
+    """entity 关联 memory 的蝴蝶翼激活类型(forward/backward/none)。"""
+    if not memory_id:
+        return "none"
+    return _wing_for_memory(butterfly_store, memory_id)
+
+
+def _wing_for_memory(butterfly_store: Any, memory_id: str) -> str:
+    """memory 的蝴蝶翼激活类型(forward/backward/none,只读查 ButterflyStore)。"""
+    if butterfly_store is None or not memory_id:
+        return "none"
+    try:
+        wing = butterfly_store.load_wing(memory_id)
+    except Exception:
+        return "none"
+    if wing is None:
+        return "none"
+    fwd = getattr(wing, "forward_score", 0.0) or 0.0
+    bwd = getattr(wing, "backward_score", 0.0) or 0.0
+    if fwd > 0.5 and bwd > 0.5:
+        return "forward"  # 双激活归到 forward(归纳主导)
+    if fwd > 0.5:
+        return "forward"
+    if bwd > 0.5:
+        return "backward"
+    return "none"
+
+
+def _butterfly_associations(butterfly_store: Any, memory_id: str) -> list[tuple[str, str, float]]:
+    """memory 的蝴蝶翼双向联想邻居 [(other_memory_id, wing_type, strength)]。
+
+    只读查 ButterflyWing.forward_associations / backward_associations(实体/memory id 列表)。
+    """
+    if butterfly_store is None or not memory_id:
+        return []
+    try:
+        wing = butterfly_store.load_wing(memory_id)
+    except Exception:
+        return []
+    if wing is None:
+        return []
+    out: list[tuple[str, str, float]] = []
+    for assoc in (getattr(wing, "forward_associations", []) or []):
+        if assoc:
+            out.append((str(assoc), "forward", float(getattr(wing, "forward_score", 0.0) or 0.0)))
+    for assoc in (getattr(wing, "backward_associations", []) or []):
+        if assoc:
+            out.append((str(assoc), "backward", float(getattr(wing, "backward_score", 0.0) or 0.0)))
+    return out
+
+
 @router.get("/identity")
 async def identity(agent_id: str = "") -> dict:
     """Identity-recall closure (Chapter 6.2).
