@@ -36,7 +36,7 @@ from typing import Any
 
 from src.memory.hooks import HookPriority, MemoryHook, RecallContext
 from src.memory.service import MemoryService
-from src.memory.types import MemoryItem
+from src.memory.types import MemoryItem, MemoryScope
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +68,7 @@ class RetrieverAgent:
         agent_id: str,
         top_k: int = 10,
         lif_state: Any = None,
+        scope: str = "",
     ) -> list[dict[str, Any]]:
         """Rank candidate memories by ``match_score × lif_weight``.
 
@@ -90,6 +91,9 @@ class RetrieverAgent:
         candidates: list[MemoryItem] = await self._memory.recall(
             query=query,
             agent_id=agent_id,
+            # scope 过滤在候选集生成层(service.recall),不触本文件的
+            # match_score × lif_weight 排序权重(五维/蝴蝶翼红线)。
+            scope=MemoryScope(scope) if scope else None,
             top_k=max(top_k, top_k),
         )
         if not candidates:
@@ -299,4 +303,5 @@ class RetrieverHook(MemoryHook):
             agent_id=ctx.agent_id,
             top_k=ctx.top_k,
             lif_state=ctx.lif_state,
+            scope=ctx.scope,
         )

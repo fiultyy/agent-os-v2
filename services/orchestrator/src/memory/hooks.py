@@ -152,6 +152,9 @@ class RecallContext:
     query: str
     agent_id: str
     session_id: str = ""
+    # 信任域 scope 过滤:透传到 RetrieverAgent.retrieve → service.recall 的候选集
+    # 生成层(不触排序权重)。空串 = 不限 scope。
+    scope: str = ""
     top_k: int = 10
     lif_state: Any = None
 

@@ -93,6 +93,12 @@ def _mem_to_dict(m: Any, score: float | None = None) -> dict:
         "importance": m.importance,
         "created_at": m.created_at,
         "archived": m.archived,
+        # origin: foreground(用户/外部 harness 保护写) vs agent(自主沉淀)。
+        # P0 provenance 透出,让消费端区分"用户保护记忆 vs agent 沉淀"。
+        "origin": m.origin.value,
+        # state: P3 确定性生命周期(active/stale/archived)。getattr 防御未带 state 的旧对象,
+        # 让消费端识别 STALE 过期记忆。
+        "state": m.state.value if getattr(m, "state", None) is not None else None,
     }
     if score is not None:
         d["score"] = score
@@ -104,6 +110,7 @@ async def list_memories(
     agent_id: str = "",
     session_id: str = "",
     memory_type: str = "",
+    scope: str = "",
     query: str = "",
     sort: str = "",
     top_k: int = Query(default=100, le=500, alias="limit"),
@@ -127,7 +134,9 @@ async def list_memories(
     if query:
         # Route through the ③ RetrieverAgent hook (OBSERVER). Returns None
         # when the feature gate is off → fall back to plain service.recall.
-        ctx = RecallContext(query=query, agent_id=agent_id, session_id=session_id, top_k=top_k)
+        ctx = RecallContext(
+            query=query, agent_id=agent_id, session_id=session_id, scope=scope, top_k=top_k,
+        )
         ranked = await _state.memory_event_bus.emit(EventType.RECALL, ctx)
         if ranked is not None:
             return [
@@ -138,6 +147,7 @@ async def list_memories(
             agent_id=agent_id,
             session_id=session_id,
             memory_type=MemoryType(memory_type) if memory_type else None,
+            scope=MemoryScope(scope) if scope else None,
             top_k=top_k,
         )
         return [_mem_to_dict(m) for m in items]
@@ -147,6 +157,7 @@ async def list_memories(
         agent_id=agent_id,
         session_id=session_id,
         memory_type=MemoryType(memory_type) if memory_type else None,
+        scope=MemoryScope(scope) if scope else None,
         top_k=top_k,
     )
     if sort == "importance":
