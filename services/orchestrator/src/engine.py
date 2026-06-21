@@ -34,6 +34,7 @@ from src.memory.state_pruner import TimeBasedStatePruner
 from src.memory.sideline.task_consolidator import TaskConsolidationAgent
 from src.memory.sideline.backward_writer import BackwardWriter
 from src.memory.db_watcher import MemoryDBWatcher
+from src.memory.write_queue import MemoryWriteQueue
 from src.communication.bus import CommunicationBus
 from src.concurrency.controller import ConcurrencyController
 from src.tools.executor import ToolExecutor
@@ -79,6 +80,14 @@ _state.concurrency_controller = ConcurrencyController()
 # P1: memory event bus + default lifecycle hook. chat.py emits lifecycle
 # events instead of calling memory_service/memory_migrator directly.
 _state.memory_event_bus = MemoryEventBus()
+
+# W3: bounded-concurrency write pool (multi-agent) + per-agent ordering.
+# DefaultMemoryHook routes every store/migrate/update through it; chat.py's
+# fire-and-forget writes (INGEST/SESSION_END/consolidate) go through fire().
+_state.write_queue = MemoryWriteQueue(
+    concurrency=int(os.getenv("MEMORY_WRITE_CONCURRENCY", "8")),
+    drain_timeout=float(os.getenv("MEMORY_WRITE_DRAIN_TIMEOUT", "5")),
+)
 _state.memory_event_bus.register(
     DefaultMemoryHook(
         memory_service=_state.memory_service,
@@ -86,6 +95,7 @@ _state.memory_event_bus.register(
         sync_compressor=_state.sync_compressor,
         async_compressor=_state.async_compressor,
         context_monitor=_state.context_monitor,
+        write_queue=_state.write_queue,
     )
 )
 # Degradation switch: MEMORY_EVENT_BUS_ENABLED=0 keeps only the SYSTEM
@@ -266,7 +276,12 @@ async def _start_db_watch() -> None:
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
-    """Graceful shutdown: close database connections."""
+    """Graceful shutdown: drain in-flight memory writes, then close."""
+    # W3: stop accepting new pooled writes, then wait for in-flight ones so
+    # nothing is lost on shutdown (drain is bounded by drain_timeout).
+    if _state.write_queue is not None:
+        _state.write_queue.shutdown()
+        await _state.write_queue.drain()
     await _state.communication_bus.close()
 
 

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from src.memory.compressor import CompressionLevel
 from src.memory.hooks import (
@@ -53,12 +53,14 @@ class DefaultMemoryHook(MemoryHook):
         sync_compressor: Any,
         async_compressor: Any,
         context_monitor: Any,
+        write_queue: Any = None,
     ) -> None:
         self._memory = memory_service
         self._migrator = memory_migrator
         self._sync_compressor = sync_compressor
         self._async_compressor = async_compressor
         self._monitor = context_monitor
+        self._write_queue = write_queue
 
     # Lazy import keeps the hook importable / testable without the global
     # _state holder being initialised first.
@@ -67,6 +69,20 @@ class DefaultMemoryHook(MemoryHook):
         from src.services import _state
 
         _state.emit_memory_event(event, details)
+
+    async def _submit(
+        self, agent_id: str, coro_fn: Callable[[], Awaitable[Any]],
+    ) -> Any:
+        """Run a memory write through the write queue when one is configured
+        (per-agent ordering + bounded concurrency + drain coverage), else
+        inline (tests / queue disabled).
+
+        Returns the write's result, or None on failure (non-fatal — the
+        queue logs and swallows; see ``MemoryWriteQueue.submit``).
+        """
+        if self._write_queue is None:
+            return await coro_fn()
+        return await self._write_queue.submit(agent_id, coro_fn)
 
     # ── session_start ───────────────────────────────────────────────
 
@@ -78,29 +94,39 @@ class DefaultMemoryHook(MemoryHook):
     async def on_turn_end(self, ctx: TurnContext) -> None:
         if ctx.working_item is not None:
             # _node_llm: migrate L0 working → L1 session (migrator scores).
-            await self._migrator.migrate_working_to_session(
-                ctx.working_item, ctx.session_id, ctx.agent_id,
+            wi = ctx.working_item
+            await self._submit(
+                ctx.agent_id,
+                lambda: self._migrator.migrate_working_to_session(
+                    wi, ctx.session_id, ctx.agent_id,
+                ),
             )
         if ctx.tool_result_item is not None:
             # _node_tool: store tool-result working memory.
             item = ctx.tool_result_item
-            await self._memory.store(
-                content=item.content,
-                agent_id=item.agent_id,
-                session_id=item.session_id,
-                memory_type=item.memory_type,
-                scope=item.scope,
-                metadata=item.metadata,
+            await self._submit(
+                ctx.agent_id,
+                lambda: self._memory.store(
+                    content=item.content,
+                    agent_id=item.agent_id,
+                    session_id=item.session_id,
+                    memory_type=item.memory_type,
+                    scope=item.scope,
+                    metadata=item.metadata,
+                ),
             )
         if ctx.conversation_item is not None:
             # simple chat(): store the turn as session memory.
             item = ctx.conversation_item
-            await self._memory.store(
-                content=item.content,
-                agent_id=item.agent_id,
-                session_id=item.session_id,
-                memory_type=item.memory_type,
-                scope=item.scope,
+            await self._submit(
+                ctx.agent_id,
+                lambda: self._memory.store(
+                    content=item.content,
+                    agent_id=item.agent_id,
+                    session_id=item.session_id,
+                    memory_type=item.memory_type,
+                    scope=item.scope,
+                ),
             )
 
     # ── pre_compress ────────────────────────────────────────────────
@@ -129,22 +155,28 @@ class DefaultMemoryHook(MemoryHook):
             # so the caller appends the same values to memory_refs.
             summary_ids: list[str] = []
             for summary_item in result.summaries:
-                await self._memory.store(
-                    content=summary_item.content,
-                    agent_id=summary_item.agent_id,
-                    session_id=summary_item.session_id,
-                    memory_type=summary_item.memory_type,
-                    scope=summary_item.scope,
-                    importance=summary_item.importance,
-                    metadata=summary_item.metadata,
+                await self._submit(
+                    ctx.agent_id,
+                    lambda si=summary_item: self._memory.store(
+                        content=si.content,
+                        agent_id=si.agent_id,
+                        session_id=si.session_id,
+                        memory_type=si.memory_type,
+                        scope=si.scope,
+                        importance=si.importance,
+                        metadata=si.metadata,
+                    ),
                 )
                 summary_ids.append(summary_item.id)
             if result.summaries:
                 retained_ids = {r.id for r in result.retained}
                 for item in items:
                     if item.id not in retained_ids:
-                        await self._memory.update(
-                            item.id, accessor_id=ctx.accessor_id, archived=True,
+                        await self._submit(
+                            ctx.agent_id,
+                            lambda it=item: self._memory.update(
+                                it.id, accessor_id=ctx.accessor_id, archived=True,
+                            ),
                         )
         except asyncio.TimeoutError:
             # Sync compression timed out — nothing landed, no SSE.
@@ -179,20 +211,26 @@ class DefaultMemoryHook(MemoryHook):
 
         async def _on_compressed(retained: list, summaries: list) -> None:
             for summary_item in summaries:
-                await self._memory.store(
-                    content=summary_item.content,
-                    agent_id=summary_item.agent_id,
-                    session_id=summary_item.session_id,
-                    memory_type=summary_item.memory_type,
-                    scope=summary_item.scope,
-                    importance=summary_item.importance,
-                    metadata=summary_item.metadata,
+                await self._submit(
+                    ctx.agent_id,
+                    lambda si=summary_item: self._memory.store(
+                        content=si.content,
+                        agent_id=si.agent_id,
+                        session_id=si.session_id,
+                        memory_type=si.memory_type,
+                        scope=si.scope,
+                        importance=si.importance,
+                        metadata=si.metadata,
+                    ),
                 )
             retained_ids = {r.id for r in retained}
             for item in items:
                 if item.id not in retained_ids:
-                    await self._memory.update(
-                        item.id, accessor_id=ctx.accessor_id, archived=True,
+                    await self._submit(
+                        ctx.agent_id,
+                        lambda it=item: self._memory.update(
+                            it.id, accessor_id=ctx.accessor_id, archived=True,
+                        ),
                     )
             self._emit_sse(
                 "compress",
@@ -217,8 +255,11 @@ class DefaultMemoryHook(MemoryHook):
     # ── session_end ─────────────────────────────────────────────────
 
     async def on_session_end(self, ctx: SessionContext) -> None:
-        ids = await self._migrator.migrate_session_to_episodic(
-            ctx.session_id, ctx.agent_id,
+        ids = await self._submit(
+            ctx.agent_id,
+            lambda: self._migrator.migrate_session_to_episodic(
+                ctx.session_id, ctx.agent_id,
+            ),
         )
         if ids:
             self._emit_sse(

@@ -80,6 +80,18 @@ def _trigger_kg_extraction(
         logger.warning("KG extraction failed", exc_info=True)
 
 
+def _fire_write(agent_id: str, coro_fn: Any) -> None:
+    """Fire-and-forget a memory write via the write queue when configured
+    (per-agent concurrency pool + drain coverage at shutdown), else a bare
+    ``asyncio.create_task`` (legacy path — e.g. when the queue is not yet
+    wired in unit tests)."""
+    wq = _state.write_queue
+    if wq is not None:
+        wq.fire(agent_id, coro_fn)
+    else:
+        asyncio.create_task(coro_fn())
+
+
 def _trigger_ingest(
     memory_id: str,
     content: str,
@@ -102,7 +114,7 @@ def _trigger_ingest(
             session_id=session_id,
             origin=origin.value if isinstance(origin, MemoryOrigin) else str(origin),
         )
-        asyncio.create_task(_state.memory_event_bus.emit(EventType.INGEST, ctx))
+        _fire_write(agent_id, lambda: _state.memory_event_bus.emit(EventType.INGEST, ctx))
     except Exception:
         logger.warning("INGEST trigger failed", exc_info=True)
 
@@ -402,11 +414,12 @@ async def chat(req: ChatRequest) -> dict:
     )
 
     # session→episodic migration, fire-and-forget (was: _migrate_and_emit)
-    asyncio.create_task(
-        _state.memory_event_bus.emit(
+    _fire_write(
+        agent_id,
+        lambda: _state.memory_event_bus.emit(
             EventType.SESSION_END,
             SessionContext(agent_id=agent_id, session_id=session_id),
-        )
+        ),
     )
 
     _trigger_kg_extraction(
@@ -498,11 +511,14 @@ async def execute(req: ExecuteRequest) -> StreamingResponse:
                 # P3: task-post online consolidation (fire-and-forget, non-blocking).
                 # Extracts key decisions/pitfalls and writes back via BackwardWriter.
                 if _state.task_consolidator is not None and final_state.messages:
-                    asyncio.create_task(_state.task_consolidator.consolidate_task(
-                        agent_id=final_state.agent_id,
-                        session_id=final_state.session_id,
-                        messages=list(final_state.messages),
-                    ))
+                    _fire_write(
+                        final_state.agent_id,
+                        lambda: _state.task_consolidator.consolidate_task(
+                            agent_id=final_state.agent_id,
+                            session_id=final_state.session_id,
+                            messages=list(final_state.messages),
+                        ),
+                    )
             except Exception as exc:
                 agent["status"] = "idle"
                 await event_queue.put(_sse("error", {"message": str(exc)}))
