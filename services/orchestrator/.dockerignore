@@ -1,0 +1,24 @@
+# podman/docker build context 优化(Containerfile 仅 `COPY src/ src/`)
+# 排除大目录与运行时/构建无关文件:context 从 ~130M(.venv 占 126M)降到 ~3M。
+
+# Python 虚拟环境与字节码缓存
+.venv/
+**/__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# 测试套件(镜像运行时不需要)
+tests/
+
+# 运行时数据与日志(由 bind mount 提供,不打包)
+data/
+logs/
+
+# Alembic 迁移(Containerfile 运行时不执行 alembic)
+migrations/
+
+# 版本控制与构建元文件
+.git/
+.gitignore
+.dockerignore
