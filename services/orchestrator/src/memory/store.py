@@ -32,6 +32,15 @@ class InMemoryStore:
         self._items: dict[str, MemoryItem] = {}
         self._blocks: dict[str, MemoryBlock] = {}  # key = "agent_id:label"
         self._sessions: dict[str, dict[str, Any]] = {}
+        # Write-only watermark (ISO-8601). Bumped on store/update/delete but
+        # NOT on get/search, so reads (recall) do not produce spurious change
+        # signals for MemoryDBWatcher. Mirrors SQLiteStore's dedicated
+        # ``updated_at`` column, which is bumped on writes only.
+        self._last_write_ts: str | None = None
+
+    def _bump_write_ts(self) -> None:
+        from datetime import datetime, timezone
+        self._last_write_ts = datetime.now(timezone.utc).isoformat()
 
     # ── Memory Item CRUD ──────────────────────────────────────────
 
@@ -47,6 +56,7 @@ class InMemoryStore:
         if not item.id:
             item.id = str(uuid.uuid4())
         self._items[item.id] = item
+        self._bump_write_ts()
         return item.id
 
     async def get(self, item_id: str) -> MemoryItem | None:
@@ -77,6 +87,7 @@ class InMemoryStore:
             if hasattr(item, key):
                 setattr(item, key, value)
         item.touch()
+        self._bump_write_ts()
         return item
 
     async def delete(self, item_id: str) -> bool:
@@ -85,7 +96,10 @@ class InMemoryStore:
         Returns:
             ``True`` if the item existed and was deleted.
         """
-        return self._items.pop(item_id, None) is not None
+        removed = self._items.pop(item_id, None) is not None
+        if removed:
+            self._bump_write_ts()
+        return removed
 
     async def list_by_scope(
         self,
@@ -154,13 +168,25 @@ class InMemoryStore:
         return True
 
     def max_updated_at(self) -> str | None:
-        """Return the maximum ``updated_at`` over all items, or ``None``.
+        """Return the maximum write timestamp over all items, or ``None``.
 
         Mirror of :meth:`SQLiteStore.max_updated_at` for incremental change
-        detection (MemoryDBWatcher watermark). Returns ``None`` when empty.
+        detection (MemoryDBWatcher watermark). Uses the write-only
+        ``_last_write_ts`` watermark (bumped on store/update/delete) rather
+        than ``accessed_at``, so reads (get/search/recall) do NOT produce
+        spurious change signals — ``accessed_at`` is bumped on every read and
+        would otherwise make ``has_external_changes`` report a change on every
+        recall, defeating the idle debounce. Returns ``None`` when empty.
         """
-        stamps = [i.updated_at for i in self._items.values() if i.updated_at]
-        return max(stamps) if stamps else None
+        if not self._items:
+            return None
+        # Prefer the write watermark; fall back to the newest created_at to
+        # cover items written before the watermark existed (defensive).
+        candidates = [s for s in (self._last_write_ts,) if s]
+        for it in self._items.values():
+            if it.created_at:
+                candidates.append(it.created_at)
+        return max(candidates) if candidates else None
 
     # ── Memory Block Management ───────────────────────────────────
 

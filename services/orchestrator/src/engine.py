@@ -286,9 +286,21 @@ async def _start_db_watch() -> None:
             try:
                 # Offload the synchronous MAX(updated_at) query off the event loop.
                 changed = await asyncio.to_thread(_state.db_watcher.has_external_changes)
-                if changed is None:
-                    continue
-                await _state.db_watcher.run_once_all(emit=True, trigger="poll")
+                # (1) deterministic chain (zero-LLM) runs ONLY when the DB
+                # advanced past the watermark (an external write was detected).
+                # A fresh write RESETS the write-idle clock so a burst of
+                # writes defers the LLM tiers (2)/(3) to the NEXT quiet window.
+                if changed is not None:
+                    _state.db_watcher.bump_write_clock(changed)
+                    await _state.db_watcher.run_once_all(emit=True, trigger="poll")
+                # (2)/(3) idle tiers (extract / consolidate) run REGARDLESS of
+                # `changed` — this is the quiet-window digest path. They self-
+                # gate on write-idle + cadence + pending backlog, and an
+                # in-flight write (handled above) bumps last_write_ts so the
+                # internal idle gate defers them during a write burst. Running
+                # them unconditionally here is what lets a quiet window after
+                # the last change actually digest the backlog.
+                await _state.db_watcher.run_idle_once_all(trigger="idle_poll")
             except Exception:
                 logger.exception("db_watch_loop iteration failed")
 

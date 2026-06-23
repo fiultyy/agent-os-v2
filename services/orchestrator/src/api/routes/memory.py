@@ -33,14 +33,24 @@ router = APIRouter()
 
 
 @router.post("/memories")
-async def store_memory(req: StoreMemoryRequest) -> dict:
+async def store_memory(req: StoreMemoryRequest, origin: str = "foreground") -> dict:
     """Store a new memory item.
+
+    ``origin`` provenance (P0 red-line decisive fix):
+    - ``foreground`` (default): user / external-app-authored content. P0-
+      protected — NEVER auto-digested by the deterministic chain, the idle
+      IngestorAgent, or the ConsolidatorAgent. Preserves legacy behaviour
+      (old POSTs with no query param behave identically).
+    - ``agent``: agent-self-sedimented content (e.g. an external harness like
+      openclaw mirroring an agent's dialogue). Marks the row ``origin=AGENT``
+      so the MemoryDBWatcher idle-trigger can extract / consolidate it.
 
     When ``sync_extract`` is True the route awaits the ① IngestorAgent LLM
     extraction (via ``EventType.INGEST``) and returns the
     entities/identity_category the agent produced. When False (default) the
     store returns immediately and ingestion is fire-and-forget.
     """
+    mem_origin = MemoryOrigin(origin)
     ref = await _state.memory_service.store(
         content=req.content,
         agent_id=req.agent_id,
@@ -48,12 +58,14 @@ async def store_memory(req: StoreMemoryRequest) -> dict:
         memory_type=MemoryType(req.memory_type),
         scope=MemoryScope(req.scope),
         importance=req.importance,
+        origin=mem_origin,
     )
 
-    # The store endpoint receives user-authored content → origin=FOREGROUND.
-    # The IngestorAgent P0 red-line returns early on FOREGROUND, so emitting
-    # INGEST here is only meaningful when the caller knows the content is
-    # agent-self-sedimented (an external harness mirroring an agent's output).
+    # The store endpoint defaults to FOREGROUND (user / external-app-authored
+    # → P0-protected). The IngestorAgent P0 red-line returns early on
+    # FOREGROUND, so emitting INGEST here is only meaningful when the caller
+    # marks the content agent-self-sedimented (origin=agent) — sync_extract
+    # then carries the SAME origin so an agent-marked row is digested inline.
     ingest_extras: dict[str, Any] = {}
     if req.sync_extract:
         ctx = IngestContext(
@@ -61,7 +73,7 @@ async def store_memory(req: StoreMemoryRequest) -> dict:
             content=req.content,
             agent_id=req.agent_id,
             session_id=req.session_id,
-            origin=MemoryOrigin.AGENT.value,
+            origin=mem_origin.value,
         )
         result = await _state.memory_event_bus.emit(EventType.INGEST, ctx)
         if result is not None:

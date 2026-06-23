@@ -64,6 +64,12 @@ async def debug_status() -> dict:
         # #3: side-agent 降级计数(degrade 否则静默)。#1: 生效 timeout。
         "degraded_stats": dict(_state.degraded_stats),
         "sidellm_timeout": _state.SIDELLM_TIMEOUT,
+        # idle-trigger 可观测:写入水位 / 各层最后触发时间 / 提炼积压(origin=AGENT
+        # 未提炼数)。直接读 watcher 快照(实时),未装配时为 None。
+        "maintenance": (
+            await _state.db_watcher.maintenance_snapshot()
+            if _state.db_watcher is not None else None
+        ),
         # #4: 双 LLM 通道可观测(main=主对话, side=side agent)。
         "llm_channels": {
             "main": {"format": getattr(main_c, "format", None), "model": main_model},
