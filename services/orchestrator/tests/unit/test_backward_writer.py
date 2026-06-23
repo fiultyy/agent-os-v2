@@ -64,7 +64,7 @@ class TestBackwardWriter:
     @pytest.fixture
     def mock_llm_client(self):
         llm = MagicMock()
-        llm.agenerate = AsyncMock(return_value="This is a concise summary.")
+        llm.chat = AsyncMock(return_value="This is a concise summary.")
         return llm
 
     @pytest.fixture
@@ -199,7 +199,7 @@ class TestBackwardWriter:
         assert result.memory_id == "mem-abc"
 
         # Verify LLM was called
-        mock_llm_client.agenerate.assert_called_once()
+        mock_llm_client.chat.assert_called_once()
         call_kwargs = mock_memory_service.store.call_args.kwargs
         assert call_kwargs["memory_type"] == MemoryType.EPISODIC
         assert call_kwargs["scope"] == MemoryScope.SESSION
@@ -220,7 +220,7 @@ class TestBackwardWriter:
     async def test_write_slow_llm_failure_fallback(
         self, writer_with_llm, mock_memory_service, mock_llm_client
     ):
-        mock_llm_client.agenerate = AsyncMock(side_effect=RuntimeError("LLM down"))
+        mock_llm_client.chat = AsyncMock(side_effect=RuntimeError("LLM down"))
 
         result = await writer_with_llm.write(
             content="This is a very long content piece that needs summarization",

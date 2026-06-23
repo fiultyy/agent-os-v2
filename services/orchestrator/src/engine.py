@@ -53,6 +53,27 @@ app = FastAPI(title="Agent OS — Orchestrator", version="0.2.0", redirect_slash
 
 _state.llm_client = LLMClient()
 
+# #4: side-agent 专用 LLM 实例(OpenAI 通道 / glm-4-flash,提炼用快模型)。
+# SIDE_LLM_ENABLED=1 时装配;未启用 → None,side agent fallback 到主 llm_client
+# (anthropic / glm-5-turbo),灰度安全。鉴权复用同一智谱 key。
+if os.getenv("SIDE_LLM_ENABLED", "0") == "1":
+    _state.side_llm_client = LLMClient(
+        format=os.getenv("SIDE_LLM_API_FORMAT", "openai"),
+        base_url=os.getenv("SIDE_LLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4"),
+        api_key=os.getenv("SIDE_LLM_API_KEY", os.environ.get("ANTHROPIC_AUTH_TOKEN", "")),
+        default_model=os.getenv("SIDE_LLM_MODEL", "glm-4-flash"),
+    )
+    logger.info(
+        "side-agent LLM wired: format=%s model=%s base=%s",
+        _state.side_llm_client.format,
+        _state.side_llm_client.default_model,
+        _state.side_llm_client.base_url,
+    )
+else:
+    _state.side_llm_client = None
+# side agent 注入源:启用 side 实例则用它,否则 fallback 主 client(行为等同改动前)。
+_side_llm = _state.side_llm_client or _state.llm_client
+
 # Knowledge graph must be created first — MemoryService depends on it.
 _state.knowledge_graph = KnowledgeGraph()
 # NOTE(D-27): FAISS vector_store removed — MemoryService uses KG-based
@@ -109,8 +130,8 @@ if os.getenv("MEMORY_EVENT_BUS_ENABLED", "1") != "1":
 _state.state_pruner = TimeBasedStatePruner(_state.memory_service)
 _state.task_consolidator = TaskConsolidationAgent(
     _state.memory_service,
-    _state.llm_client,
-    BackwardWriter(_state.memory_service, _state.llm_client),
+    _side_llm,
+    BackwardWriter(_state.memory_service, _side_llm),
 )
 # External-memory watcher: detects external DB writes (other harnesses sharing
 # the sqlite DB) and runs the deterministic maintenance chain. Zero LLM.
@@ -148,7 +169,7 @@ _neural_robustness = NeuralFieldRobustness(_neural_store, _neural_engine)
 if os.getenv("MEMORY_INGESTOR_ENABLED", "0") == "1":
     _state.ingestor = IngestorAgent(
         memory_service=_state.memory_service,
-        llm_client=_state.llm_client,
+        llm_client=_side_llm,
         kg=_state.knowledge_graph,
     )
     # Review correction #12: explicit single-event registration.
@@ -159,7 +180,7 @@ if os.getenv("MEMORY_INGESTOR_ENABLED", "0") == "1":
 if os.getenv("MEMORY_CONSOLIDATOR_ENABLED", "0") == "1":
     _state.consolidator = ConsolidatorAgent(
         memory_service=_state.memory_service,
-        llm_client=_state.llm_client,
+        llm_client=_side_llm,
     )
     # Consolidator fires on both CONSOLIDATE (periodic) and SESSION_END.
     _state.memory_event_bus.register(
@@ -180,7 +201,7 @@ if os.getenv("MEMORY_RETRIEVER_ENABLED", "0") == "1":
 if os.getenv("MEMORY_CURATOR_ENABLED", "0") == "1":
     _state.curator = CuratorAgent(
         memory_service=_state.memory_service,
-        llm_client=_state.llm_client,
+        llm_client=_side_llm,
     )
     _state.memory_event_bus.register(
         CuratorHook(_state.curator), EventType.CURATE

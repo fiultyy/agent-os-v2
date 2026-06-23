@@ -29,23 +29,36 @@ class LLMError(Exception):
 class LLMClient:
     """Dual-channel LLM client (OpenAI-compatible + Anthropic-compatible)."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        format: str | None = None,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        default_model: str | None = None,
+        anthropic_base_url: str | None = None,
+        anthropic_api_key: str | None = None,
+        anthropic_model: str | None = None,
+    ) -> None:
+        # #4: 全部参数默认 None → 走原 os.environ 分支(字节级向后兼容,
+        # ``LLMClient()`` 无参调用零破坏)。显式传参 → 覆盖 env(供 side agent
+        # 走独立 OpenAI / glm-4-flash 通道)。
         # ── OpenAI-compatible channel ────────────────────────────────
-        self.base_url = os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1")
-        self.api_key = os.environ.get("LLM_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
-        self.default_model = os.environ.get("LLM_MODEL", "gpt-4o-mini")
+        self.base_url = base_url or os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1")
+        self.api_key = api_key or os.environ.get("LLM_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
+        self.default_model = default_model or os.environ.get("LLM_MODEL", "gpt-4o-mini")
 
         # ── Channel selection + cache config ─────────────────────────
-        self.format = os.environ.get("LLM_API_FORMAT", "openai").lower()
+        self.format = (format or os.environ.get("LLM_API_FORMAT", "openai")).lower()
         self.cache_enabled = os.environ.get("LLM_CACHE_ENABLED", "1") == "1"
         self.cache_ttl = os.environ.get("LLM_CACHE_TTL", "5m")
 
         # ── Anthropic-compatible channel (reuses claude code config) ─
-        self.anthropic_base_url = os.environ.get(
+        self.anthropic_base_url = anthropic_base_url or os.environ.get(
             "ANTHROPIC_BASE_URL", "https://open.bigmodel.cn/api/anthropic"
         )
-        self.anthropic_api_key = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-        self.anthropic_model = os.environ.get(
+        self.anthropic_api_key = anthropic_api_key or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+        self.anthropic_model = anthropic_model or os.environ.get(
             "LLM_ANTHROPIC_MODEL",
             os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL", "glm-5-turbo"),
         )

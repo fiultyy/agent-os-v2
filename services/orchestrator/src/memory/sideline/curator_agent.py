@@ -88,7 +88,7 @@ class CuratorAgent:
         self,
         agent_id: str,
         scope: str = "all",
-        timeout: float = 20.0,
+        timeout: float | None = None,  # None → _state.SIDELLM_TIMEOUT
     ) -> CurateResult:
         """Run an offline curation pass for ``agent_id``.
 
@@ -104,6 +104,9 @@ class CuratorAgent:
             the deterministic prune + forget chain.
         """
         result = CurateResult(triggered=True)
+        from src.services import _state
+        if timeout is None:
+            timeout = _state.SIDELLM_TIMEOUT
         # (agent_id is the call argument, not part of the CurateResult
         #  payload — keep the outcome lean.)
 
@@ -313,6 +316,8 @@ class CuratorAgent:
         ``origin=AGENT`` only (P0 provenance) so FOREGROUND memories are
         never touched.
         """
+        from src.services import _state
+        _state.record_degrade("curator")
         result = CurateResult(triggered=True, degraded=True)
         try:
             # Imported here (not at module top) to avoid a circular import

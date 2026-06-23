@@ -106,7 +106,7 @@ class ConsolidatorAgent:
         agent_id: str,
         trigger: str = "periodic",
         top_k: int = 20,
-        timeout: float = 8.0,
+        timeout: float | None = None,  # None → _state.SIDELLM_TIMEOUT
     ) -> ConsolidatorResult:
         """Consolidate recent agent-origin EPISODIC memories into SEMANTIC.
 
@@ -135,6 +135,9 @@ class ConsolidatorAgent:
 
         result = ConsolidatorResult(triggered=True)
 
+        from src.services import _state
+        if timeout is None:
+            timeout = _state.SIDELLM_TIMEOUT
         try:
             payload = await asyncio.wait_for(
                 self._consolidate_llm(candidates), timeout=timeout
@@ -291,6 +294,8 @@ class ConsolidatorAgent:
         self, agent_id: str, trigger: str, top_k: int
     ) -> ConsolidatorResult:
         """Deterministic fallback: delegate to ``service.reflect`` (Jaccard)."""
+        from src.services import _state
+        _state.record_degrade("consolidator")
         result = ConsolidatorResult(triggered=True, degraded=True)
         try:
             refs = await self._memory.reflect(

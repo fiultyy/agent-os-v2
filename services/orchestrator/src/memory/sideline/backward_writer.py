@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
@@ -275,12 +276,24 @@ class BackwardWriter:
 
         prompt = self._SUMMARIZE_PROMPT.format(content=content)
 
+        from src.services import _state
         try:
-            response = await self._llm.agenerate(prompt)
+            response = await asyncio.wait_for(
+                self._llm.chat(
+                    [{"role": "user", "content": prompt}],
+                    max_tokens=200,
+                    temperature=0.3,
+                ),
+                timeout=_state.SIDELLM_TIMEOUT,
+            )
             summary = response.strip() if response else content[:100]
+        except asyncio.TimeoutError:
+            _state.record_degrade("backward_writer")
+            logger.warning("BackwardWriter slow LLM timed out — using raw prefix")
+            summary = content[:100]
         except Exception as exc:
-            logger.error("LLM summarization failed: %s", exc)
-            # 降级：直接取原内容前 100 字符
+            _state.record_degrade("backward_writer")
+            logger.error("BackwardWriter LLM summarization failed: %s — using raw prefix", exc)
             summary = content[:100]
 
         try:

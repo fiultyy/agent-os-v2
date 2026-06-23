@@ -42,6 +42,12 @@ podman run -d --name "$CONTAINER" \
   -e MEMORY_RETRIEVER_ENABLED=1 \
   -e MEMORY_CURATOR_ENABLED=1 \
   -e MEMORY_NEURAL_FIELD_ENABLED=1 \
+  -e MEMORY_SIDELLM_TIMEOUT=40 \
+  -e SIDE_LLM_ENABLED=1 \
+  -e SIDE_LLM_API_FORMAT=openai \
+  -e SIDE_LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4 \
+  -e SIDE_LLM_MODEL=glm-4-flash \
+  -e SIDE_LLM_API_KEY="$ANTHROPIC_AUTH_TOKEN" \
   -e HTTP_PROXY= -e HTTPS_PROXY= -e ALL_PROXY= \
   -e http_proxy= -e https_proxy= -e all_proxy= \
   "$IMAGE"

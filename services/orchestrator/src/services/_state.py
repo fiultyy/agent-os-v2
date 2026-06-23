@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import uuid
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
@@ -23,6 +25,12 @@ agents: dict[str, dict[str, Any]] = {}
 # ── LLM ────────────────────────────────────────────────────────────
 
 llm_client: Any = None
+# #4: side-agent 专用 LLM 实例(OpenAI 通道 / glm-4-flash)。None = 未启用,
+# side agent fallback 到 llm_client(灰度安全)。engine.py 按 SIDE_LLM_ENABLED 装配。
+side_llm_client: Any = None
+# #1: side agent LLM 应用层 timeout(秒),统一一个值避免 env 爆炸。
+# asyncio.wait_for 包裹 LLM 提炼,超时优雅降级;httpx HTTP 层 60s 兜底。
+SIDELLM_TIMEOUT: float = float(os.getenv("MEMORY_SIDELLM_TIMEOUT", "40"))
 
 # ── Memory ─────────────────────────────────────────────────────────
 
@@ -109,6 +117,21 @@ def unsubscribe_memory_events(q: asyncio.Queue[str]) -> None:
     """Remove a previously subscribed event queue."""
     if q in memory_event_subscribers:
         memory_event_subscribers.remove(q)
+
+
+# ── Degradation accounting (#3) ────────────────────────────────────
+# Per-agent degrade counters, incremented by each side agent's _degrade().
+# Exposed via GET /debug/status — degrade is otherwise silent (logger.warning only).
+DEGRADED_AGENTS: tuple[str, ...] = (
+    "ingestor", "consolidator", "curator",
+    "task_consolidator", "backward_writer",
+)
+degraded_stats: dict[str, int] = defaultdict(int)
+
+
+def record_degrade(agent: str) -> None:
+    """Increment the per-agent degrade counter (called from each _degrade())."""
+    degraded_stats[agent] += 1
 
 
 # ── Execution log ──────────────────────────────────────────────────

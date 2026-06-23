@@ -110,7 +110,7 @@ class IngestorAgent:
         agent_id: str,
         session_id: str,
         origin: str | MemoryOrigin,
-        timeout: float = 20.0,  # was 8.0 — ingest prompt 复杂(实体/关系/五维/identity JSON),实测 ~17s
+        timeout: float | None = None,  # None → _state.SIDELLM_TIMEOUT(默认40,env MEMORY_SIDELLM_TIMEOUT 可配)
     ) -> IngestorResult:
         """Extract entities/relations, score importance, tag identity_category.
 
@@ -132,6 +132,9 @@ class IngestorAgent:
 
         result = IngestorResult(triggered=True)
 
+        from src.services import _state
+        if timeout is None:
+            timeout = _state.SIDELLM_TIMEOUT
         try:
             raw = await asyncio.wait_for(
                 self._extract(content), timeout=timeout
@@ -329,6 +332,8 @@ class IngestorAgent:
         Marks the memory ``degraded=True`` so downstream agents know the
         LLM pass was skipped.
         """
+        from src.services import _state
+        _state.record_degrade("ingestor")
         result = IngestorResult(triggered=True, degraded=True)
         try:
             if self._kg is not None:

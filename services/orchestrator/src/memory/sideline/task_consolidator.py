@@ -63,7 +63,7 @@ class TaskConsolidationAgent:
         agent_id: str,
         session_id: str,
         messages: list[dict[str, Any]] | None = None,
-        timeout: float = 8.0,  # was 2.0 — real LLM calls (~2-3s) always timed out → degraded
+        timeout: float | None = None,  # None → _state.SIDELLM_TIMEOUT
     ) -> ConsolidateResult:
         """Extract key experience from a completed task and write it back.
 
@@ -73,6 +73,9 @@ class TaskConsolidationAgent:
         result = ConsolidateResult(triggered=True)
         msgs = messages or []
 
+        from src.services import _state
+        if timeout is None:
+            timeout = _state.SIDELLM_TIMEOUT
         try:
             content, confidence = await asyncio.wait_for(
                 self._extract(msgs), timeout=timeout
@@ -128,6 +131,8 @@ class TaskConsolidationAgent:
         self, agent_id: str, session_id: str, messages: list[dict[str, Any]]
     ) -> ConsolidateResult:
         """Fallback: store a simple EPISODIC summary directly (origin=AGENT)."""
+        from src.services import _state
+        _state.record_degrade("task_consolidator")
         summary = self._heuristic(messages)
         result = ConsolidateResult(
             triggered=True, degraded=True, content=summary, confidence=0.4

@@ -53,8 +53,22 @@ async def debug_history(
 @router.get("/debug/status")
 async def debug_status() -> dict:
     """Get overall system debug status."""
+    main_c = _state.llm_client
+    side_c = _state.side_llm_client
+    main_model = (getattr(main_c, "anthropic_model", None)
+                  or getattr(main_c, "default_model", None))
     return {
         "agents": len(_state.agents),
         "concurrency": _state.concurrency_controller.get_status(),
         "kg_stats": _state.knowledge_graph.stats(),
+        # #3: side-agent 降级计数(degrade 否则静默)。#1: 生效 timeout。
+        "degraded_stats": dict(_state.degraded_stats),
+        "sidellm_timeout": _state.SIDELLM_TIMEOUT,
+        # #4: 双 LLM 通道可观测(main=主对话, side=side agent)。
+        "llm_channels": {
+            "main": {"format": getattr(main_c, "format", None), "model": main_model},
+            "side": ({"format": getattr(side_c, "format", None),
+                      "model": getattr(side_c, "default_model", None)}
+                     if side_c is not None else None),
+        },
     }
