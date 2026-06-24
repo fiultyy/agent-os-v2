@@ -62,6 +62,20 @@ def _now_ts() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _latest_ts(per_agent: dict[str, str]) -> str | None:
+    """Latest (max) timestamp across a per-agent cadence dict.
+
+    Used to flatten the per-agent ``last_extract_ts`` / ``last_consolidate_ts``
+    dicts back into a single scalar for the /debug/status snapshot (the consumer
+    in entities.py expects a scalar ``last_extract`` / ``last_consolidate`` field,
+    not a dict). Returns ``None`` when no agent has run the tier yet.
+    """
+    vals = [v for v in per_agent.values() if v]
+    if not vals:
+        return None
+    return max(vals, key=_parse_iso)
+
+
 class MemoryDBWatcher:
     """Polls for external memory DB writes and runs tiered idle maintenance.
 
@@ -103,11 +117,19 @@ class MemoryDBWatcher:
         # ── idle / cadence clocks (ISO-8601 UTC, None = never yet) ──
         # last_write_ts: most-recent external write observed by the watcher
         # (debounce anchor for tiers 2/3). Bootstrapped to the current MAX so
-        # pre-existing rows do not count as "a fresh write".
+        # pre-existing rows do not count as "a fresh write". This is a GLOBAL
+        # clock (single watcher, one debounce signal for the whole process) —
+        # it is NOT per-agent.
         self.last_write_ts: str | None = self._last_watermark or _now_ts()
         self.last_deterministic_ts: str | None = None
-        self.last_extract_ts: str | None = None
-        self.last_consolidate_ts: str | None = None
+        # extract / consolidate cadence clocks are PER-AGENT: keyed by agent_id,
+        # value is the ISO timestamp of that agent's last sweep. ``run_idle_once_all``
+        # iterates agents sequentially, so a single global cadence value would let
+        # the first agent's sweep set the timestamp and immediately short-circuit
+        # every subsequent agent's cadence check (multi-agent starvation bug).
+        # Empty dict = "never extracted/consolidated for any agent".
+        self.last_extract_ts: dict[str, str] = {}
+        self.last_consolidate_ts: dict[str, str] = {}
 
         self._locks: dict[str, asyncio.Lock] = {}
         self.last_run: str | None = None
@@ -198,8 +220,11 @@ class MemoryDBWatcher:
             "last_write": self.last_write_ts,
             "idle_seconds": round(self._idle_seconds(), 1),
             "last_deterministic": self.last_deterministic_ts,
-            "last_extract": self.last_extract_ts,
-            "last_consolidate": self.last_consolidate_ts,
+            # last_extract / last_consolidate are per-agent dicts internally;
+            # flatten to the max across agents so the snapshot keeps its scalar
+            # shape (backward-compatible with /debug/status consumers).
+            "last_extract": _latest_ts(self.last_extract_ts),
+            "last_consolidate": _latest_ts(self.last_consolidate_ts),
             "pending_extract": pending,
             "thresholds": {
                 "idle": self.idle_threshold,
@@ -325,9 +350,9 @@ class MemoryDBWatcher:
         the SAME per-agent ``asyncio.Lock`` as the deterministic chain so the
         tiers never overlap for one agent.
 
-        Tier (2) extract: idle ≥ ``idle_threshold`` AND
-        ``now - last_extract ≥ extract_interval`` AND pending-extract count
-        > 0 → batch-call IngestorAgent.ingest (P0: only origin=AGENT) and mark
+        Tier (2) extract: idle ≥ ``idle_threshold`` AND the PER-AGENT cadence
+        ``now - last_extract_ts[agent_id] ≥ extract_interval`` AND pending-extract
+        count > 0 → batch-call IngestorAgent.ingest (P0: only origin=AGENT) and mark
         each ingested item ``metadata.extracted=True``.
         Tier (3) consolidate: idle ≥ ``consolidate_threshold`` → emit
         ``EventType.CONSOLIDATE`` (ConsolidatorAgent).
@@ -374,11 +399,15 @@ class MemoryDBWatcher:
 
         async with lock:
             # ── tier (2): extract ──────────────────────────────────────
-            # Gate: idle ≥ idle_threshold (quiet window) AND extract cadence
-            # elapsed AND there is un-extracted AGENT backlog.
+            # Gate: idle ≥ idle_threshold (quiet window) AND per-agent extract
+            # cadence elapsed AND there is un-extracted AGENT backlog.
+            # Cadence is PER-AGENT: read this agent's last-sweep ts. A global
+            # cadence value would let the first agent's sweep short-circuit the
+            # rest when run_idle_once_all iterates them in sequence.
+            last_ex = self.last_extract_ts.get(agent_id)
             cadence_ok = (
-                self.last_extract_ts is None
-                or (now - _parse_iso(self.last_extract_ts)).total_seconds()
+                last_ex is None
+                or (now - _parse_iso(last_ex)).total_seconds()
                 >= self.extract_interval
             )
             if (
@@ -389,18 +418,20 @@ class MemoryDBWatcher:
                 try:
                     extracted = await self._run_extract(agent_id)
                     result["extract"] = extracted
-                    self.last_extract_ts = _now_ts()
+                    self.last_extract_ts[agent_id] = _now_ts()
                 except Exception as exc:
                     logger.exception("watcher extract failed for %s", agent_id)
                     self.last_error = f"extract: {exc}"
                     result["extract"] = {"status": "error", "error": str(exc)}
 
             # ── tier (3): consolidate ──────────────────────────────────
-            # Gate: idle ≥ consolidate_threshold AND consolidate cadence
-            # elapsed. Emits EventType.CONSOLIDATE → ConsolidatorHook.
+            # Gate: idle ≥ consolidate_threshold AND per-agent consolidate
+            # cadence elapsed. Emits EventType.CONSOLIDATE → ConsolidatorHook.
+            # Per-agent for the same multi-agent starvation reason as extract.
+            last_consol = self.last_consolidate_ts.get(agent_id)
             consol_cadence_ok = (
-                self.last_consolidate_ts is None
-                or (now - _parse_iso(self.last_consolidate_ts)).total_seconds()
+                last_consol is None
+                or (now - _parse_iso(last_consol)).total_seconds()
                 >= self.consolidate_threshold
             )
             if (
@@ -419,7 +450,7 @@ class MemoryDBWatcher:
                         top_k=20,
                     )
                     await _state.memory_event_bus.emit(EventType.CONSOLIDATE, ctx)
-                    self.last_consolidate_ts = _now_ts()
+                    self.last_consolidate_ts[agent_id] = _now_ts()
                     result["consolidate"] = {"status": "ok", "trigger": "idle_poll"}
                 except Exception as exc:
                     logger.exception("watcher consolidate failed for %s", agent_id)

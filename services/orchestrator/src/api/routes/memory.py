@@ -77,6 +77,23 @@ async def store_memory(req: StoreMemoryRequest, origin: str = "foreground") -> d
         )
         result = await _state.memory_event_bus.emit(EventType.INGEST, ctx)
         if result is not None:
+            # Mark the just-ingested memory ``metadata.extracted=True`` so the
+            # idle-trigger IngestorAgent pass does not re-extract it as pending.
+            # Re-get latest + merge (NOT whole-replace): the IngestorAgent just
+            # wrote ``metadata.identity_category`` / ``metadata.degraded`` to the
+            # same row, and on the SQLite backend search/get returns deserialized
+            # copies while update whole-replaces the metadata column — a stale
+            # snapshot or a bare {"extracted": True} would clobber identity_category.
+            try:
+                latest = await _state.memory_service.get(ref.id)
+                if latest is not None:
+                    base_meta = dict(getattr(latest, "metadata", None) or {})
+                    base_meta["extracted"] = True
+                    await _state.memory_service.update(ref.id, metadata=base_meta)
+            except Exception:
+                # Non-fatal: the cadence fix is the core; a missed extracted mark
+                # only means a redundant re-extract on the next idle window.
+                ingest_extras.setdefault("errors", []).append("sync_extract_mark_failed")
             ingest_extras = {
                 "entities_added": getattr(result, "entities_added", 0),
                 "relations_added": getattr(result, "relations_added", 0),

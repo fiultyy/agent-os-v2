@@ -179,7 +179,8 @@ class TestIdleTriggerExtract:
         w = _make_watcher(svc, idle_threshold=10.0, extract_interval=1.0)
         # Simulate a quiet window: last write was 100s ago (>> idle_threshold).
         w.last_write_ts = _iso(100)
-        w.last_extract_ts = None  # cadence OK (never extracted)
+        # cadence OK (never extracted for this agent)
+        w.last_extract_ts = {}
 
         res = await w.run_idle_maintenance(agent_id="a1")
 
@@ -272,7 +273,7 @@ class TestIdleTriggerConsolidate:
 
         w = _make_watcher(svc, idle_threshold=10.0, consolidate_threshold=10.0)
         w.last_write_ts = _iso(100)  # quiet window
-        w.last_consolidate_ts = None
+        w.last_consolidate_ts = {}
         # ensure extract gate is off (no ingestor) so we isolate consolidate
         monkeypatch.setattr(_state, "ingestor", None)
 
@@ -297,7 +298,7 @@ class TestP0ForegroundProtected:
 
         w = _make_watcher(svc, idle_threshold=10.0, extract_interval=1.0)
         w.last_write_ts = _iso(1000)  # very long idle window
-        w.last_extract_ts = None
+        w.last_extract_ts = {}
 
         res = await w.run_idle_maintenance(agent_id="a1")
         assert res["status"] == "ok"
@@ -367,4 +368,44 @@ class TestReanchorRegression:
         post_wm = w._last_watermark
         # watermark advanced (the update() marking extracted bumped updated_at)
         assert _parse_iso(post_wm) >= _parse_iso(pre_wm)
-        assert w.last_extract_ts is not None
+        assert w.last_extract_ts.get("a1") is not None
+
+
+# ── E. multi-agent cadence (per-agent starvation regression) ───────
+
+
+class TestPerAgentCadence:
+    @pytest.mark.asyncio
+    async def test_multi_agent_no_starvation(self, monkeypatch):
+        """run_idle_once_all digests EVERY agent, not just the first.
+
+        Regression for the cadence short-circuit bug: when extract cadence was
+        a single global timestamp, the first agent's sweep set it and every
+        subsequent agent's cadence check immediately short-circuited (now-ts >=
+        extract_interval false because ts was set seconds ago). The fix makes
+        the cadence clock per-agent. Here two agents each have a pending
+        origin=AGENT memory; both must be extracted in the SAME idle sweep.
+        """
+        svc = _svc()
+        await _store_agent_mem(svc, content="agent a work", agent_id="a1")
+        await _store_agent_mem(svc, content="agent b work", agent_id="a2")
+        fake_ing = _FakeIngestor()
+        monkeypatch.setattr(_state, "ingestor", fake_ing)
+        monkeypatch.setattr(_state, "agents", {"a1": object(), "a2": object()})
+
+        w = _make_watcher(svc, idle_threshold=10.0, extract_interval=300.0)
+        w.last_write_ts = _iso(100)  # quiet window
+
+        results = await w.run_idle_once_all(trigger="idle_poll")
+
+        # BOTH agents digested (no starvation) — one ingest call per agent
+        assert len(fake_ing.calls) == 2
+        digested_agents = {c["agent_id"] for c in fake_ing.calls}
+        assert digested_agents == {"a1", "a2"}
+        # per-agent cadence clocks recorded separately
+        assert set(w.last_extract_ts.keys()) == {"a1", "a2"}
+        # the cadence snapshot flattens to the max and stays a scalar
+        snap = await w.maintenance_snapshot()
+        assert snap["last_extract"] is not None
+        assert isinstance(snap["last_extract"], str)
+        assert isinstance(snap["last_consolidate"], str) or snap["last_consolidate"] is None
