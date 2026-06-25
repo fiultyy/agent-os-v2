@@ -237,7 +237,10 @@ if os.getenv("MEMORY_NEURAL_FIELD_ENABLED", "0") == "1":
         kg=_state.knowledge_graph,
     )
     _state.memory_event_bus.register(
-        _state.neural_hook, EventType.TURN_END
+        # P0-1 扩展:TURN_END(chat/execute turn)+ INGEST(store_memory/sync_extract
+        # 写入)。后者让 openclaw 沉积路径(不经 chat)也喂 neural drift。NeuralHook
+        # OBSERVER 返回 None,emit 取 last non-None,不覆盖 IngestorHook 的 IngestorResult。
+        _state.neural_hook, EventType.TURN_END, EventType.INGEST,
     )
 
 # Ensure data directory exists for SQLite databases

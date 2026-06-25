@@ -33,7 +33,7 @@ try:
 except ImportError:  # pragma: no cover
     import sqlite3  # noqa: F401
 
-from src.memory.hooks import HookPriority, MemoryHook, TurnContext
+from src.memory.hooks import HookPriority, IngestContext, MemoryHook, TurnContext
 
 logger = logging.getLogger(__name__)
 
@@ -709,17 +709,16 @@ class NeuralHook(MemoryHook):
             importances=importances,
         )
 
-    def _extract_concepts(
-        self, ctx: TurnContext,
+    def _concepts_from_content(
+        self, content: str, importance: float,
     ) -> tuple[list[str], dict[str, float]]:
-        """从本轮 memory item 抽 concept→importance。无 item/抽空/异常 → ([], {})。
+        """从 content 抽 concept→importance。空/抽空/异常 → ([], {})。
 
-        concept = EntityExtractor 抽出的实体名;importance = item.importance
-        (floor 0.3,保证 drift 激活 step 对 concept 加 Δpotential>0)。
-        EntityExtractor lazy 构造并缓存到 self,失败降级空(神经场红线:不崩主链)。
+        concept = EntityExtractor 抽出的实体名;importance floor 0.3(保证 drift
+        激活 step 对 concept 加 Δpotential>0)。EntityExtractor lazy 构造缓存到
+        self,失败降级空(神经场红线:不崩主链)。TURN_END 与 INGEST 共用此路径。
         """
-        item = ctx.working_item or ctx.tool_result_item or ctx.conversation_item
-        if item is None or not getattr(item, "content", ""):
+        if not content:
             return [], {}
         extractor = getattr(self, "_entity_extractor", None)
         if extractor is None:
@@ -731,16 +730,42 @@ class NeuralHook(MemoryHook):
                 logger.exception("EntityExtractor import failed — neural field drifts empty")
                 return [], {}
         try:
-            entities = extractor.extract_entities(item.content)
+            entities = extractor.extract_entities(content)
         except Exception:
             logger.exception("neural field concept extraction failed — drifting empty")
             return [], {}
         if not entities:
             return [], {}
-        base_imp = max(float(getattr(item, "importance", 0.0) or 0.0), 0.3)
+        base_imp = max(float(importance or 0.0), 0.3)
         concepts = [e.name for e in entities]
         importances = {e.name: base_imp for e in entities}
         return concepts, importances
+
+    def _extract_concepts(
+        self, ctx: TurnContext,
+    ) -> tuple[list[str], dict[str, float]]:
+        """TURN_END:从本轮 memory item 抽 concept(working/tool/conversation 三者之一)。"""
+        item = ctx.working_item or ctx.tool_result_item or ctx.conversation_item
+        if item is None or not getattr(item, "content", ""):
+            return [], {}
+        return self._concepts_from_content(
+            item.content, float(getattr(item, "importance", 0.0) or 0.0)
+        )
+
+    async def on_ingest(self, ctx: IngestContext) -> None:
+        """INGEST 也喂 neural drift(P0-1 扩展:openclaw 写入路径不经 chat TURN_END)。
+
+        store_memory / sync_extract 写入的记忆同样激活神经场,让 c3(openclaw
+        沉积)图召回前瞻铺路(memoryReminderGraph=true 时 act 不再恒 0)。
+        OBSERVER 优先级,返回 None 不影响 IngestorHook 的 IngestorResult。
+        IngestContext 无 importance 字段,用 0.5 基线(floor 后仍 0.5)。
+        """
+        concepts, importances = self._concepts_from_content(ctx.content, 0.5)
+        await self.drift_turn(
+            agent_id=ctx.agent_id,
+            activated_concepts=concepts,
+            importances=importances,
+        )
 
     async def drift_turn(
         self,
