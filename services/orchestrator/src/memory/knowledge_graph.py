@@ -127,6 +127,20 @@ class EntityExtractor:
         r'\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b'
     )
 
+    # ── CJK (中文) 实体模式 — P0-2:原纯正则全 ASCII,对纯中文零产出 ──
+    # 中文书名号/方括号引号包裹的术语:《Logseq》、「记忆系统」、『知识图谱』。
+    # (评审 confirmed_ok:成对括号字符类,抽取干净,本批最可靠。)
+    _CJK_QUOTED = re.compile(r'[《「『]([^》」』]{2,20})[》」』]')
+    # 中英混排:只抽被中文锚定的英文标识符(嵌入中文的术语,如 "Logseq 的 CLI"、
+    # "glm-4.7 是模型"),用 lookbehind/lookahead 中文锚定,**不吞中文部分**。
+    # 评审 MF-1 critical:原 [一-龥]+\s*[A-Za-z]... 会贪心吞整段中文散文
+    # ('memory 系统是一个知识图谱工具');改只匹配英文标识符,中文仅作 zero-width 锚定。
+    # [ \t]* 容忍中英文间空格(不跨行);group(0) 可能带前导空格,提取时 strip。
+    _CJK_LATIN_MIX = re.compile(
+        r'(?:(?<=[一-龥])[ \t]*[A-Za-z][A-Za-z0-9._-]{1,15}'
+        r'|[A-Za-z][A-Za-z0-9._-]{1,15}(?=[ \t]*[一-龥]))'
+    )
+
     # Relation patterns: (regex, predicate)
     _RELATION_PATTERNS: list[tuple[re.Pattern, str]] = [
         (re.compile(r'(\w[\w\s]{1,40}?)\s+(?:is\s+an?\s+|are\s+)(.+?)(?:\.|,|$)', re.I), "is_a"),
@@ -136,6 +150,18 @@ class EntityExtractor:
         (re.compile(r'(\w[\w\s]{1,40}?)\s+(?:belongs?\s+to)\s+(.+?)(?:\.|,|$)', re.I), "belongs_to"),
         (re.compile(r'(\w[\w\s]{1,40}?)\s+(?:implements?)\s+(.+?)(?:\.|,|$)', re.I), "implements"),
         (re.compile(r'(\w[\w\s]{1,40}?)\s+(?:connects?\s+to|links?\s+to)\s+(.+?)(?:\.|,|$)', re.I), "connected_to"),
+    ]
+
+    # ── CJK (中文) 关系谓词 — P0-2(评审 MF-2/MF-3 收紧)─
+    # subject/obj 字符类收紧到 [一-龥A-Za-z0-9]:禁空格/标点 → 遇空格或句末标点
+    # 自然停,既防 obj 贪心吞散文(MF-2)又防跨句粘连(MF-3,全角 ！？ 等不在字符类)。
+    # subject ≤8 字符、obj ≤10 字符;谓词吃掉 了/着/过 助词;subject/obj 复用 name
+    # 作临时 ID(extract_relations 约定)。
+    _CJK_RELATION_PATTERNS: list[tuple[re.Pattern, str]] = [
+        (re.compile(r'([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*(?:是|属于)(?:一个|一种|一款)?\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})'), "is_a"),
+        (re.compile(r'([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*(?:使用|采用|基于|调用)(?:了|着|过)?\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})'), "uses"),
+        (re.compile(r'([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*(?:依赖|需要)(?:了|着|过)?\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})'), "depends_on"),
+        (re.compile(r'([一-龥A-Za-z][一-龥A-Za-z0-9]{0,7})\s*(?:包含|包括)(?:了|着|过)?\s*([一-龥A-Za-z][一-龥A-Za-z0-9]{0,9})'), "contains"),
     ]
 
     def extract_entities(self, text: str, memory_id: str = "") -> list[Entity]:
@@ -228,6 +254,28 @@ class EntityExtractor:
                     source_memory_ids=[memory_id] if memory_id else [],
                 ))
 
+        # CJK 书名号/引号术语 (P0-2: 中文实体抽取 — 原纯正则对纯中文零产出)
+        for match in self._CJK_QUOTED.finditer(text):
+            name = match.group(1).strip()
+            if name and name not in seen_names:
+                seen_names.add(name)
+                entities.append(Entity(
+                    name=name,
+                    entity_type="quoted_term",
+                    source_memory_ids=[memory_id] if memory_id else [],
+                ))
+
+        # CJK 中英混排技术词 (glm-4.7 模型 / memory 系统 / CLI 命令)
+        for match in self._CJK_LATIN_MIX.finditer(text):
+            name = match.group(0).strip()
+            if name not in seen_names and len(name) >= 3:
+                seen_names.add(name)
+                entities.append(Entity(
+                    name=name,
+                    entity_type="technical_term",
+                    source_memory_ids=[memory_id] if memory_id else [],
+                ))
+
         return entities[:20]  # Cap at 20 entities
 
     def extract_relations(self, text: str, memory_id: str = "") -> list[Relation]:
@@ -249,6 +297,19 @@ class EntityExtractor:
                 if len(subject) > 1 and len(obj) > 1:
                     relations.append(Relation(
                         source_entity_id=subject,  # name used as temp ID
+                        target_entity_id=obj,
+                        relation_type=predicate,
+                        source_memory_id=memory_id,
+                    ))
+
+        # CJK 关系谓词 (P0-2: 中文关系抽取)
+        for pattern, predicate in self._CJK_RELATION_PATTERNS:
+            for match in pattern.finditer(text):
+                subject = match.group(1).strip()
+                obj = match.group(2).strip()
+                if len(subject) >= 2 and len(obj) >= 2:
+                    relations.append(Relation(
+                        source_entity_id=subject,
                         target_entity_id=obj,
                         relation_type=predicate,
                         source_memory_id=memory_id,
