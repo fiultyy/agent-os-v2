@@ -205,3 +205,65 @@ class TestP01NeuralWiring:
         state = store.load_state("a")
         assert state is not None
         assert len(state.field) > 0  # P0-1:神经场终于被喂数据
+
+    def test_on_ingest_feeds_field(self):
+        """P0-1 扩展:INGEST 事件(store_memory/sync_extract 写入)也喂 neural drift。
+
+        openclaw 沉积路径不经 chat TURN_END,靠 INGEST 让 c3 图召回 act 不再恒 0。
+        """
+        from memory.hooks import IngestContext
+
+        store = _fresh_store()
+        hook = NeuralHook(NeuralFieldEngine(), store)
+        ctx = IngestContext(
+            memory_id="m1",
+            content="Logseq CLI uses glm-4.7 and 向量数据库",
+            agent_id="ingest-agent",
+            session_id="s",
+            origin="agent",
+        )
+        asyncio.run(hook.on_ingest(ctx))
+        state = store.load_state("ingest-agent")
+        assert state is not None
+        assert len(state.field) > 0  # INGEST 路径喂入
+
+    def test_on_ingest_empty_content_skips(self):
+        """INGEST 空 content → 不喂(field 空/无 state,降级不崩)。"""
+        from memory.hooks import IngestContext
+
+        store = _fresh_store()
+        hook = NeuralHook(NeuralFieldEngine(), store)
+        ctx = IngestContext(
+            memory_id="m2", content="", agent_id="ingest-empty", session_id="s", origin="agent",
+        )
+        asyncio.run(hook.on_ingest(ctx))
+        state = store.load_state("ingest-empty")
+        assert state is None or not state.field
+
+
+# ── importance 卫生(协作需求:失智回复降分)─────────────────────────────
+
+class TestImportanceHygiene:
+    """失智/无信息回复 importance cap 0.3(不改 scorer 红线,纯 post-filter)。"""
+
+    def test_low_info_reply_capped(self):
+        from memory.sideline.ingestor_agent import IngestorAgent
+        cap, low = IngestorAgent._apply_importance_hygiene(
+            None, "抱歉,没有找到相关记录,这是一个全新的工作区", 0.9,
+        )
+        assert cap == 0.3 and low is True
+
+    def test_normal_reply_not_capped(self):
+        from memory.sideline.ingestor_agent import IngestorAgent
+        cap, low = IngestorAgent._apply_importance_hygiene(
+            None, "Logseq CLI 使用 @logseq/cli 包,包含 search 命令", 0.7,
+        )
+        assert cap == 0.7 and low is False
+
+    def test_found_not_false_positive(self):
+        """边界:'我找到了...记录' 含'找到'+'记录' 但非失智,不误伤。"""
+        from memory.sideline.ingestor_agent import IngestorAgent
+        cap, low = IngestorAgent._apply_importance_hygiene(
+            None, "我找到了 Logseq 的完整命令记录", 0.8,
+        )
+        assert cap == 0.8 and low is False
