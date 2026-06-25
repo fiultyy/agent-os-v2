@@ -74,7 +74,8 @@ async def debug_status() -> dict:
         "llm_channels": {
             "main": {"format": getattr(main_c, "format", None), "model": main_model},
             "side": ({"format": getattr(side_c, "format", None),
-                      "model": getattr(side_c, "default_model", None)}
+                      "model": getattr(side_c, "anthropic_model", None)
+                      or getattr(side_c, "default_model", None)}
                      if side_c is not None else None),
         },
     }

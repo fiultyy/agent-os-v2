@@ -53,21 +53,41 @@ app = FastAPI(title="Agent OS — Orchestrator", version="0.2.0", redirect_slash
 
 _state.llm_client = LLMClient()
 
-# #4: side-agent 专用 LLM 实例(OpenAI 通道 / glm-4-flash,提炼用快模型)。
-# SIDE_LLM_ENABLED=1 时装配;未启用 → None,side agent fallback 到主 llm_client
-# (anthropic / glm-5-turbo),灰度安全。鉴权复用同一智谱 key。
+# #4: side-agent 专用 LLM 实例(记忆提炼/整合/curator 等)。SIDE_LLM_ENABLED=1
+# 时装配;未启用 → None,side agent fallback 到主 llm_client,灰度安全。
+# format-aware:paas/v4(openai 兼容)或 anthropic 通道二选一。
+# 注意:智谱 paas/v4 通道(glm-4-flash 等)需单独资源包,余额不足时 429;
+# glm-4.7 走 anthropic 通道(/api/anthropic,套餐内可用),所以 memory 端
+# 默认切 anthropic + glm-4.7(与主对话 glm-5-turbo 同通道、不同 model)。
+# _chat_anthropic 用 self.anthropic_model(忽略 OpenAI default_model),
+# 故 anthropic 分支必须配 anthropic_* 字段。
 if os.getenv("SIDE_LLM_ENABLED", "0") == "1":
-    _state.side_llm_client = LLMClient(
-        format=os.getenv("SIDE_LLM_API_FORMAT", "openai"),
-        base_url=os.getenv("SIDE_LLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4"),
-        api_key=os.getenv("SIDE_LLM_API_KEY", os.environ.get("ANTHROPIC_AUTH_TOKEN", "")),
-        default_model=os.getenv("SIDE_LLM_MODEL", "glm-4-flash"),
-    )
+    _side_fmt = os.getenv("SIDE_LLM_API_FORMAT", "anthropic").lower()
+    if _side_fmt == "anthropic":
+        _state.side_llm_client = LLMClient(
+            format="anthropic",
+            anthropic_model=os.getenv("SIDE_LLM_MODEL", "glm-4.7"),
+            anthropic_base_url=os.getenv(
+                "SIDE_LLM_ANTHROPIC_BASE_URL",
+                os.environ.get("ANTHROPIC_BASE_URL", "https://open.bigmodel.cn/api/anthropic"),
+            ),
+            anthropic_api_key=os.getenv(
+                "SIDE_LLM_ANTHROPIC_API_KEY",
+                os.environ.get("ANTHROPIC_AUTH_TOKEN", ""),
+            ),
+        )
+    else:
+        _state.side_llm_client = LLMClient(
+            format="openai",
+            base_url=os.getenv("SIDE_LLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4"),
+            api_key=os.getenv("SIDE_LLM_API_KEY", os.environ.get("ANTHROPIC_AUTH_TOKEN", "")),
+            default_model=os.getenv("SIDE_LLM_MODEL", "glm-4-flash"),
+        )
     logger.info(
-        "side-agent LLM wired: format=%s model=%s base=%s",
+        "side-agent LLM wired: format=%s model=%s",
         _state.side_llm_client.format,
-        _state.side_llm_client.default_model,
-        _state.side_llm_client.base_url,
+        getattr(_state.side_llm_client, "anthropic_model", None)
+        or _state.side_llm_client.default_model,
     )
 else:
     _state.side_llm_client = None
