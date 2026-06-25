@@ -694,15 +694,53 @@ class NeuralHook(MemoryHook):
         self._kg = kg
 
     async def on_turn_end(self, ctx: TurnContext) -> None:
-        """每轮结束的空骨架（无 concepts 时仅推进 turn_id）。
+        """每轮结束:从本轮 memory item 抽 concepts(importance)喂 drift_turn。
 
-        wiring 层若希望注入真实 concepts，应直接调用 :meth:`drift_turn`。
+        P0-1:此前硬编码空 concepts → 神经场从未被喂数据 → 图召回节点 act 恒 0。
+        现从 ctx 的 working_item/tool_result_item/conversation_item 取本轮内容,
+        用 EntityExtractor 抽实体名作 concept,importance 取 item.importance
+        (floor 0.3 保证激活)。抽空/异常 → 降级空 concepts(仅推进 turn_id,
+        等同改动前行为)。不碰蝴蝶翼扩散 _spread(红线)。
         """
+        concepts, importances = self._extract_concepts(ctx)
         await self.drift_turn(
             agent_id=ctx.agent_id,
-            activated_concepts=[],
-            importances={},
+            activated_concepts=concepts,
+            importances=importances,
         )
+
+    def _extract_concepts(
+        self, ctx: TurnContext,
+    ) -> tuple[list[str], dict[str, float]]:
+        """从本轮 memory item 抽 concept→importance。无 item/抽空/异常 → ([], {})。
+
+        concept = EntityExtractor 抽出的实体名;importance = item.importance
+        (floor 0.3,保证 drift 激活 step 对 concept 加 Δpotential>0)。
+        EntityExtractor lazy 构造并缓存到 self,失败降级空(神经场红线:不崩主链)。
+        """
+        item = ctx.working_item or ctx.tool_result_item or ctx.conversation_item
+        if item is None or not getattr(item, "content", ""):
+            return [], {}
+        extractor = getattr(self, "_entity_extractor", None)
+        if extractor is None:
+            try:
+                from src.memory.knowledge_graph import EntityExtractor
+                extractor = EntityExtractor()
+                self._entity_extractor = extractor  # cache on self
+            except Exception:
+                logger.exception("EntityExtractor import failed — neural field drifts empty")
+                return [], {}
+        try:
+            entities = extractor.extract_entities(item.content)
+        except Exception:
+            logger.exception("neural field concept extraction failed — drifting empty")
+            return [], {}
+        if not entities:
+            return [], {}
+        base_imp = max(float(getattr(item, "importance", 0.0) or 0.0), 0.3)
+        concepts = [e.name for e in entities]
+        importances = {e.name: base_imp for e in entities}
+        return concepts, importances
 
     async def drift_turn(
         self,
