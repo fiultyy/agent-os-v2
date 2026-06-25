@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -32,6 +33,18 @@ logger = logging.getLogger(__name__)
 
 # Allowed identity_category tag values (Chapter 6.1). NONE is the default
 # when the LLM does not recognise an identity-bearing memory.
+# importance 卫生:失忆/无信息回复模式(协作需求 —— 失智回复不该排第一污染召回)。
+# 通用否定/失忆语义,精确不误伤("我找到了 Logseq 的记录" 不命中)。命中 →
+# importance cap 0.3 + metadata.low_info_reply=True。
+_LOW_INFO_PATTERNS = re.compile(
+    r"没有找到|没找到|找不到|未找到|没有相关|搜不到|查不到|"
+    r"不记得|不知道|不清楚|不了解|无法确定|没有印象|无法访问|"
+    r"没有.{0,8}(?:记录|对话|历史|聊天|数据|信息)|"
+    r"全新的工作区|新会话|刚刚上线|刚上线|还没有.{0,8}(?:记录|历史|数据|聊过)|"
+    r"MEMORY\.md.{0,6}(?:是空|为空|没有)|memory(?:文件夹|目录|文件).{0,6}(?:没有|为空|是空)|"
+    r"什么都没(?:有|记得)|没有任何(?:记录|历史|对话)|我现在什么都不记得"
+)
+
 _IDENTITY_CATEGORIES = {"IDENTITY", "GOAL", "TRAIT", "KNOWLEDGE", "NONE"}
 
 # Allowed entity ``type`` values (Chapter 6.1 KG entity-type extension).
@@ -279,15 +292,26 @@ class IngestorAgent:
             cat = "NONE"
         result.identity_category = cat
 
+        # ── importance 卫生:失智/无信息回复降分(0f098a9f 类,协作需求)─
+        hygiene_content = ""
+        try:
+            _item = await self._memory.get(memory_id)
+            if isinstance(_item, MemoryItem):
+                hygiene_content = _item.content or ""
+        except Exception:  # noqa: BLE001 - non-fatal
+            pass
+        total, low_info = self._apply_importance_hygiene(hygiene_content, total)
+        result.importance = total
+
         # ── write back to the memory item ─────────────────────────────
+        _meta = {"identity_category": cat, "degraded": False}
+        if low_info:
+            _meta["low_info_reply"] = True
         try:
             await self._memory.update(
                 memory_id=memory_id,
                 importance=total,
-                metadata={
-                    "identity_category": cat,
-                    "degraded": False,
-                },
+                metadata=_meta,
             )
         except Exception as exc:  # noqa: BLE001 - non-fatal
             logger.debug("IngestorAgent memory.update skipped: %s", exc)
@@ -302,6 +326,21 @@ class IngestorAgent:
                 v = 0.0
             total += weight * max(0.0, min(1.0, v))
         return round(total, 4)
+
+    def _apply_importance_hygiene(
+        self, content: str, importance: float
+    ) -> tuple[float, bool]:
+        """importance 卫生:失忆/无信息回复降分,避免排第一污染召回。
+
+        协作需求(0f098a9f 类失智回复被 scorer 算高分排第一)。纯 post-filter,
+        不改 scorer 五维评分(红线)。命中 ``_LOW_INFO_PATTERNS`` → cap 0.3 +
+        返回 low_info=True(写 ``metadata.low_info_reply`` 供下游降权/过滤)。
+        """
+        if not content or importance <= 0.0:
+            return importance, False
+        if _LOW_INFO_PATTERNS.search(content):
+            return min(importance, 0.3), True
+        return importance, False
 
     def _resolve_entity_id(self, name: str) -> str:
         """Resolve an entity name (just ingested) to its KG id.
@@ -346,19 +385,28 @@ class IngestorAgent:
 
         # Deterministic importance from the stored item (if available).
         total = 0.0
+        item = None
         try:
             item = await self._memory.get(memory_id)
             if isinstance(item, MemoryItem):
                 total = self._scorer.score(item).total
         except Exception as exc:  # noqa: BLE001 - non-fatal
             logger.debug("IngestorAgent degrade scorer failed: %s", exc)
+        # importance 卫生:失智/无信息回复降分(content 参数优先,回退 item.content)
+        _hyg_content = content or (
+            item.content if isinstance(item, MemoryItem) else ""
+        )
+        total, low_info = self._apply_importance_hygiene(_hyg_content, total)
         result.importance = total
 
+        _meta = {"identity_category": "NONE", "degraded": True}
+        if low_info:
+            _meta["low_info_reply"] = True
         try:
             await self._memory.update(
                 memory_id=memory_id,
                 importance=total,
-                metadata={"identity_category": "NONE", "degraded": True},
+                metadata=_meta,
             )
         except Exception as exc:  # noqa: BLE001 - non-fatal
             logger.debug("IngestorAgent degrade memory.update skipped: %s", exc)
