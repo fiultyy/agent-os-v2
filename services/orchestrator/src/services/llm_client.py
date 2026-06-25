@@ -111,7 +111,12 @@ class LLMClient:
             try:
                 resp = await client.post(
                     url,
-                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        # 明确 client 标识(非匿名),provider 可识别为正规 client
+                        # 而非可疑/匿名流量。env 可覆盖。不伪造第三方身份。
+                        "user-agent": os.environ.get("LLM_USER_AGENT", "agent-os/0.2.0"),
+                    },
                     json=payload,
                 )
                 resp.raise_for_status()
@@ -153,6 +158,10 @@ class LLMClient:
             "x-api-key": self.anthropic_api_key,
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
+            # 明确 client 标识(非匿名),provider 可识别为正规 client 而非
+            # 可疑/匿名流量。env 可覆盖(LLM_USER_AGENT)。不伪造第三方
+            # (Claude Code / 智谱 zcode)身份 —— 诚实标识 agent-os 自己。
+            "user-agent": os.environ.get("LLM_USER_AGENT", "agent-os/0.2.0"),
         }
 
         async with httpx.AsyncClient(timeout=60.0) as client:
