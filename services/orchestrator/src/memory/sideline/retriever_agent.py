@@ -136,7 +136,22 @@ class RetrieverAgent:
                 entry["match_score"] = float(match)
                 entry["lif_weight"] = float(w)
             results.append(entry)
-        results.sort(key=lambda r: r["score"], reverse=True)
+        # 召回质量兜底(b386243 importance 卫生闭环在主路径的延伸):score 仍由
+        # match × lif_weight 驱动(红线:line 131 entry["score"]=float(match*w) 不改),
+        # 仅 score 完全相等时按 low_info_reply 垫底 + importance 降序破结。否则 Python
+        # 稳定排序退回候选序,失智回复(字面含 query 词 / KG 实体命中、importance 卫生
+        # 已标 low_info_reply=True)靠 UnifiedRecall combined_score 混入 top_k,盖住真维护。
+        # 参考 keyword_recall.py(b386243)+ ingestor_agent._apply_importance_hygiene。
+        # TODO(存量 gap):regex 扩展只拦未来 ingest,已沉积失智(low_info_reply 标记缺失)
+        # 在本 tie-break 只有 importance 维度生效、非通用保护 —— 靠 backfill 扫 content
+        # 命中 _LOW_INFO_PATTERNS 的存量项回填 low_info_reply=True + cap importance<=0.3 补齐。
+        results.sort(
+            key=lambda r: (
+                -r["score"],
+                bool((r["item"].metadata or {}).get("low_info_reply")),
+                -float(r["item"].importance or 0.0),
+            )
+        )
         results = results[:top_k]
 
         if detail:

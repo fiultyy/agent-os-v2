@@ -312,3 +312,31 @@ class TestImportanceHygiene:
             None, "我找到了 Logseq 的完整命令记录", 0.8,
         )
         assert cap == 0.8 and low is False
+
+    def test_a405_dementia_now_caught(self):
+        """回归 a405c48f:实测失智原文现已被标 low_info + cap 0.3。
+
+        原文 "还是没想起来 😅 我这边记忆库里确实没有任何关于 Logseq 的记录"
+        三处可命中(没想起来 / 确实没有任何 / 没有任何关于),修复前因
+        "没有.{0,8}记录"(中间隔 9 字 "关于 Logseq 的")与
+        "没有任何(?:记录|...)"(隔"关于")双双漏掉 → 未标 low_info_reply,
+        被 RetrieverAgent score 排到 #2 污染召回。
+        """
+        from memory.sideline.ingestor_agent import IngestorAgent
+        cap, low = IngestorAgent._apply_importance_hygiene(
+            None,
+            "还是没想起来 😅 我这边记忆库里确实没有任何关于 Logseq 的记录",
+            0.8,
+        )
+        assert cap == 0.3 and low is True
+
+    def test_positive_recall_not_false_positive_v2(self):
+        """反向边界:'我想起来了...' 含'想起来' 但非失智(带"不"才命中),不误伤。
+
+        保护 regex 放松后不吞正向表达(裸"想起来"会误伤)。
+        """
+        from memory.sideline.ingestor_agent import IngestorAgent
+        cap, low = IngestorAgent._apply_importance_hygiene(
+            None, "我想起来了 Logseq 的用法", 0.8,
+        )
+        assert cap == 0.8 and low is False
