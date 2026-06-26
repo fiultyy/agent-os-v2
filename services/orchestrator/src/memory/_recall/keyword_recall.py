@@ -34,13 +34,10 @@ class KeywordRecall(RecallStrategy):
             return all_items[:top_k]
 
         keywords = query.lower().split()
-        results = []
-        for item in all_items:
-            content_lower = item.content.lower()
-            if any(kw in content_lower for kw in keywords):
-                results.append(item)
-                if len(results) >= top_k:
-                    break
+        results = [
+            item for item in all_items
+            if any(kw in item.content.lower() for kw in keywords)
+        ]
 
         # P0-3 近因兜底:query 非空但无字面命中 → 返回该作用域最近 top_k 条
         # (all_items 已是 created_at DESC),消灭「问"之前聊过X"措辞不命中关键词
@@ -50,4 +47,19 @@ class KeywordRecall(RecallStrategy):
         if not results:
             return all_items[:top_k]
 
-        return results
+        # 召回质量兜底(importance 卫生闭环):匹配项内 low_info_reply 垫底 +
+        # 同级 importance 降序。ingest 侧 importance 卫生已把失智/无信息回复
+        # cap 0.3 + 标 metadata.low_info_reply=True(见 ingestor_agent.
+        # _apply_importance_hygiene),召回层必须消费该标记 —— 否则失智回复恰好
+        # 字面含 query 词(如「没有找到 Logseq 命令行工具的记录」)按近因/字面
+        # 霸占第一位,盖住真维护记忆(实测 claw-03:imp0.3 失智排第一,imp0.56
+        # 真维护排第二)。纯加法:KEYWORD 匹配判定(any kw in content)不变、P0-3
+        # 近因兜底不变,仅收集全部命中项后重排取 top_k(原 len>=top_k 提前 break
+        # 会漏掉后置高 importance 项,排序需看全量命中)。
+        results.sort(
+            key=lambda it: (
+                bool((it.metadata or {}).get("low_info_reply")),  # False=非失智排前
+                -float(it.importance or 0.0),                     # 同级 importance 降序
+            )
+        )
+        return results[:top_k]

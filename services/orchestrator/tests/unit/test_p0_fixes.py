@@ -167,6 +167,51 @@ class TestP03RecallFallback:
         ))
         assert len(results) == 2
 
+    def test_low_info_reply_sinks_to_bottom(self):
+        """召回质量兜底:low_info_reply 失智回复垫底,真维护排前(同字面命中)。
+
+        importance 卫生闭环验证:ingest 侧标 low_info_reply=True,recall 必须
+        消费该标记 —— 否则失智回复(字面含 query 词)按近因/字面霸占第一位。
+        """
+        store = InMemoryStore()
+        low = MemoryItem(
+            id="low", content="没有找到 Logseq 命令行工具的记录", importance=0.3,
+            agent_id="a", metadata={"low_info_reply": True},
+        )
+        good = MemoryItem(
+            id="good", content="Logseq CLI @logseq/cli 完整命令体系", importance=0.6,
+            agent_id="a", metadata={},
+        )
+        asyncio.run(store.store(low))
+        asyncio.run(store.store(good))
+        kr = KeywordRecall(store)
+        results = asyncio.run(kr.recall(
+            query="Logseq", agent_id="a", session_id="",
+            memory_type=None, scope=None, top_k=5,
+        ))
+        assert results[0].id == "good"   # 真维护排第一
+        assert results[-1].id == "low"   # 失智垫底
+
+    def test_importance_desc_within_non_low_info(self):
+        """同级(非 low_info)按 importance 降序 —— 元描述类(imp0.3)排真维护后。"""
+        store = InMemoryStore()
+        low_imp = MemoryItem(
+            id="meta", content="Logseq 召回上下文已注入", importance=0.3,
+            agent_id="a", metadata={},
+        )
+        high_imp = MemoryItem(
+            id="real", content="Logseq CLI 完整命令体系 npm @logseq/cli", importance=0.65,
+            agent_id="a", metadata={},
+        )
+        asyncio.run(store.store(low_imp))
+        asyncio.run(store.store(high_imp))
+        kr = KeywordRecall(store)
+        results = asyncio.run(kr.recall(
+            query="Logseq", agent_id="a", session_id="",
+            memory_type=None, scope=None, top_k=5,
+        ))
+        assert [r.id for r in results] == ["real", "meta"]  # 0.65 排前,0.3 排后
+
 
 # ── P0-1: NeuralHook concept 接线 ──────────────────────────────────────
 
