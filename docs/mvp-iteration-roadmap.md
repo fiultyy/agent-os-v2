@@ -90,7 +90,7 @@
 
 ### Phase 1 — MVP 骨架通电【L2(含持久化)+ L3 + L4】· ✅ 完成(L3 `be4688f` + L4 `b6026cc` + L2 `3d5532b` 全 merge 主线 `384183e`;22+6 测试绿,L2 stash baseline 零回归证明)
 
-> ⚠️ **L2 遗留(P2,Phase 3 验收前补)**:① PG schema 无 migration(`initialize()` 不建表,首启表不存在→降级内存,持久化静默失效);② 存量 backfill 未做(仅新建 agent 写 PG,老 agent 重启丢);③ 生产 `start.py` 启动冒烟待验(测试环境 sqlite3 损坏,engine 整体 import 未验证)。
+> ✅ **L2 遗留已澄清(2026-06-27 冒烟验证)**:① PG schema —— 对抗验证 P2 误判,`initialize()` 的 `metadata.create_all` 已建 4 表(memory_items/memory_blocks/sessions/**agents**),首启不缺表;② backfill —— 无需,`create_agent_data`→`store_agent`(写 PG)+ `_init_pg_store_and_restore`→`restore_agents_from_pg`(读灌回,不覆盖)+ `init_default_agent`(若 _state.agents 非空则跳过),重启不丢对新建 agent 闭环成立;③ **本地 engine import 冒烟通过**(pysqlite3+httpx 环境:`ENGINE IMPORT OK`,`tool_executor` 注册 **18 工具**,`pg_store` 无 DATABASE_URL 降级 None)。生产容器冒烟(带真 PG + server 启动)待 Phase 3 验收。
 
 **目标**:点亮 MVP 的可用与可观测。三线并行启动,但 orchestrator 热点(chat.py/engine.py/_state.py)由 L2 独占串行。
 
