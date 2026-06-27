@@ -113,7 +113,7 @@
   - 通信面板非空,broadcast 投递数 >0
   - 新增单测:`test_communication.py` / `test_persistence.py`(create→restart→list 一致性)/ `test_graph_engine.py`(4 节点线性 + 条件边 + **`_resolve_next` 多边 bug** —— 审查建议从 defer 提到此 Phase 修,`graph/__init__.py:475-480` for-edge-return-first)
 
-### Phase 2 — 死代码清理 + 文档归位【L6】· 全程并行低冲突
+### Phase 2 — 死代码清理 + 文档归位【L6】· ✅ 完成(`c5b9f9a` / merge `1ad0c5d`,19 文件 +34/-1432 **净删 1398 行**,对抗验证 6 点全 PASS)
 
 **目标**:消除误导性死代码,让"98% 谎言"归位。可与 Phase 0/1 任意并行(独占文件为主)。
 
