@@ -65,12 +65,19 @@ class LLMClient:
 
         # Last response usage (Anthropic channel exposes cache fields).
         self.last_usage: dict[str, Any] | None = None
+        # Native tool_use parsed from the last response (function-calling).
+        # Anthropic: ``{"name": str, "input": dict}`` (first tool_use block)
+        # or ``None`` when no tool was requested. OpenAI channel populates the
+        # same shape from ``tool_calls`` when present. Side-agent callers that
+        # never pass ``tools`` leave this ``None`` (zero regression).
+        self.last_tool_use: dict[str, Any] | None = None
 
     async def chat(
         self,
         messages: list[dict[str, Any]],
         model: str | None = None,
         static_count: int | None = None,
+        tools: list[dict[str, Any]] | None = None,
         **kwargs: Any,
     ) -> str:
         """Send messages and return the assistant content string.
@@ -82,18 +89,34 @@ class LLMClient:
             static_count: Number of leading static messages. Anthropic
                 channel uses it to place the cache_control breakpoint;
                 OpenAI channel ignores it.
+            tools: Optional list of tool schemas for *native* function-calling.
+                Anthropic schema: ``{name, description, input_schema}`` — these
+                are forwarded verbatim. OpenAI schema: ``{type:"function",
+                function:{name, description, parameters}}``. When ``None``
+                (default) tool_use is disabled — full backward compatibility.
+
+        Tool-use results:
+            When the model emits a native ``tool_use`` block, ``self.last_tool_use``
+            is set to ``{"name": <tool>, "input": <args dict>}`` *before* this
+            method returns. Callers that care about tool calls read
+            ``last_tool_use`` after ``await chat(...)``. Callers that ignore it
+            are unaffected (it stays ``None`` when no tools are passed).
 
         Raises:
             LLMError: If the API key is missing or the API call fails.
         """
+        # Reset per-call: a caller reusing the client must not observe a
+        # stale tool_use from a previous turn.
+        self.last_tool_use = None
         if self.format == "anthropic":
-            return await self._chat_anthropic(messages, static_count, **kwargs)
-        return await self._chat_openai(messages, model, **kwargs)
+            return await self._chat_anthropic(messages, static_count, tools=tools, **kwargs)
+        return await self._chat_openai(messages, model, tools=tools, **kwargs)
 
     async def _chat_openai(
         self,
         messages: list[dict[str, Any]],
         model: str | None,
+        tools: list[dict[str, Any]] | None = None,
         **kwargs: Any,
     ) -> str:
         if not self.api_key:
@@ -106,6 +129,23 @@ class LLMClient:
             "temperature": kwargs.get("temperature", 0.7),
             "max_tokens": kwargs.get("max_tokens", 1024),
         }
+        if tools:
+            # OpenAI tool schema: {"type":"function","function":{name,description,
+            # parameters}}. Accept either pre-shaped OpenAI schemas or bare
+            # Anthropic-shaped ones ({name,description,input_schema}) and normalize.
+            payload["tools"] = [
+                t if t.get("type") == "function"
+                else {
+                    "type": "function",
+                    "function": {
+                        "name": t["name"],
+                        "description": t.get("description", ""),
+                        "parameters": t.get("input_schema") or t.get("parameters") or {},
+                    },
+                }
+                for t in tools
+            ]
+            payload["tool_choice"] = "auto"
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             try:
@@ -120,7 +160,20 @@ class LLMClient:
                     json=payload,
                 )
                 resp.raise_for_status()
-                return resp.json()["choices"][0]["message"]["content"]
+                msg = resp.json()["choices"][0]["message"]
+                # Native tool_calls (OpenAI shape). Parse the first function
+                # call into the normalized {name, input} tool_use shape so the
+                # orchestrator's _node_tool works uniformly across channels.
+                if tools and msg.get("tool_calls"):
+                    tc = msg["tool_calls"][0]
+                    fn = tc.get("function", {})
+                    import json as _json
+                    try:
+                        args_in = _json.loads(fn.get("arguments") or "{}")
+                    except (ValueError, TypeError):
+                        args_in = {}
+                    self.last_tool_use = {"name": fn.get("name", ""), "input": args_in}
+                return msg.get("content") or ""
             except httpx.HTTPStatusError as exc:
                 raise LLMError(f"HTTP {exc.response.status_code}: {exc.response.text[:200]}") from exc
             except httpx.RequestError as exc:
@@ -130,6 +183,7 @@ class LLMClient:
         self,
         messages: list[dict[str, Any]],
         static_count: int | None,
+        tools: list[dict[str, Any]] | None = None,
         **kwargs: Any,
     ) -> str:
         if not self.anthropic_api_key:
@@ -153,6 +207,12 @@ class LLMClient:
             payload["system"] = system
         if "temperature" in kwargs:
             payload["temperature"] = kwargs["temperature"]
+        # Native function-calling: forward tool schemas verbatim (Anthropic
+        # shape: {name, description, input_schema}). tool_choice="auto" lets
+        # the model decide; the stop_reason becomes "tool_use" when chosen.
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = {"type": "auto"}
 
         headers = {
             "x-api-key": self.anthropic_api_key,
@@ -170,12 +230,24 @@ class LLMClient:
                 resp.raise_for_status()
                 data = resp.json()
                 self.last_usage = data.get("usage")
-                # content is a list of blocks; return first text block
+                # content is a list of blocks. Parse native tool_use blocks
+                # into the normalized {name, input} shape (first one wins) so
+                # the orchestrator's _node_tool executes it. Text blocks remain
+                # the primary return value (backward compatible).
                 content = data.get("content", [])
+                text_out = ""
                 for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        return block.get("text", "")
-                return ""
+                    if not isinstance(block, dict):
+                        continue
+                    btype = block.get("type")
+                    if btype == "text" and not text_out:
+                        text_out = block.get("text", "")
+                    elif btype == "tool_use" and self.last_tool_use is None:
+                        self.last_tool_use = {
+                            "name": block.get("name", ""),
+                            "input": block.get("input", {}) or {},
+                        }
+                return text_out
             except httpx.HTTPStatusError as exc:
                 raise LLMError(f"HTTP {exc.response.status_code}: {exc.response.text[:200]}") from exc
             except httpx.RequestError as exc:

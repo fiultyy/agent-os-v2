@@ -28,6 +28,15 @@ class ToolExecutor:
         self._registry = registry
         self._guardrail = guardrail or Guardrail()
 
+    @property
+    def registry(self) -> ToolRegistry:
+        """Public read access to the underlying registry.
+
+        Used by the orchestrator to enumerate tools and build native
+        function-calling schemas (LLMClient.chat(tools=...)).
+        """
+        return self._registry
+
     async def execute(
         self,
         tool_name: str,
