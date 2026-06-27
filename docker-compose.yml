@@ -44,12 +44,6 @@ services:
     depends_on:
       orchestrator:
         condition: service_healthy
-      prompt-manager:
-        condition: service_healthy
-      conversation-observer:
-        condition: service_healthy
-      resource-manager:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 10s
@@ -77,6 +71,7 @@ services:
       retries: 5
 
   prompt-manager:
+    profiles: ["aux"]
     build:
       context: ./services/prompt-manager
       dockerfile: Dockerfile
@@ -91,6 +86,7 @@ services:
       retries: 5
 
   conversation-observer:
+    profiles: ["aux"]
     build:
       context: ./services/conversation-observer
       dockerfile: Dockerfile
@@ -105,6 +101,7 @@ services:
       retries: 5
 
   resource-manager:
+    profiles: ["aux"]
     build:
       context: ./services/resource-manager
       dockerfile: Dockerfile
