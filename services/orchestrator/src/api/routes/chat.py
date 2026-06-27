@@ -57,6 +57,32 @@ def _has_tool_invocation(text: str) -> bool:
     return bool(_TOOL_INVOCATION_RE.search(text))
 
 
+def _build_native_tools() -> list[dict[str, Any]]:
+    """Convert the ToolRegistry listing to Anthropic-native tool schemas.
+
+    The registry stores each tool as ``{name, description, parameters}`` where
+    ``parameters`` is already a JSON Schema (type/properties/required) — exactly
+    what Anthropic expects under ``input_schema``. This is a thin rename so the
+    orchestrator can pass tools verbatim to ``LLMClient.chat(tools=...)`` and
+    get native ``tool_use`` back instead of fragile regex parsing.
+
+    Returns ``[]`` (empty → caller treats as "no tools") when the registry is
+    not initialized or is empty.
+    """
+    if _state.tool_executor is None or _state.tool_executor.registry is None:
+        return []
+    tools: list[dict[str, Any]] = []
+    for t in _state.tool_executor.registry.list_tools():
+        tools.append(
+            {
+                "name": t["name"],
+                "description": t.get("description", ""),
+                "input_schema": t.get("parameters") or {"type": "object", "properties": {}},
+            }
+        )
+    return tools
+
+
 # ── KG extraction helper ──────────────────────────────────────────
 
 
@@ -153,8 +179,16 @@ async def _node_llm(state: GraphState) -> GraphState:
     llm_messages = compiled.messages
 
     try:
+        # Native function-calling: build Anthropic-shaped tool schemas from
+        # the registry and pass them to the LLM. The model decides whether to
+        # call a tool; a tool_use block surfaces on ``last_tool_use`` when it
+        # does. ``_build_native_tools`` returns [] when no registry/tools.
+        native_tools = _build_native_tools()
         response = await _state.llm_client.chat(
-            llm_messages, model=agent_model, static_count=compiled.static_count,
+            llm_messages,
+            model=agent_model,
+            static_count=compiled.static_count,
+            tools=native_tools or None,
         )
     except LLMError as exc:
         state.errors.append(f"LLM error: {exc}")
@@ -167,6 +201,12 @@ async def _node_llm(state: GraphState) -> GraphState:
     state.messages.append({"role": "assistant", "content": response})
     state.output = response
     state.current_node = "llm"
+
+    # Native tool_use is the primary path (model emitted a tool_use block).
+    tool_use = getattr(_state.llm_client, "last_tool_use", None)
+    if tool_use and tool_use.get("name"):
+        state.context["tool_call"] = tool_use["name"]
+        state.context["tool_args"] = tool_use.get("input", {}) or {}
 
     working_item = MemoryItem(
         content=f"User: {user_input}\nAssistant: {response}",
