@@ -149,7 +149,7 @@
 |---|---|---|
 | **记忆进化通电**(第一优先) | ✅ PitFail `92be2cd`/merge `df225ca`:registry 实例化 + 工具失败 hook(match→increment复发 / record新)+ /v1/pitfall API(4 GET)+ _classify_tool_error,9 测试绿;蝴蝶翼写侧接线待(记忆簇后续,蝴蝶翼红线需先与记忆迭代分支协调) | — |
 | **LLM function-calling + 多轮 loop** | ✅ 完成(FC `c248894`/merge `5f9b22b` + 多轮 `8cdc48b`/merge `7a87b68`):chat tools 参数 + tool_use 解析(anthropic 原生 + openai 兼容)+ 正则降级兜底 + 18 工具 schema;多轮(tool→llm 循环 + tool_result 回注 + MAX_TOOL_ITERATIONS + 死循环 bugfix)。12 测试绿;实测 **635 passed / 15 baseline failed**(butterfly+meta defer + 环境,零新增,2026-06-28) | done |
-| **多 Agent 编排** | ParallelNode/Subgraph/FanIn 接生产图(先修 _resolve_next)+ 信任域 ScopeManager + Checkpoint resume + meta create_subagent | 图引擎单测基线(Phase 1 已补) |
+| **多 Agent 编排** | 准备 ✅(`874da6a`,2026-06-28:修 BFS fan-in join-barrier 汇聚重复执行 bug + ParallelNode/FanIn/Subgraph 18 单测固化语义,pending-queue 去重兼容循环图);**通电待** meta create_subagent 生命周期(天级,从无到有 + 碰 agent_manager/chat.py)+ 真实多 agent 场景;信任域 ScopeManager / Checkpoint resume 随本簇统一规划 | 图引擎基线(Phase 1 _resolve_next + `874da6a` join-barrier)✅ |
 | **辅助服务命运决策** | ✅ **归档**(`07f9921`,2026-06-28):compose 解耦 gateway depends_on + `profiles:[aux]` 隔离 + 三路由 502 兜底,代码全保留可逆;⚠️ `profiles` 仅 Compose v2 生效(本机 v1.29.2 静默忽略,但 depends_on 解耦已使主链路不被 aux 拖垮,核心收益达成);通电待真实需求(prompt 面板/会话回放落库/多 provider 动态路由);gRPC 无消费场景继续 defer | 视 MVP 反馈 |
 
 ---
