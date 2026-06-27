@@ -43,7 +43,7 @@ from src.context import ContextManager, ContextCompiler
 
 from src.services import _state
 from src.services.llm_client import LLMClient
-from src.services.agent_manager import init_default_agent
+from src.services.agent_manager import init_default_agent, restore_agents_from_pg
 
 # ── FastAPI app ────────────────────────────────────────────────────
 
@@ -114,9 +114,121 @@ _state.active_forgetting = ActiveForgetting(_state.memory_service)
 
 _state.context_manager = ContextManager(_state.memory_service)
 _state.context_compiler = ContextCompiler(_state.context_manager)
-_state.tool_executor = ToolExecutor(ToolRegistry())
+
+# ── Tool register (L2 通电):清单制注册已实现的 primitive+skill 工具 ─────
+# composite(browser_flow_execute / code_review_run)显式跳过 —— 它们重依赖
+# browser / playwright / code 编排链,在最小 wiring 下会拖累启动。import 容错:
+# skill 系统的可选依赖(如 pyyaml)缺失时降级为空 registry,不阻断 engine 启动。
+from src.tools.catalog import ToolLayer
+
+_tool_registry = ToolRegistry()
+try:
+    from src.skills.primitive import (
+        http_get, http_post, http_put, http_delete, http_patch,
+        file_read, file_write, file_delete, file_exists, file_list, file_mkdir,
+        db_query, db_execute, db_transaction, db_schema,
+    )
+    from src.skills.code import code_read, code_write, code_search
+    _SKILL_TOOLS_AVAILABLE = True
+except ImportError as _skill_import_err:
+    logger.warning(
+        "skill tools unavailable (optional deps missing): %s", _skill_import_err,
+    )
+    _SKILL_TOOLS_AVAILABLE = False
+
+if _SKILL_TOOLS_AVAILABLE:
+    # 清单:(name, handler, description, parameters_schema, layer)。注册数由
+    # 清单长度决定 —— 不硬编码(生产应为 15 primitive + 3 skill = 18)。
+    _PRIMITIVE_TOOLS: list[tuple] = [
+        ("http_get", http_get, "HTTP GET 请求",
+         {"type": "object", "properties": {"url": {"type": "string"}, "headers": {"type": "object"}, "timeout": {"type": "integer"}}, "required": ["url"]}, ToolLayer.PRIMITIVE),
+        ("http_post", http_post, "HTTP POST 请求",
+         {"type": "object", "properties": {"url": {"type": "string"}, "body": {"type": "string"}, "headers": {"type": "object"}, "timeout": {"type": "integer"}}, "required": ["url"]}, ToolLayer.PRIMITIVE),
+        ("http_put", http_put, "HTTP PUT 请求",
+         {"type": "object", "properties": {"url": {"type": "string"}, "body": {"type": "string"}, "headers": {"type": "object"}, "timeout": {"type": "integer"}}, "required": ["url"]}, ToolLayer.PRIMITIVE),
+        ("http_delete", http_delete, "HTTP DELETE 请求",
+         {"type": "object", "properties": {"url": {"type": "string"}, "headers": {"type": "object"}, "timeout": {"type": "integer"}}, "required": ["url"]}, ToolLayer.PRIMITIVE),
+        ("http_patch", http_patch, "HTTP PATCH 请求",
+         {"type": "object", "properties": {"url": {"type": "string"}, "body": {"type": "string"}, "headers": {"type": "object"}, "timeout": {"type": "integer"}}, "required": ["url"]}, ToolLayer.PRIMITIVE),
+        ("file_read", file_read, "读取文件内容",
+         {"type": "object", "properties": {"path": {"type": "string"}, "encoding": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["path"]}, ToolLayer.PRIMITIVE),
+        ("file_write", file_write, "写入文件内容",
+         {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}, "encoding": {"type": "string"}, "mode": {"type": "string"}}, "required": ["path", "content"]}, ToolLayer.PRIMITIVE),
+        ("file_delete", file_delete, "删除文件或目录",
+         {"type": "object", "properties": {"path": {"type": "string"}, "recursive": {"type": "boolean"}}, "required": ["path"]}, ToolLayer.PRIMITIVE),
+        ("file_exists", file_exists, "检查路径是否存在",
+         {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}, ToolLayer.PRIMITIVE),
+        ("file_list", file_list, "列出目录内容",
+         {"type": "object", "properties": {"path": {"type": "string"}, "pattern": {"type": "string"}, "recursive": {"type": "boolean"}, "max_depth": {"type": "integer"}}, "required": ["path"]}, ToolLayer.PRIMITIVE),
+        ("file_mkdir", file_mkdir, "创建目录",
+         {"type": "object", "properties": {"path": {"type": "string"}, "parents": {"type": "boolean"}, "exist_ok": {"type": "boolean"}}, "required": ["path"]}, ToolLayer.PRIMITIVE),
+        ("db_query", db_query, "执行 SELECT 查询",
+         {"type": "object", "properties": {"sql": {"type": "string"}, "params": {"type": "array"}, "db_path": {"type": "string"}, "fetch": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["sql"]}, ToolLayer.PRIMITIVE),
+        ("db_execute", db_execute, "执行 INSERT/UPDATE/DELETE",
+         {"type": "object", "properties": {"sql": {"type": "string"}, "params": {"type": "array"}, "db_path": {"type": "string"}, "commit": {"type": "boolean"}}, "required": ["sql"]}, ToolLayer.PRIMITIVE),
+        ("db_transaction", db_transaction, "事务执行多条 SQL",
+         {"type": "object", "properties": {"statements": {"type": "array"}, "db_path": {"type": "string"}}, "required": ["statements"]}, ToolLayer.PRIMITIVE),
+        ("db_schema", db_schema, "获取表结构",
+         {"type": "object", "properties": {"table": {"type": "string"}, "db_path": {"type": "string"}}, "required": ["table"]}, ToolLayer.PRIMITIVE),
+    ]
+    _SKILL_TOOLS: list[tuple] = [
+        ("code_read", code_read, "读取代码文件",
+         {"type": "object", "properties": {"path": {"type": "string"}, "language": {"type": "string"}, "start_line": {"type": "integer"}, "end_line": {"type": "integer"}, "highlight": {"type": "boolean"}}, "required": ["path"]}, ToolLayer.SKILL),
+        ("code_write", code_write, "写入代码文件",
+         {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}, "language": {"type": "string"}, "backup": {"type": "boolean"}, "atomic": {"type": "boolean"}, "encoding": {"type": "string"}}, "required": ["path", "content"]}, ToolLayer.SKILL),
+        ("code_search", code_search, "搜索代码文件",
+         {"type": "object", "properties": {"query": {"type": "string"}, "path": {"type": "string"}, "pattern_type": {"type": "string"}, "file_filter": {"type": "string"}, "case_sensitive": {"type": "boolean"}, "context_lines": {"type": "integer"}, "max_results": {"type": "integer"}, "recursive": {"type": "boolean"}, "max_depth": {"type": "integer"}}, "required": ["query"]}, ToolLayer.SKILL),
+    ]
+    # composite skipped: browser_flow_execute / code_review_run (heavy deps)
+
+    def _bulk_register(registry, items):
+        n = 0
+        for name, handler, desc, params, layer in items:
+            registry.register(
+                name, handler, description=desc, parameters=params, layer=layer,
+            )
+            n += 1
+        return n
+
+    _n_prim = _bulk_register(_tool_registry, _PRIMITIVE_TOOLS)
+    _n_skill = _bulk_register(_tool_registry, _SKILL_TOOLS)
+    logger.info(
+        "tool register: primitive=%d skill=%d total=%d | list_tools=%d catalog.count=%d "
+        "(composite skipped: browser_flow/code_review)",
+        _n_prim, _n_skill, _n_prim + _n_skill,
+        len(_tool_registry.list_tools()), _tool_registry.get_catalog().count(),
+    )
+
+_state.tool_executor = ToolExecutor(_tool_registry)
 _state.communication_bus = CommunicationBus()
+
+# 通信桥(后端侧):把 CommunicationBus 的 direct-delivery 桥到 SSE 流 ——
+# register_delivery_callback 此前全仓零调用。direct agent-to-agent 投递现在会
+# 经 _state.emit_agent_message 推一条 agent_message SSE 事件(前端 dispatch 是 L4)。
+async def _bridge_agent_delivery(message, recipient_id):
+    try:
+        _state.emit_agent_message(message, recipient_id)
+    except Exception:
+        logger.warning("agent_message SSE bridge failed", exc_info=True)
+
+
+_state.communication_bus.register_delivery_callback(_bridge_agent_delivery)
 _state.concurrency_controller = ConcurrencyController()
+
+# ── 持久化双向(原 L5 并入):PostgresStore 做 agent 持久化 ──────────────
+# 模块级只建 engine(不连池);``await initialize()`` 在 startup hook 执行,失败
+# 降级为 None —— 保留所有 call-site 的 ``is not None`` guard 语义。
+_pg_url = os.getenv("DATABASE_URL") or os.getenv("PG_DATABASE_URL") or ""
+if _pg_url:
+    try:
+        from src.memory.pgstore import PostgresStore
+        _state.pg_store = PostgresStore(_pg_url)
+        logger.info("PostgresStore configured (DATABASE_URL set); initializing on startup")
+    except Exception:
+        logger.warning("PostgresStore init failed — degrading pg_store to None", exc_info=True)
+        _state.pg_store = None
+else:
+    _state.pg_store = None
 
 # P1: memory event bus + default lifecycle hook. chat.py emits lifecycle
 # events instead of calling memory_service/memory_migrator directly.
@@ -247,6 +359,29 @@ if os.getenv("MEMORY_NEURAL_FIELD_ENABLED", "0") == "1":
 Path("data").mkdir(exist_ok=True)
 
 # ── Lifecycle hooks ────────────────────────────────────────────────
+# NOTE: FastAPI runs startup hooks in registration order. The PG hook below
+# is registered BEFORE _init_default_agent_hook on purpose: it initializes the
+# store and restores persisted agents first, so init_default_agent sees a
+# non-empty _state.agents and skips re-creating the default. If PG is
+# unavailable (pg_store is None) the hook is a no-op and behaviour matches the
+# in-memory baseline.
+
+
+@app.on_event("startup")
+async def _init_pg_store_and_restore() -> None:
+    """Initialize PostgresStore and restore persisted agents (read side)."""
+    if _state.pg_store is None:
+        return
+    try:
+        await _state.pg_store.initialize()
+    except Exception:
+        logger.warning(
+            "pg_store.initialize failed — degrading pg_store to None", exc_info=True,
+        )
+        _state.pg_store = None
+        return
+    restored = await restore_agents_from_pg()
+    logger.info("pg_store initialized; restored %d agent(s) from PG", restored)
 
 
 @app.on_event("startup")

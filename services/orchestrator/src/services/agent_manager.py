@@ -62,3 +62,30 @@ async def init_default_agent() -> dict[str, Any] | None:
     )
     print(f"Default agent initialized: {agent['id']}")
     return agent
+
+
+async def restore_agents_from_pg() -> int:
+    """Restore persisted agents from PG into the in-memory ``agents`` dict.
+
+    ``agent_manager`` historically only had the *write* side (``store_agent``
+    in :func:`create_agent_data`); on restart ``_state.agents`` started empty
+    and every previously-persisted agent was lost. engine.py calls this on the
+    startup hook right after ``pg_store.initialize()`` so the read side closes
+    the loop. Agents already present in memory (e.g. created earlier in the
+    same boot) are left untouched — PG only *fills gaps*, never overwrites.
+    """
+    if _state.pg_store is None:
+        return 0
+    try:
+        agents = await _state.pg_store.list_agents()
+    except Exception:
+        # PG read failure is non-fatal — fall back to whatever is in memory.
+        return 0
+
+    count = 0
+    for agent in agents:
+        aid = agent.get("id") if isinstance(agent, dict) else None
+        if aid and aid not in _state.agents:
+            _state.agents[aid] = agent
+            count += 1
+    return count

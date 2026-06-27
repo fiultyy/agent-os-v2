@@ -370,10 +370,16 @@ class StateGraph:
 
         state = initial_state
         state.status = "running"
-        current_node_name: str | None = self._entry_point
+        # BFS frontier of pending nodes. A linear graph (one outgoing edge per
+        # node) dequeues exactly one node at a time — identical to the old
+        # single-pointer walk. A fan-out node (multiple outgoing edges) expands
+        # the frontier so every branch is reachable (the old ``for-edge-return-
+        # first`` loop only ever took the first edge, stranding the rest).
+        pending: list[str] = [self._entry_point]
         steps = 0
 
-        while current_node_name:
+        while pending:
+            current_node_name = pending.pop(0)
             steps += 1
             if steps > max_steps:
                 state.errors.append(
@@ -387,7 +393,7 @@ class StateGraph:
             node = self._nodes.get(current_node_name)
             if node is None:
                 state.errors.append(f"Node {current_node_name!r} not found")
-                break
+                continue
 
             state.current_node = current_node_name
             state = await node.execute(state)
@@ -402,8 +408,8 @@ class StateGraph:
             if on_node_complete is not None:
                 await on_node_complete(current_node_name, state)
 
-            # Resolve next node
-            current_node_name = self._resolve_next(current_node_name, state)
+            # Resolve next node(s) — may fan out to multiple targets.
+            pending.extend(self._resolve_next(current_node_name, state))
 
         state.status = "done"
         return state
@@ -421,14 +427,15 @@ class StateGraph:
         if state is None:
             raise RuntimeError(f"No checkpoints found for graph {self.graph_id!r}")
 
-        # Resume from the node after the last executed one
-        current_node_name = self._resolve_next(state.current_node, state)
+        # Resume from the node(s) after the last executed one — fan-out aware.
+        pending: list[str] = list(self._resolve_next(state.current_node, state))
 
-        while current_node_name:
+        while pending:
+            current_node_name = pending.pop(0)
             node = self._nodes.get(current_node_name)
             if node is None:
                 state.errors.append(f"Node {current_node_name!r} not found")
-                break
+                continue
 
             state.current_node = current_node_name
             state = await node.execute(state)
@@ -438,7 +445,7 @@ class StateGraph:
                 cp_id = f"step-{self._checkpoint_counter}"
                 self._checkpoint_store.save(self.graph_id, cp_id, state)
 
-            current_node_name = self._resolve_next(current_node_name, state)
+            pending.extend(self._resolve_next(current_node_name, state))
 
         state.status = "done"
         return state
@@ -472,9 +479,23 @@ class StateGraph:
                     })
         return result
 
-    def _resolve_next(self, current: str, state: GraphState) -> str:
-        """Determine the next node after *current* based on edges and state."""
+    def _resolve_next(self, current: str, state: GraphState) -> list[str]:
+        """Collect the next node(s) after *current* from ALL outgoing edges.
+
+        The old implementation ``for edge in edges: return edge.route(state)``
+        returned on the first edge, so a fan-out node (multiple outgoing
+        edges) could never reach any target but the first. We now collect
+        every edge's route, de-duplicating and dropping empty routes (e.g. a
+        conditional edge's ``__default__`` → ``""`` sentinel that ends a
+        branch). A single-edge node returns a one-element list, preserving
+        linear-graph behaviour.
+        """
         edges = self._edges.get(current, [])
+        routes: list[str] = []
+        seen: set[str] = set()
         for edge in edges:
-            return edge.route(state)
-        return ""
+            target = edge.route(state)
+            if target and target not in seen:
+                seen.add(target)
+                routes.append(target)
+        return routes

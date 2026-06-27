@@ -7,6 +7,7 @@ Validates tool calls before execution:
 - Dangerous operation detection
 """
 
+import json
 import re
 from typing import Any
 
@@ -29,12 +30,15 @@ class Guardrail:
         re.compile(r"chmod\s+777", re.IGNORECASE),
     ]
 
-    # Sensitive patterns in output
+    # Sensitive patterns in output. The optional quote before the separator
+    # lets these also catch JSON-serialized dict/list output — e.g. a tool
+    # returning {"password": "..."} now matches, which is the whole point of
+    # the dict branch in check_output (previously dicts were skipped entirely).
     SENSITIVE_PATTERNS: list[re.Pattern[str]] = [
-        re.compile(r"(?i)password\s*[:=]\s*\S+"),
-        re.compile(r"(?i)api[_-]?key\s*[:=]\s*\S+"),
-        re.compile(r"(?i)secret\s*[:=]\s*\S+"),
-        re.compile(r"(?i)token\s*[:=]\s*\S+"),
+        re.compile(r"""(?i)password\s*["']?\s*[:=]\s*\S+"""),
+        re.compile(r"""(?i)api[_-]?key\s*["']?\s*[:=]\s*\S+"""),
+        re.compile(r"""(?i)secret\s*["']?\s*[:=]\s*\S+"""),
+        re.compile(r"""(?i)token\s*["']?\s*[:=]\s*\S+"""),
     ]
 
     async def check(
@@ -70,17 +74,28 @@ class Guardrail:
     async def check_output(self, result: Any) -> tuple[bool, str]:
         """Validate a tool's output for sensitive information.
 
+        Structured tool outputs (``dict`` / ``list``) are JSON-serialized
+        before scanning — otherwise the early ``not isinstance(result, str)``
+        guard returned ``True`` unconditionally and a dict payload like
+        ``{"password": "..."}`` would never be redacted.
+
         Args:
             result: The tool's return value to inspect.
 
         Returns:
             ``(allowed, reason)`` — allowed=True if the output passes.
         """
-        if not isinstance(result, str):
-            return True, ""
+        if isinstance(result, str):
+            text = result
+        else:
+            try:
+                text = json.dumps(result, default=str, ensure_ascii=False)
+            except (TypeError, ValueError):
+                # Unserializable object — nothing to scan.
+                return True, ""
 
         for pattern in self.SENSITIVE_PATTERNS:
-            if pattern.search(result):
+            if pattern.search(text):
                 return False, (
                     f"Sensitive information detected in output: "
                     f"matches {pattern.pattern!r}"
