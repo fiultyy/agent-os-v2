@@ -4,7 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
-from src.config import ORCHESTRATOR_URL
+from src.config import ORCHESTRATOR_API
 from src.config import http_client
 
 router = APIRouter()
@@ -14,7 +14,7 @@ router = APIRouter()
 async def list_messages(request: Request) -> list[dict[str, Any]]:
     """List messages with optional filters."""
     params = dict(request.query_params)
-    resp = await http_client.get(f"{ORCHESTRATOR_URL}/messages", params=params)
+    resp = await http_client.get(f"{ORCHESTRATOR_API}/messages", params=params)
     resp.raise_for_status()
     return resp.json()
 
@@ -23,6 +23,6 @@ async def list_messages(request: Request) -> list[dict[str, Any]]:
 async def send_message(request: Request) -> dict[str, Any]:
     """Send a message between agents."""
     body = await request.json()
-    resp = await http_client.post(f"{ORCHESTRATOR_URL}/messages", json=body)
+    resp = await http_client.post(f"{ORCHESTRATOR_API}/messages", json=body)
     resp.raise_for_status()
     return resp.json()
