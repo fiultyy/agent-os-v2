@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
-from src.config import ORCHESTRATOR_URL
+from src.config import ORCHESTRATOR_API
 from src.config import http_client
 
 router = APIRouter()
@@ -23,7 +23,7 @@ async def execute(request: Request) -> StreamingResponse:
     async def stream_events():
         async with http_client.stream(
             "POST",
-            f"{ORCHESTRATOR_URL}/execute",
+            f"{ORCHESTRATOR_API}/execute",
             json=body,
             timeout=120.0,
         ) as resp:

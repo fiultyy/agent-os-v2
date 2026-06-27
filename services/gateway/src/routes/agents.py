@@ -6,7 +6,7 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
-from src.config import ORCHESTRATOR_URL
+from src.config import ORCHESTRATOR_API
 from src.config import http_client
 
 router = APIRouter()
@@ -15,7 +15,7 @@ router = APIRouter()
 @router.get("/")
 async def list_agents() -> list[dict[str, Any]]:
     """List all agents."""
-    resp = await http_client.get(f"{ORCHESTRATOR_URL}/agents")
+    resp = await http_client.get(f"{ORCHESTRATOR_API}/agents")
     resp.raise_for_status()
     return resp.json()
 
@@ -24,7 +24,7 @@ async def list_agents() -> list[dict[str, Any]]:
 async def create_agent(request: Request) -> dict[str, Any]:
     """Create a new agent."""
     body = await request.json()
-    resp = await http_client.post(f"{ORCHESTRATOR_URL}/agents", json=body)
+    resp = await http_client.post(f"{ORCHESTRATOR_API}/agents", json=body)
     resp.raise_for_status()
     return resp.json()
 
@@ -32,7 +32,7 @@ async def create_agent(request: Request) -> dict[str, Any]:
 @router.get("/{agent_id}")
 async def get_agent(agent_id: str) -> dict[str, Any]:
     """Get agent details."""
-    resp = await http_client.get(f"{ORCHESTRATOR_URL}/agents/{agent_id}")
+    resp = await http_client.get(f"{ORCHESTRATOR_API}/agents/{agent_id}")
     resp.raise_for_status()
     return resp.json()
 
@@ -40,7 +40,7 @@ async def get_agent(agent_id: str) -> dict[str, Any]:
 @router.delete("/{agent_id}")
 async def delete_agent(agent_id: str) -> dict[str, Any]:
     """Delete an agent."""
-    resp = await http_client.delete(f"{ORCHESTRATOR_URL}/agents/{agent_id}")
+    resp = await http_client.delete(f"{ORCHESTRATOR_API}/agents/{agent_id}")
     resp.raise_for_status()
     return resp.json()
 
@@ -54,7 +54,7 @@ async def run_agent(agent_id: str, request: Request) -> StreamingResponse:
     async def event_stream():
         async with http_client.stream(
             "POST",
-            f"{ORCHESTRATOR_URL}/execute",
+            f"{ORCHESTRATOR_API}/execute",
             json=body,
             timeout=60.0,
         ) as resp:
