@@ -28,6 +28,7 @@ export default function Home() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const addMemoryEvent = useDebugStore((s) => s.addMemoryEvent);
+  const addMessage = useDebugStore((s) => s.addMessage);
 
   useEffect(() => {
     fetch("/api/agents")
@@ -90,6 +91,10 @@ export default function Home() {
           } else if (event.event === "memory_event") {
             // Forward memory lifecycle events to the debug store
             addMemoryEvent(event.data as unknown as import("@/stores/debugStore").MemoryEvent);
+          } else if (event.event === "agent_message") {
+            // L4: Agent 间通信消息 → CommunicationPanel
+            // (L2 后端 register_delivery_callback 桥 AgentMessage 到此 SSE 事件)
+            addMessage(event.data as unknown as import("@/stores/debugStore").CommMessage);
           }
         }
       );
