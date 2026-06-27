@@ -76,7 +76,7 @@
 
 ## 4. 分阶段收敛
 
-### Phase 0 — 全链路解锁【L1】· 纯接线零设计
+### Phase 0 — 全链路解锁【L1】· 纯接线零设计 ✅ 已完成(2026-06-27,commit `124bc67` / merge `965051c`)
 
 **目标**:解除生产全 404。gateway→orchestrator 所有业务转发补 `/v1` 前缀(18 处:agents.py 5 + chat 1 + execute 1 + memories 4 + messages 2 + kg 3 + debug 2)。
 
@@ -88,7 +88,7 @@
   - curl 经 gateway:8000 验证 7 端点非 404(GET /agents 返回 200 且 JSON 结构合法 —— **不依赖具体 agent 内容**,与 L2 持久化解耦)
   - `cd services/gateway && pytest tests/test_routes.py`
 
-### Phase 1 — MVP 骨架通电【L2(含持久化)+ L3 + L4】· orchestrator 热点串行
+### Phase 1 — MVP 骨架通电【L2(含持久化)+ L3 + L4】· 进行中(L3 ✅ `be4688f` / L4 ✅ `b6026cc` 已 merge 主线;L2 pane 并行实施中)
 
 **目标**:点亮 MVP 的可用与可观测。三线并行启动,但 orchestrator 热点(chat.py/engine.py/_state.py)由 L2 独占串行。
 
