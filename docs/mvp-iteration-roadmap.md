@@ -144,7 +144,7 @@
 | 里程碑 | 内容 | 前置 |
 |---|---|---|
 | **记忆进化通电**(第一优先) | 蝴蝶翼写侧接线 · PitFail Verifier hook + ContextCompiler.recall | Phase 3 收敛后;与记忆簇后续串行(共享 backward_writer/engine) |
-| **LLM function-calling** | ✅ 完成(`c248894` / merge `5f9b22b`):LLMClient chat tools 参数 + tool_use 解析(anthropic 原生 content_block + openai tool_calls 兼容)+ 正则降级兜底 + 18 工具 schema 完整。6 测试绿,626 passed 零回归 | done(多轮 tool_use loop 待 P1 扩展) |
+| **LLM function-calling + 多轮 loop** | ✅ 完成(FC `c248894`/merge `5f9b22b` + 多轮 `8cdc48b`/merge `7a87b68`):chat tools 参数 + tool_use 解析(anthropic 原生 + openai 兼容)+ 正则降级兜底 + 18 工具 schema;多轮(tool→llm 循环 + tool_result 回注 + MAX_TOOL_ITERATIONS + 死循环 bugfix)。12 测试绿,639 passed 零回归 | done |
 | **多 Agent 编排** | ParallelNode/Subgraph/FanIn 接生产图(先修 _resolve_next)+ 信任域 ScopeManager + Checkpoint resume + meta create_subagent | 图引擎单测基线(Phase 1 已补) |
 | **辅助服务命运决策** | observer/rm/pm 通电接入 or 归档;gRPC 视需求 | 视 MVP 反馈 |
 
