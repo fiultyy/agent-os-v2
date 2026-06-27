@@ -38,7 +38,11 @@ knowledge_graph: Any = None
 # NOTE(D-27): vector_store and embedding_provider removed.
 # MemoryService uses KG-based structured recall.
 memory_service: Any = None
-# pg_store removed — was never fully wired; keeping None for graceful if-check compatibility
+# pg_store: PostgreSQL-backed agent persistence (PostgresStore). Wired by
+# engine.py at startup when DATABASE_URL is set — the engine is built at import
+# time and ``await initialize()`` runs on the startup hook (failure degrades to
+# None). Every call-site guards with ``is not None`` and falls back to the
+# in-memory ``agents`` dict, so None stays a safe default.
 pg_store: Any = None
 
 # ── Context & compression ──────────────────────────────────────────
@@ -93,9 +97,8 @@ neural_hook: Any = None
 memory_event_subscribers: list[asyncio.Queue[str]] = []
 
 
-def emit_memory_event(event: str, details: dict[str, Any]) -> None:
-    """Broadcast a memory lifecycle event to all SSE subscribers."""
-    sse_msg = sse("memory_event", {"event": event, **details})
+def _push_sse(sse_msg: str) -> None:
+    """Push a formatted SSE string to every subscriber queue (pruning full ones)."""
     dead: list[asyncio.Queue[str]] = []
     for q in memory_event_subscribers:
         try:
@@ -104,6 +107,30 @@ def emit_memory_event(event: str, details: dict[str, Any]) -> None:
             dead.append(q)
     for q in dead:
         memory_event_subscribers.remove(q)
+
+
+def emit_memory_event(event: str, details: dict[str, Any]) -> None:
+    """Broadcast a memory lifecycle event to all SSE subscribers."""
+    _push_sse(sse("memory_event", {"event": event, **details}))
+
+
+def emit_agent_message(message: Any, recipient_id: str) -> None:
+    """Bridge an inter-agent AgentMessage onto the SSE stream.
+
+    Registered as a CommunicationBus delivery callback by engine.py so direct
+    agent-to-agent deliveries surface as ``agent_message`` SSE events over the
+    same subscriber stream as memory events. The front-end dispatch of these
+    (rendering an agent_message in the UI) is L4; this is the back-end bridge.
+    """
+    _push_sse(sse("agent_message", {
+        "message_id": getattr(message, "id", ""),
+        "sender_id": getattr(message, "sender_id", ""),
+        "recipient_id": recipient_id,
+        "session_id": getattr(message, "session_id", ""),
+        "workspace_id": getattr(message, "workspace_id", ""),
+        "content": getattr(message, "content", ""),
+        "message_type": str(getattr(message, "message_type", "")),
+    }))
 
 
 def subscribe_memory_events() -> asyncio.Queue[str]:

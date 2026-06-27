@@ -229,8 +229,15 @@ async def _node_llm(state: GraphState) -> GraphState:
 
 async def _node_tool(state: GraphState) -> GraphState:
     """Execute a tool call via ToolExecutor."""
-    tool_name = state.context.get("tool_call", "web_search")
-    tool_args = state.context.get("tool_args", {"query": state.input})
+    # Default to a *registered* tool whose signature matches the args. The old
+    # defaults (``web_search`` + ``{"query": ...}``) were doubly broken:
+    # ``web_search`` is not in the registry so the executor always returned
+    # "not found", and ``{"query": ...}`` did not match any handler signature
+    # (http_get(url,...) / file_read(path,...)). ``file_read`` is registered by
+    # engine.py and degrades gracefully (File not found) for arbitrary input,
+    # so a mis-routed tool call no longer forces the error branch.
+    tool_name = state.context.get("tool_call", "file_read")
+    tool_args = state.context.get("tool_args", {"path": state.input})
 
     result = await _state.tool_executor.execute(tool_name, tool_args)
 
@@ -442,6 +449,10 @@ async def execute(req: ExecuteRequest) -> StreamingResponse:
         return JSONResponse({"error": "Agent not found"}, status_code=404)
 
     session_id = req.session_id or str(uuid.uuid4())
+    # 通信桥:把执行 agent 注册进 session,使 broadcast 收件人非空。否则
+    # on_node_complete 的 communication_bus.broadcast 在空 session 下投递数为 0
+    # (broadcast 跳过 sender,且 _session_members 里没有该 session 的成员)。
+    _state.communication_bus.register_agent(req.agent_id, session_id)
     await _state.memory_event_bus.emit(
         EventType.SESSION_START,
         SessionContext(agent_id=req.agent_id, session_id=session_id),

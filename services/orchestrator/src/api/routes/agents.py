@@ -25,11 +25,25 @@ async def create_agent(req: CreateAgentRequest) -> dict:
 
 @router.get("/agents")
 async def list_agents() -> list[dict]:
+    # Prefer the persisted source of truth when PG is wired; any read error
+    # degrades silently to the in-memory dict so the endpoint never 500s.
+    if _state.pg_store is not None:
+        try:
+            return await _state.pg_store.list_agents()
+        except Exception:
+            pass
     return list(_state.agents.values())
 
 
 @router.get("/agents/{agent_id}")
 async def get_agent(agent_id: str) -> dict:
+    if _state.pg_store is not None:
+        try:
+            agent = await _state.pg_store.get_agent(agent_id)
+            if agent is not None:
+                return agent
+        except Exception:
+            pass
     agent = _state.agents.get(agent_id)
     if not agent:
         return JSONResponse({"error": "Agent not found"}, status_code=404)
