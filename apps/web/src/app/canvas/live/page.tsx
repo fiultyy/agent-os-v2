@@ -13,22 +13,30 @@ import { Wifi, WifiOff } from "lucide-react";
 export default function CanvasLivePage() {
   const connected = useCanvasStore(s => s.connected);
   const sessionId = useCanvasStore(s => s.sessionId);
+  const setSessionId = useCanvasStore(s => s.setSessionId);
   const [inputSessionId, setInputSessionId] = useState("");
 
-  // WS 连接管理：从 URL 参数或 store 读取 session_id
+  // WS 连接管理：从 URL 参数或 store 读取 session_id；保证 sid 非空以闭环
+  // BranchManager 的 session_id（之前 store.sessionId 常为 null → branch 创建恒空）。
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const sid = params.get("session_id") || sessionId;
     if (sid) {
+      // Write into store up-front so synchronous consumers (BranchManager HTTP
+      // calls fired before ws.onopen) already see a non-empty session_id.
+      setSessionId(sid);
       canvasWsClient.connect(sid);
     }
     // 不在 unmount 时断连，保持后台运行
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Session 输入 → 连接
   const handleConnect = () => {
-    if (inputSessionId.trim()) {
-      canvasWsClient.connect(inputSessionId.trim());
+    const sid = inputSessionId.trim();
+    if (sid) {
+      setSessionId(sid);
+      canvasWsClient.connect(sid);
     }
   };
 

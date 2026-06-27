@@ -30,7 +30,12 @@ export class CanvasWSClient {
       console.log("[CanvasWS] Connected to", sessionId);
       // Reset backoff on successful connection
       this.reconnectDelay = 1000;
-      useCanvasStore.getState().setConnected(true);
+      const store = useCanvasStore.getState();
+      store.setConnected(true);
+      // Write the connected sessionId back into the store so downstream
+      // (BranchManager HTTP calls, tabs) always have a non-empty session_id
+      // even when the page was opened without ?session_id=.
+      store.setSessionId(sessionId);
     };
 
     this.ws.onmessage = (event) => {

@@ -27,6 +27,7 @@ export interface CanvasStore {
   addEvent: (e: CanvasEvent) => void;
   clearEvents: () => void;
   setConnected: (v: boolean) => void;
+  setSessionId: (sid: string) => void;
   setLOD: (l: LODLevel) => void;
 }
 
@@ -171,5 +172,6 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
   }),
   clearEvents: () => set({ events: [], ticks: new Map() }),
   setConnected: (v) => set({ connected: v }),
+  setSessionId: (sid) => set({ sessionId: sid }),
   setLOD: (lod) => set({ lod }),
 }));
