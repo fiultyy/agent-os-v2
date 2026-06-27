@@ -230,6 +230,17 @@ if _pg_url:
 else:
     _state.pg_store = None
 
+# PitFail 通电(异步零依赖):模块级实例化 PitfailRegistry。构造即 _init_db 建
+# 表,无需 async initialize(区别于 pg_store 的 startup-hook 模式)。失败降级为
+# None —— chat.py 工具失败分支与 /v1/pitfall API 均 guard ``is not None``。
+try:
+    from src.pitfail import PitfailRegistry
+    _state.pitfail_registry = PitfailRegistry(os.getenv("PITFALLS_DB", "data/pitfalls.db"))
+    logger.info("PitfailRegistry wired (db=%s)", _state.pitfail_registry.db_path)
+except Exception:
+    logger.warning("PitfailRegistry init failed — degrading pitfail_registry to None", exc_info=True)
+    _state.pitfail_registry = None
+
 # P1: memory event bus + default lifecycle hook. chat.py emits lifecycle
 # events instead of calling memory_service/memory_migrator directly.
 _state.memory_event_bus = MemoryEventBus()
@@ -482,6 +493,7 @@ from src.api.routes.agents import router as agents_router
 from src.api.routes.memory import router as memory_router
 from src.api.routes.chat import router as chat_router, root_router_health
 from src.api.routes.entities import router as entities_router
+from src.api.routes.pitfail import router as pitfail_router
 from src.api.routes.canvas import router as canvas_router, init_canvas_routes
 from src.canvas.event_store import CanvasEventStore
 from src.canvas.emitter import SessionEventEmitter
@@ -503,6 +515,7 @@ app.include_router(agents_router, prefix="/v1")
 app.include_router(memory_router, prefix="/v1")
 app.include_router(chat_router, prefix="/v1")
 app.include_router(entities_router, prefix="/v1")
+app.include_router(pitfail_router, prefix="/v1")
 
 
 # ── CLI entry point ────────────────────────────────────────────────

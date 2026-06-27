@@ -366,6 +366,23 @@ async def _node_llm(state: GraphState) -> GraphState:
     return state
 
 
+def _classify_tool_error(error_msg: str) -> str:
+    """粗粒度工具错误分类(供 PitFail error_type 维度)。
+
+    从 error_msg 关键词推断 timeout / file_not_found / permission_denied,否则
+    归为通用 tool_error。match(tool_name, error_type) 依赖稳定 error_type,故分
+    类规则保持简单确定性(无模糊启发式)。
+    """
+    _msg = (error_msg or "").lower()
+    if "timeout" in _msg or "timed out" in _msg:
+        return "timeout"
+    if "not found" in _msg or "no such file" in _msg or "filenotfound" in _msg:
+        return "file_not_found"
+    if "permission" in _msg or "denied" in _msg:
+        return "permission_denied"
+    return "tool_error"
+
+
 async def _node_tool(state: GraphState) -> GraphState:
     """Execute a tool call via ToolExecutor."""
     # Default to a *registered* tool whose signature matches the args. The old
@@ -383,6 +400,24 @@ async def _node_tool(state: GraphState) -> GraphState:
     if result["status"] != "success":
         error_msg = result.get("error", "Unknown error")
         state.context["tool_result"] = f"[Tool error] {tool_name}: {error_msg}"
+        # PitFail 通电:工具失败 → 复发计数(match 命中)或新记录(record)。
+        # 全程 try/except 包裹 —— pitfail 任何异常都不影响主工具流程(零回归)。
+        if _state.pitfail_registry is not None:
+            try:
+                _pf_err_type = _classify_tool_error(error_msg)
+                _existing = _state.pitfail_registry.match(tool_name, _pf_err_type)
+                if _existing:
+                    _state.pitfail_registry.increment_recurrence(_existing[0].id)
+                else:
+                    from src.pitfail import PitfallRecord
+                    _state.pitfail_registry.record(PitfallRecord(
+                        id="", file_path=tool_name, error_type=_pf_err_type,
+                        symptom=error_msg, root_cause=error_msg, fix="",
+                        tags=[tool_name],
+                    ))
+            except Exception:
+                # pitfail 记录失败绝不能阻断主工具执行 —— 静默降级。
+                pass
     else:
         state.context["tool_result"] = str(result["output"])
 
