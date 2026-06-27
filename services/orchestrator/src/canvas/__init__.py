@@ -19,8 +19,6 @@ from src.canvas.events import (
     TickCompletedEvent,
     BranchCreatedEvent,
     BranchMergedEvent,
-    ScoringSignalEvent,
-    CommitteeVoteEvent,
 )
 from src.canvas.tick import Tick, TickStatus
 from src.canvas.branch import Branch, BranchStatus
@@ -38,8 +36,6 @@ __all__ = [
     "TickCompletedEvent",
     "BranchCreatedEvent",
     "BranchMergedEvent",
-    "ScoringSignalEvent",
-    "CommitteeVoteEvent",
     "Tick",
     "TickStatus",
     "Branch",

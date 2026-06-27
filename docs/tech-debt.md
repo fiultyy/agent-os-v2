@@ -1,8 +1,9 @@
 # 技术债务清单 — Agent OS
 
-> 最后更新: 2026-06-20
+> 最后更新: 2026-06-27
 > 当前评分: 9.5/10, 完成度 97%
 > P4 新增: TD-007/008/009(记忆迭代文档对齐,标 P2)
+> Phase 2 L6: TD-005 移入已解决;新增 ✅TD-R15(死代码清理)
 
 ## 低优先级（不影响功能）
 
@@ -29,12 +30,6 @@
 - **问题**: `BaseProvider.complete()` 和 `stream()` 抛 `NotImplementedError`
 - **影响**: 无（抽象基类标准模式）
 - **备注**: 可改为 ABC + @abstractmethod 更规范
-
-### TD-005: InMemoryStore 无持久化
-- **文件**: `services/orchestrator/src/memory/store.py`
-- **问题**: 所有数据在内存中，重启丢失
-- **影响**: 无法用于生产
-- **修复**: Phase 9 SQLiteStore 替代
 
 ### TD-006: JWT 黑名单内存存储
 - **文件**: `services/gateway/src/routes/auth.py:30`
@@ -81,3 +76,18 @@
 ### ✅ TD-R12: import json 在循环内 (已修复 round 3)
 ### ✅ TD-R13: Header.tsx TODO (已修复 round 3)
 ### ✅ TD-R14: Dockerfile public 目录 (已修复 round 3)
+### ✅ TD-005: InMemoryStore 无持久化 (已修复 — L2 落地 SQLiteStore)
+- **文件**: `services/orchestrator/src/memory/sqlitestore.py`
+- **修复**: `SQLiteStore`(持久化 SQLite 实现)已落地并经 engine 启动注入;`InMemoryStore` 保留为开发/测试回退。对应架构 D-15/D-19/D-20 的占位实现同步清理(见 TD-R15)。
+
+### ✅ TD-R15: 死代码清理 (已修复 Phase 2 L6, 2026-06-27)
+- **范围**: 移除早期占位/mock 实现,消除 __init__.py re-export 对死模块的依赖
+- **删除**:
+  - `services/orchestrator/src/control/intercept_layer.py` + `reasoning_layer.py`(D-15 三层控制占位,control/__init__.py 清空 re-export)
+  - `services/orchestrator/src/context/coding_context.py` + `codebase_context.py` + `git_context.py` + `pitfail_context.py`(D-19/D-20 CAContextCoding 六层 Builder 占位,context/__init__.py 仅保留 CompiledContext/ContextCompiler/ContextManager)
+  - `context/manager.py` 删 write/compress/isolate/get_isolated_context(无生产调用者,保留 select)
+  - `graph/nodes.py` 删 LLMNode/ToolCallNode(mock 节点,保留 GraphNode/FunctionNode)
+  - `canvas/events.py` 删 ScoringSignalEvent/CommitteeVoteEvent(canvas/__init__.py 同步移除 import + __all__)
+  - `apps/web/src/components/canvas/nodes/CommitteeVoteNode.tsx` + TickCanvas nodeTypes 注册清理
+- **验证**: engine import 冒烟通过 + grep 死符号零残留 + pytest 整体回归无 ImportError
+- **关联**: architecture.md D-15/D-19/D-20 状态行已标注"实现代码已移除(defer),待模型落地重建"

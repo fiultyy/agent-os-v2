@@ -1362,8 +1362,8 @@ backward_memories ─┘                        ↓                             
 - **决策**: 正向翼（归纳）↔ 反向翼（锚定）双向联想贯穿所有层级
 - **依据**: 蝴蝶思考架构 — 正向翼/反向翼双向联想模型
 - **链路**: Memory → ContextCompiler → Profile → ToolExecutor → Canvas → CommunicationBus
-- **实现**: 待启动
-- **状态**: 设计阶段
+- **实现**: 待启动（defer）
+- **状态**: 设计阶段。Phase 2 L6 死代码清理移除了早期占位实现（InterceptLayer/ReasoningLayer），正式实现待 LIF/蝴蝶翼模型落地后重建
 
 ### D-16: Meta Agent 机制抽象 🆕
 - **决策**: Meta Agent = Subagent + TeamAgent + Sandbox + Conditional Spawn + Parallel
@@ -1393,8 +1393,8 @@ backward_memories ─┘                        ↓                             
 - **L2 特化**: Coding SOUL（先规划后代码、小步提交、error→分析）
 - **L3 特化**: 项目结构图 + 变更历史 + Pit Fail + 测试状态
 - **L4 特化**: git status/diff + linter + 测试覆盖率
-- **实现**: 待启动
-- **状态**: 设计阶段
+- **实现**: 待启动（defer）
+- **状态**: 设计阶段。Phase 2 L6 死代码清理移除了早期占位实现（CAContextCoding 六层 Builder、Codebase/Git/Pitfail ContextBuilder），正式实现待 CA 六层模型落地后重建
 
 ### D-20: Pit Fail 踩坑档案 🆕
 - **决策**: L3 Memory 包含 Pit Fail，记录踩坑的根因和修复方案
@@ -1402,8 +1402,8 @@ backward_memories ─┘                        ↓                             
 - **组织**: file_path + error_type + symptom + root_cause + fix + recurrence_count
 - **召回**: ContextCompiler.recall() 时返回 relevant Pit Fail subset
 - **注入时机**: 每次 tool_call 产生前，Verifier 可见历史坑点
-- **实现**: 待启动
-- **状态**: 设计阶段
+- **实现**: 待启动（defer）
+- **状态**: 设计阶段。Phase 2 L6 死代码清理移除了早期占位实现（PitfailContextBuilder），正式实现待 PitFail Registry 落地后重建
 
 ### D-21: Sideline Tool Call 控制层次 🆕
 - **决策**: Sideline 对 Tool Call 的三层控制：约束(Guardrail) → 拦截(Interception) → 推理(Reasoning)

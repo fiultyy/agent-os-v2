@@ -4,7 +4,6 @@ import { useMemo, useRef } from "react";
 import { ReactFlow, Background, Controls, MiniMap, type Node, type Edge } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { TickNode } from "./nodes/TickNode";
-import { CommitteeVoteNode } from "./nodes/CommitteeVoteNode";
 import { ToolNode } from "./nodes/ToolNode";
 import { ToolResultNode } from "./nodes/ToolResultNode";
 import { TabBar } from "./TabBar";
@@ -16,7 +15,6 @@ import type { LODLevel, CanvasEvent, ToolCallInfo } from "@/types/canvas";
 // ── W-2: Stable nodeTypes outside component body ──────────────
 const nodeTypes = {
   tickNode: TickNode,
-  committeeVoteNode: CommitteeVoteNode,
   toolNode: ToolNode,
   toolResultNode: ToolResultNode,
 };
