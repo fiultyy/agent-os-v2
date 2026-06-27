@@ -13,13 +13,15 @@
 
 ### boundary_in(MVP 必达)
 
-1. **gateway→orchestrator 全量转发补 `/v1` 前缀**(解除生产全 404)+ 前端 `/api/*` → next rewrite → gateway → orchestrator `/v1/*` **三段链路端到端可达**(审查补:原规划漏了前端 /api 这段)
-2. `/v1/chat` 单轮对话 + `/v1/execute` SSE 流式(主路径已实现,只差 gateway 接线)
-3. **前端实时通路点亮**:Canvas WS 经 `next.config` rewrite 可达 orchestrator `/ws/canvas`;`canvasStore.sessionId` 闭环(WS 连接成功回写 store,且 live 页 sid 来源明确);**Layer2 协议对齐** —— ⚠️ 实际是前端发 `type:'layer2.submit'`、后端 `canvas.py:196` 读 `cmd`,统一为前端改 `cmd`(审查纠正:原规划方向写反)
-4. **Agent CRUD 经 gateway 可用且持久化重启不丢** —— ⚠️ 非"一行装配":`_state.py:42` 注释 `pg_store removed — was never fully wired`。需**双向通电**:engine 启动期实例化 PostgresStore + `initialize()` + **启动 hook 从 PG 灌回 `_state.agents`**(审查 critical:无此灌回则重启验收必假阳性)+ `agents.py` 路由改读 pg
-5. **L3 工具链最小通电**:engine 实例化 ToolRegistry 并 register 已实现工具;⚠️ **修正 `chat.py:232-233` 默认 `tool_name=web_search`(必 not found)与 `tool_args={query:...}`(与 handler 签名 `http_get(url,...)` 不匹配)**;Guardrail.check_output 支持 dict 脱敏;system prompt 引导 LLM 输出 `tool_call:<name>`(否则正则永不命中)
-6. **Agent 间通信面板点亮**:`register_agent` 在 session 建立时调用(使 broadcast 收件人非空)+ `register_delivery_callback` 桥 AgentMessage 到 chat.py SSE + 前端 dispatch `agent_message` 进 debugStore
-7. **可观测基线**:执行历史/通信面板有真实数据;gateway 转发矩阵回归测试(防 `/v1` 前缀漂移)
+> ✅ **迭代后状态(2026-06-28 回填)**:下述 7 条目标经 Phase 0/1 + defer(FC/多轮/PitFail)**全部达成**。各条保留作"目标/设计说明",末尾 ✅ 标实际交付(commit 见 §4/§5)。唯一未跑:Phase 3 容器端到端验收(真 PG+LLM+前端)。
+
+1. **gateway→orchestrator 全量转发补 `/v1` 前缀**(解除生产全 404)+ 前端 `/api/*` → next rewrite → gateway → orchestrator `/v1/*` **三段链路端到端可达**(审查补:原规划漏了前端 /api 这段) — ✅ Phase 0(`124bc67`,config 加 ORCHESTRATOR_API + 18 处改引用 + 首个 gateway 回归测试)
+2. `/v1/chat` 单轮对话 + `/v1/execute` SSE 流式(主路径已实现,只差 gateway 接线) — ✅ Phase 0 接线 + defer FC 升级为 LLM 原生 function-calling
+3. **前端实时通路点亮**:Canvas WS 经 `next.config` rewrite 可达 orchestrator `/ws/canvas`;`canvasStore.sessionId` 闭环(WS 连接成功回写 store,且 live 页 sid 来源明确);**Layer2 协议对齐** —— ⚠️ 实际是前端发 `type:'layer2.submit'`、后端 `canvas.py:196` 读 `cmd`,统一为前端改 `cmd`(审查纠正:原规划方向写反) — ✅ L3(`be4688f`)
+4. **Agent CRUD 经 gateway 可用且持久化重启不丢** —— ⚠️ 非"一行装配":`_state.py:42` 注释 `pg_store removed — was never fully wired`。需**双向通电**:engine 启动期实例化 PostgresStore + `initialize()` + **启动 hook 从 PG 灌回 `_state.agents`**(审查 critical:无此灌回则重启验收必假阳性)+ `agents.py` 路由改读 pg — ✅ L2(`3d5532b`,PostgresStore + restore_agents_from_pg 双向,本地 engine import 冒烟 OK)
+5. **L3 工具链最小通电**:engine 实例化 ToolRegistry 并 register 已实现工具;⚠️ **修正 `chat.py:232-233` 默认 `tool_name=web_search`(必 not found)与 `tool_args={query:...}`(与 handler 签名 `http_get(url,...)` 不匹配)**;Guardrail.check_output 支持 dict 脱敏;system prompt 引导 LLM 输出 `tool_call:<name>`(否则正则永不命中) — ✅ L2(18 工具 register + 默认对齐 + Guardrail dict)+ defer FC(原生 tool_use 取代正则启发式)
+6. **Agent 间通信面板点亮**:`register_agent` 在 session 建立时调用(使 broadcast 收件人非空)+ `register_delivery_callback` 桥 AgentMessage 到 chat.py SSE + 前端 dispatch `agent_message` 进 debugStore — ✅ L2 通信桥(`register_delivery_callback`→SSE)+ L4 前端 dispatch(`b6026cc`)
+7. **可观测基线**:执行历史/通信面板有真实数据;gateway 转发矩阵回归测试(防 `/v1` 前缀漂移) — ✅ gateway 转发回归测试(6 passed)+ 前端实时通路就绪(端到端真实数据待 Phase 3 容器)
 
 ### boundary_out(明确排除)
 
@@ -37,6 +39,8 @@
 ---
 
 ## 2. 现状基线(对抗 verify 已确诊)
+
+> ✅ **迭代后状态(2026-06-28 回填)**:下述"接线断裂"经 Phase 0/1 + defer(FC/多轮/PitFail)**全部修复** —— gateway `/v1` 解锁、前端 WS/Layer2 通路、工具链 18 工具 register、CommunicationBus broadcast 投递、PostgresStore 持久化双向(写 + 启动灌回)、LLM 原生 function-calling + 多轮 tool_use loop、PitFail 通电。下列诊断保留作**"迭代前基线"档案**(实际完成状态见 §4);末尾"真正生产就绪"清单仍准。
 
 骨架丰满、接线稀疏的中期原型。核心对话链路(`orchestrator /v1/chat` + `/v1/execute` SSE + LLM + memory 召回)在 orchestrator 单体可跑,但:
 
@@ -124,7 +128,7 @@
 - **merge_order**:L6 最后合并;协调 `context/__init__.py`(若记忆簇后续也动 context)
 - **validation**:`grep -r 'InterceptLayer|ReasoningLayer|CAContextCoding|PitfallContextBuilder|LLMNode|ToolCallNode' services/orchestrator/src/` 零命中(自身定义已删);`pytest -q` 无 ImportError;`cd apps/web && npm run build` 无报错
 
-### Phase 3 — MVP 验收 + 基线收敛【L1+L2+L3+L4+L6 合并主分支】· 验收脚本就绪(`docs/mvp-acceptance.md`);本地冒烟装配完整(engine import OK + 18 工具 + pitfail/memory/kg,orchestrator 635 passed,gateway 6 passed);**容器端到端待跑**(真 PG + LLM + 前端)
+### Phase 3 — MVP 验收 + 基线收敛【L1+L2+L3+L4+L6 合并主分支】· 验收脚本就绪(`docs/mvp-acceptance.md`);本地冒烟装配完整(engine import OK + 18 工具 + pitfail/memory/kg,orchestrator **635 passed / 15 baseline failed**(butterfly+meta defer + 环境,零新增),gateway 6 passed);**容器端到端待跑**(真 PG + LLM + 前端)
 
 **MVP 交付闸门** —— 端到端五步(可复现命令记入 `docs/mvp-acceptance.md`):
 
@@ -144,7 +148,7 @@
 | 里程碑 | 内容 | 前置 |
 |---|---|---|
 | **记忆进化通电**(第一优先) | ✅ PitFail `92be2cd`/merge `df225ca`:registry 实例化 + 工具失败 hook(match→increment复发 / record新)+ /v1/pitfall API(4 GET)+ _classify_tool_error,9 测试绿;蝴蝶翼写侧接线待(记忆簇后续,蝴蝶翼红线需先与记忆迭代分支协调) | — |
-| **LLM function-calling + 多轮 loop** | ✅ 完成(FC `c248894`/merge `5f9b22b` + 多轮 `8cdc48b`/merge `7a87b68`):chat tools 参数 + tool_use 解析(anthropic 原生 + openai 兼容)+ 正则降级兜底 + 18 工具 schema;多轮(tool→llm 循环 + tool_result 回注 + MAX_TOOL_ITERATIONS + 死循环 bugfix)。12 测试绿,639 passed 零回归 | done |
+| **LLM function-calling + 多轮 loop** | ✅ 完成(FC `c248894`/merge `5f9b22b` + 多轮 `8cdc48b`/merge `7a87b68`):chat tools 参数 + tool_use 解析(anthropic 原生 + openai 兼容)+ 正则降级兜底 + 18 工具 schema;多轮(tool→llm 循环 + tool_result 回注 + MAX_TOOL_ITERATIONS + 死循环 bugfix)。12 测试绿;实测 **635 passed / 15 baseline failed**(butterfly+meta defer + 环境,零新增,2026-06-28) | done |
 | **多 Agent 编排** | ParallelNode/Subgraph/FanIn 接生产图(先修 _resolve_next)+ 信任域 ScopeManager + Checkpoint resume + meta create_subagent | 图引擎单测基线(Phase 1 已补) |
 | **辅助服务命运决策** | observer/rm/pm 通电接入 or 归档;gRPC 视需求 | 视 MVP 反馈 |
 

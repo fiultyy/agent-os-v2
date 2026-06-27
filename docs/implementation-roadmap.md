@@ -3,8 +3,8 @@
 > ⚠️ **本文已失效**(2026-06-27):"98% 完成"声明经代码全景对抗 verify 证实严重失实 —— 大量标 ✅ 的 D-* 实为"完整实现却零接线"的孤岛(如 D-21 control / D-19 CAContextCoding / D-15 蝴蝶翼),且完全漏记致命断裂(gateway→orchestrator 全量 `/v1` 缺失致生产全 404、前端 Canvas WS 三断、L3 工具链悬空、CommunicationBus 空壳)。**已被 [`docs/mvp-iteration-roadmap.md`](mvp-iteration-roadmap.md) 取代**。本文保留作历史记录。
 
 > 基于 architecture.md + 代码审查（2026-04-21）
-> **当前完成度**: 98%（D-03~D-29 + P4 recall + API /v1/ + 记忆迭代 P0-P3，2026-06-20）
-> **目标**: 100%
+> **当前完成度(❌ 失实声明,见顶部红标)**: 原文 "98%(D-03~D-29 + P4 recall + API /v1/ + 记忆迭代 P0-P3,2026-06-20)" —— 经 2026-06-27 代码全景对抗 verify 证实**严重失实**(大量标 ✅ 的 D-* 为"完整实现却零接线"孤岛),实际进度以 [`docs/mvp-iteration-roadmap.md`](mvp-iteration-roadmap.md) §4 为准。
+> **目标**: ~~100%~~ 已重定向为 MVP 北极星(端到端可跑通,见 mvp-iteration-roadmap.md §1)
 
 ---
 
