@@ -124,7 +124,7 @@
 - **merge_order**:L6 最后合并;协调 `context/__init__.py`(若记忆簇后续也动 context)
 - **validation**:`grep -r 'InterceptLayer|ReasoningLayer|CAContextCoding|PitfallContextBuilder|LLMNode|ToolCallNode' services/orchestrator/src/` 零命中(自身定义已删);`pytest -q` 无 ImportError;`cd apps/web && npm run build` 无报错
 
-### Phase 3 — MVP 验收 + 基线收敛【L1+L2+L3+L4+L6 合并主分支】
+### Phase 3 — MVP 验收 + 基线收敛【L1+L2+L3+L4+L6 合并主分支】· 验收脚本就绪(`docs/mvp-acceptance.md`);本地冒烟装配完整(engine import OK + 18 工具 + pitfail/memory/kg,orchestrator 635 passed,gateway 6 passed);**容器端到端待跑**(真 PG + LLM + 前端)
 
 **MVP 交付闸门** —— 端到端五步(可复现命令记入 `docs/mvp-acceptance.md`):
 
