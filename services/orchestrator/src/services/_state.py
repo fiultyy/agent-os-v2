@@ -45,6 +45,13 @@ memory_service: Any = None
 # in-memory ``agents`` dict, so None stays a safe default.
 pg_store: Any = None
 
+# ── PitFail (通电) ──────────────────────────────────────────────────
+# PitfailRegistry: SQLite-backed踩坑记录库。engine.py 模块级实例化(构造即
+# _init_db 建表,无需 async initialize),失败降级为 None。call-site(chat.py
+# _node_tool 工具失败分支 + /v1/pitfail API)均以 ``is not None`` guard,所以
+# None 是安全默认(零回归 —— 与 pg_store 同模式)。
+pitfail_registry: Any = None
+
 # ── Context & compression ──────────────────────────────────────────
 
 context_monitor: Any = None
