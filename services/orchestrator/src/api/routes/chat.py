@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re as _re
 import uuid
 from typing import Any, AsyncGenerator
@@ -55,6 +56,63 @@ _TOOL_INVOCATION_RE = _re.compile(
 
 def _has_tool_invocation(text: str) -> bool:
     return bool(_TOOL_INVOCATION_RE.search(text))
+
+
+# Multi-turn tool_use loop: hard ceiling on how many times the model may chain
+# tool calls before the ``llm`` conditional edge forces ``llm_synthesize``.
+# Guards against a tool-happy model looping forever (e.g. always re-emitting a
+# tool_use). Overridable via env for tuning.
+MAX_TOOL_ITERATIONS = int(os.environ.get("MAX_TOOL_ITERATIONS", "5"))
+
+
+def _inject_tool_history(
+    messages: list[dict[str, Any]],
+    history: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Append the accumulated tool_use/tool_result pairs to *messages*.
+
+    Replays each recorded round as the canonical anthropic tool-use turn
+    structure so the model observes every prior tool call and its result
+    before deciding the next step::
+
+        assistant: [{"type": "tool_use", "id", "name", "input"}]
+        user:      [{"type": "tool_result", "tool_use_id", "content"}]
+
+    The caller has already appended the user input once (first round); this
+    only adds the tool turns, so the resulting message list is a valid
+    alternating role sequence for the Anthropic channel.
+    """
+    out = list(messages)
+    for entry in history:
+        tu = entry.get("tool_use") or {}
+        tr = entry.get("tool_result", "")
+        tu_id = tu.get("id", "")
+        out.append(
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": tu_id,
+                        "name": tu.get("name", ""),
+                        "input": tu.get("input", {}) or {},
+                    }
+                ],
+            }
+        )
+        out.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tu_id,
+                        "content": tr,
+                    }
+                ],
+            }
+        )
+    return out
 
 
 def _build_native_tools() -> list[dict[str, Any]]:
@@ -159,7 +217,14 @@ async def _node_start(state: GraphState) -> GraphState:
 
 
 async def _node_llm(state: GraphState) -> GraphState:
-    """LLM processing with real API call and memory integration."""
+    """LLM processing with real API call and memory integration.
+
+    In the multi-turn tool_use loop this node is entered once after ``start``
+    (first round) and again after every ``tool`` round (``tool → llm``). Each
+    entry the model sees the *accumulated* tool history (anthropic
+    ``tool_use``/``tool_result`` content-block sequence) so it can decide
+    whether another tool call is needed or the request is answered.
+    """
     agent_id = state.agent_id
     session_id = state.session_id
     user_input = state.input
@@ -167,7 +232,26 @@ async def _node_llm(state: GraphState) -> GraphState:
     agent = _state.agents.get(agent_id)
     agent_model = agent.get("model") if agent else None
 
-    conversation = list(state.messages) + [{"role": "user", "content": user_input}]
+    # First round only: append the user input to the persistent message
+    # history. On subsequent rounds the user turn is already there and the
+    # tool loop replays as assistant tool_use + user tool_result turns (see
+    # the history injection below). Without this guard the user input would
+    # be duplicated once per loop iteration.
+    first_round = state.tool_iteration == 0
+    conversation = list(state.messages)
+    if first_round:
+        conversation.append({"role": "user", "content": user_input})
+
+    # Multi-turn tool_result回注: replay the accumulated tool_use/tool_result
+    # history as an anthropic content-block sequence so the model observes
+    # prior tool calls and their results before deciding the next step. This
+    # mirrors the canonical anthropic tool-use turn structure:
+    #   assistant: [tool_use]
+    #   user:      [tool_result]
+    # Only injected when there is history (first round has none).
+    if state.tool_use_history:
+        conversation = _inject_tool_history(conversation, state.tool_use_history)
+
     system_prompt = (agent.get("system_prompt") if agent else None) or "You are a helpful assistant."
     compiled = await _state.context_compiler.compile(
         system_prompt=system_prompt,
@@ -197,66 +281,81 @@ async def _node_llm(state: GraphState) -> GraphState:
         _state.log_execution_step("llm", state, status="error")
         return state
 
-    state.messages.append({"role": "user", "content": user_input})
+    # Persist the user turn exactly once; persist the assistant reply every
+    # round (each loop iteration produces a fresh assistant message). This
+    # keeps state.messages a faithful transcript for synthesis + memory hooks.
+    if first_round:
+        state.messages.append({"role": "user", "content": user_input})
     state.messages.append({"role": "assistant", "content": response})
     state.output = response
     state.current_node = "llm"
 
     # Native tool_use is the primary path (model emitted a tool_use block).
+    # IMPORTANT: clear any stale tool_call from a previous round first, then
+    # set it only when the model actually emitted a new tool_use this round.
+    # Without the clear, a prior round's tool_call would linger and keep
+    # ``needs_tool`` True forever, looping the graph until MAX_TOOL_ITERATIONS.
     tool_use = getattr(_state.llm_client, "last_tool_use", None)
+    state.context.pop("tool_call", None)
+    state.context.pop("tool_args", None)
     if tool_use and tool_use.get("name"):
         state.context["tool_call"] = tool_use["name"]
         state.context["tool_args"] = tool_use.get("input", {}) or {}
 
-    working_item = MemoryItem(
-        content=f"User: {user_input}\nAssistant: {response}",
-        agent_id=agent_id,
-        session_id=session_id,
-        memory_type=MemoryType.WORKING,
-        scope=MemoryScope.AGENT,
-    )
-    # migrate working→session via the event bus (was: memory_migrator call)
-    await _state.memory_event_bus.emit(
-        EventType.TURN_END,
-        TurnContext(agent_id=agent_id, session_id=session_id, working_item=working_item),
-    )
-    state.memory_refs.append(working_item.id)
-
-    # Fire-and-forget LLM semantic ingestion (IngestorAgent): after the
-    # core store (TURN_END above) completes, hand the stored memory to the
-    # ① side agent for KG entity/relation extraction + importance scoring +
-    # identity_category tagging. The hook is a no-op when the
-    # MEMORY_INGESTOR_ENABLED feature gate is off (no INGEST hook registered).
-    # P0 red-line is enforced inside the agent (origin=FOREGROUND → early
-    # return); working_item here is agent-self-sedimented.
-    _trigger_ingest(
-        memory_id=working_item.id,
-        content=working_item.content,
-        agent_id=agent_id,
-        session_id=session_id,
-        origin=MemoryOrigin.AGENT,
-    )
-
-    _trigger_kg_extraction(
-        user_message=user_input,
-        assistant_response=response,
-        session_id=working_item.id,
-    )
-
-    # Context compression via the event bus (was: inline recall/compress/
-    # store/update + emit_memory_event). The hook returns any SYNC summary
-    # ids so memory_refs stays in sync; ASYNC fires in the background.
-    compress_result = await _state.memory_event_bus.emit(
-        EventType.PRE_COMPRESS,
-        CompressContext(
+    # Memory hooks run only on the first round to avoid re-sedimenting the
+    # same user turn / re-firing KG extraction / re-compressing on every loop
+    # iteration. Subsequent rounds are tool-driven continuations; their tool
+    # results are sedimented by ``_node_tool``.
+    if first_round:
+        working_item = MemoryItem(
+            content=f"User: {user_input}\nAssistant: {response}",
             agent_id=agent_id,
             session_id=session_id,
-            accessor_id=agent_id,
-            messages=list(state.messages),
-        ),
-    )
-    if compress_result is not None and compress_result.summary_ids:
-        state.memory_refs.extend(compress_result.summary_ids)
+            memory_type=MemoryType.WORKING,
+            scope=MemoryScope.AGENT,
+        )
+        # migrate working→session via the event bus (was: memory_migrator call)
+        await _state.memory_event_bus.emit(
+            EventType.TURN_END,
+            TurnContext(agent_id=agent_id, session_id=session_id, working_item=working_item),
+        )
+        state.memory_refs.append(working_item.id)
+
+        # Fire-and-forget LLM semantic ingestion (IngestorAgent): after the
+        # core store (TURN_END above) completes, hand the stored memory to the
+        # ① side agent for KG entity/relation extraction + importance scoring +
+        # identity_category tagging. The hook is a no-op when the
+        # MEMORY_INGESTOR_ENABLED feature gate is off (no INGEST hook registered).
+        # P0 red-line is enforced inside the agent (origin=FOREGROUND → early
+        # return); working_item here is agent-self-sedimented.
+        _trigger_ingest(
+            memory_id=working_item.id,
+            content=working_item.content,
+            agent_id=agent_id,
+            session_id=session_id,
+            origin=MemoryOrigin.AGENT,
+        )
+
+        _trigger_kg_extraction(
+            user_message=user_input,
+            assistant_response=response,
+            session_id=working_item.id,
+        )
+
+        # Context compression via the event bus (was: inline recall/compress/
+        # store/update + emit_memory_event). The hook returns any SYNC summary
+        # ids so memory_refs stays in sync; ASYNC fires in the background.
+        compress_result = await _state.memory_event_bus.emit(
+            EventType.PRE_COMPRESS,
+            CompressContext(
+                agent_id=agent_id,
+                session_id=session_id,
+                accessor_id=agent_id,
+                messages=list(state.messages),
+            ),
+        )
+        if compress_result is not None and compress_result.summary_ids:
+            state.memory_refs.extend(compress_result.summary_ids)
 
     if state.context.get("tool_call") or _has_tool_invocation(response):
         state.context["needs_tool"] = True
@@ -289,6 +388,23 @@ async def _node_tool(state: GraphState) -> GraphState:
 
     state.tool_results.append({"tool": tool_name, "result": state.context["tool_result"]})
 
+    # Multi-turn loop: record the {tool_use, tool_result} pair so the next
+    # ``_node_llm`` round can replay the full anthropic tool_use/tool_result
+    # sequence into messages (model sees prior results before deciding).
+    tool_use_block = {
+        "type": "tool_use",
+        "id": f"toolu_iter{state.tool_iteration}",
+        "name": tool_name,
+        "input": dict(tool_args),
+    }
+    state.tool_use_history.append(
+        {"tool_use": tool_use_block, "tool_result": state.context["tool_result"]}
+    )
+
+    # Anti-infinite-loop: count this round. The ``llm`` conditional edge reads
+    # ``tool_iteration`` against MAX_TOOL_ITERATIONS to force synthesis.
+    state.tool_iteration += 1
+
     result_preview = str(result["output"])[:200] if result["status"] == "success" else error_msg
     tool_item = MemoryItem(
         content=f"Tool {tool_name} result: {result_preview}",
@@ -319,8 +435,27 @@ async def _node_tool(state: GraphState) -> GraphState:
 
 
 async def _node_llm_synthesize(state: GraphState) -> GraphState:
-    """LLM synthesizes tool results into final answer."""
-    tool_result = state.context.get("tool_result", "")
+    """LLM synthesizes the *full* tool history into a final answer.
+
+    Reached either after a single tool round (no further tool requested) or
+    when the multi-turn loop exhausts ``MAX_TOOL_ITERATIONS``. Reads every
+    recorded ``tool_use_history`` entry so the synthesized answer can draw on
+    all prior tool calls (not just the most recent result).
+    """
+    # Build a readable transcript of every tool round for the synthesis prompt.
+    if state.tool_use_history:
+        tool_lines = []
+        for i, entry in enumerate(state.tool_use_history, start=1):
+            tu = entry.get("tool_use") or {}
+            name = tu.get("name", "?")
+            args = tu.get("input", {}) or {}
+            res = entry.get("tool_result", "")
+            tool_lines.append(f"[{i}] {name}({args}) → {res}")
+        tool_result_block = "\n".join(tool_lines)
+    else:
+        # Fallback to the legacy single-result context field (covers any path
+        # that set tool_result without going through the loop history).
+        tool_result_block = state.context.get("tool_result", "")
 
     agent = _state.agents.get(state.agent_id)
     agent_model = agent.get("model") if agent else None
@@ -329,7 +464,7 @@ async def _node_llm_synthesize(state: GraphState) -> GraphState:
     if _state.context_compiler is not None:
         conversation = list(state.messages) + [
             {"role": "user", "content": state.input},
-            {"role": "system", "content": f"Tool results: {tool_result}"},
+            {"role": "system", "content": f"Tool results:\n{tool_result_block}"},
         ]
         compiled = await _state.context_compiler.compile(
             system_prompt=f"{system_prompt}\n\nSynthesize the tool results into a final answer for the user.",
@@ -343,7 +478,7 @@ async def _node_llm_synthesize(state: GraphState) -> GraphState:
     else:
         messages = [
             {"role": "system", "content": "Synthesize the tool results into a final answer for the user."},
-            {"role": "user", "content": f"Original question: {state.input}\n\nTool results: {tool_result}"},
+            {"role": "user", "content": f"Original question: {state.input}\n\nTool results:\n{tool_result_block}"},
         ]
         static_count = None
 
@@ -376,7 +511,21 @@ async def _node_llm_synthesize(state: GraphState) -> GraphState:
 
 
 def _build_execution_graph() -> StateGraph:
-    """Build the orchestration graph with nodes and edges."""
+    """Build the orchestration graph with nodes and edges.
+
+    Multi-turn tool_use loop (P1)::
+
+        start ──▶ llm ──(needs_tool AND tool_iteration < MAX?)──▶ tool ──▶ llm ──▶ …
+                    │                                              (loop back)
+                    └──(else)──▶ llm_synthesize ──▶ (end)
+
+    The ``tool`` node loops back to ``llm`` (not ``llm_synthesize``) so the
+    model reads the tool_result and decides whether another tool call is
+    needed. The ``llm`` conditional edge routes to ``tool`` only while the
+    model still wants a tool AND the iteration budget remains; otherwise it
+    routes to ``llm_synthesize`` for a final answer. ``llm_synthesize`` is a
+    terminal node (no outgoing edge) so the graph ends there.
+    """
     graph = StateGraph("exec-graph")
     graph.set_checkpoint_store(InMemoryCheckpointStore())
 
@@ -386,15 +535,25 @@ def _build_execution_graph() -> StateGraph:
     graph.add_node("llm_synthesize", FunctionNode("llm_synthesize", _node_llm_synthesize))
 
     graph.add_edge("start", "llm")
-    graph.add_edge("tool", "llm_synthesize")
+    # Loop back: tool → llm so the model reads tool_result and decides next.
+    # (Was: tool → llm_synthesize, which only ever allowed a single round.)
+    graph.add_edge("tool", "llm")
+
+    def _llm_route(state: GraphState) -> str:
+        # Stop chaining when the model no longer requests a tool, OR when the
+        # iteration budget is exhausted (force a synthesized answer rather
+        # than loop forever).
+        if state.context.get("needs_tool") and state.tool_iteration < MAX_TOOL_ITERATIONS:
+            return "tool"
+        return "llm_synthesize"
 
     graph.add_conditional_edge(
         source="llm",
         targets={
             "tool": "tool",
-            "__default__": "",
+            "llm_synthesize": "llm_synthesize",
         },
-        condition=lambda state: "tool" if state.context.get("needs_tool") else "__default__",
+        condition=_llm_route,
     )
 
     graph.set_entry_point("start")

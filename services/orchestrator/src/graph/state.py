@@ -26,6 +26,14 @@ class GraphState:
         metadata: Extra metadata.
         subgraph_results: Results from completed subgraph executions.
         parallel_results: Results from parallel branch executions.
+        tool_iteration: Number of tool-execution rounds completed in the
+            multi-turn tool_use loop. Incremented by the ``tool`` node and
+            checked by the ``llm`` conditional edge against
+            ``MAX_TOOL_ITERATIONS`` to force synthesis (anti-infinite-loop).
+        tool_use_history: Ordered list of ``{tool_use, tool_result}`` pairs
+            accumulated across the loop. Injected back into the LLM messages
+            each round so the model sees prior tool calls and results before
+            deciding the next step (anthropic tool_use/tool_result sequence).
     """
 
     messages: list[dict[str, Any]] = field(default_factory=list)
@@ -43,6 +51,8 @@ class GraphState:
     metadata: dict[str, Any] = field(default_factory=dict)
     subgraph_results: dict[str, Any] = field(default_factory=dict)
     parallel_results: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    tool_iteration: int = 0
+    tool_use_history: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize state to a plain dictionary."""
