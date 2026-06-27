@@ -88,7 +88,9 @@
   - curl 经 gateway:8000 验证 7 端点非 404(GET /agents 返回 200 且 JSON 结构合法 —— **不依赖具体 agent 内容**,与 L2 持久化解耦)
   - `cd services/gateway && pytest tests/test_routes.py`
 
-### Phase 1 — MVP 骨架通电【L2(含持久化)+ L3 + L4】· 进行中(L3 ✅ `be4688f` / L4 ✅ `b6026cc` 已 merge 主线;L2 pane 并行实施中)
+### Phase 1 — MVP 骨架通电【L2(含持久化)+ L3 + L4】· ✅ 完成(L3 `be4688f` + L4 `b6026cc` + L2 `3d5532b` 全 merge 主线 `384183e`;22+6 测试绿,L2 stash baseline 零回归证明)
+
+> ⚠️ **L2 遗留(P2,Phase 3 验收前补)**:① PG schema 无 migration(`initialize()` 不建表,首启表不存在→降级内存,持久化静默失效);② 存量 backfill 未做(仅新建 agent 写 PG,老 agent 重启丢);③ 生产 `start.py` 启动冒烟待验(测试环境 sqlite3 损坏,engine 整体 import 未验证)。
 
 **目标**:点亮 MVP 的可用与可观测。三线并行启动,但 orchestrator 热点(chat.py/engine.py/_state.py)由 L2 独占串行。
 
