@@ -17,7 +17,6 @@ from src.api.models import (
 from src.memory import MemoryType, MemoryScope
 from src.memory.event_bus import EventType
 from src.memory.hooks import (
-    ConsolidateContext,
     CurateContext,
     IngestContext,
     RecallContext,

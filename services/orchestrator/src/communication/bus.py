@@ -16,15 +16,14 @@ import logging
 import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Any, Callable, Awaitable
+from typing import Callable, Awaitable
 
 from src.communication.message import (
     AgentMessage,
     DeliveryStatus,
-    MessagePriority,
     MessageType,
 )
-from src.communication.scope import ScopeManager, ScopeLevel
+from src.communication.scope import ScopeManager
 
 logger = logging.getLogger(__name__)
 
@@ -318,6 +317,11 @@ class CommunicationBus:
             return None
         finally:
             self._pending_responses.pop(correlation_id, None)
+
+    # NOT-WIRED (deferred): respond / send_to_scope / pending_count 三个路由入口
+    # 零 prod 零 test 引用。CommunicationBus 是 L2 通信桥红线(chat/orchestrate 主
+    # 路径用 send/broadcast);send_to_scope 依赖未接线的 ScopeManager。保留这些
+    # 能力以便未来 request-response 与 scope 广播接线,勿删。
 
     async def respond(self, response: AgentMessage) -> str:
         """Deliver a response message, resolving the pending request future.

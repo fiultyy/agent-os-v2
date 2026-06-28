@@ -11,7 +11,6 @@ from src.memory.types import (
     MemoryItem,
     MemoryBlock,
     MemoryFilter,
-    MemoryType,
     MemoryScope,
 )
 

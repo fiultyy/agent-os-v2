@@ -10,7 +10,6 @@ SkillRegistry - Skill 注册表
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 from typing import Dict, List, Optional, Set
 
 

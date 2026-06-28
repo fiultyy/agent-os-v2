@@ -2,7 +2,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 
-from ..policy import ScoringPolicy, ScoringContext, ScoringSignal
+from ..policy import ScoringContext, ScoringSignal
 
 
 @dataclass

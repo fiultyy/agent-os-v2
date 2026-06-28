@@ -337,50 +337,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def build_skill_parser() -> argparse.ArgumentParser:
-    """
-    构建独立的 skill CLI parser（standalone 模式，不需要 'agent-os skill' 前缀）。
-    用于测试或直接调用。
-    """
-    parser = argparse.ArgumentParser(
-        prog="agent-os skill",
-        description="Agent OS Skill Management CLI",
-    )
-    subparsers = parser.add_subparsers(dest="skill_command", metavar="COMMAND")
-    subparsers.required = True
-
-    # list
-    list_p = subparsers.add_parser("list", help="List all available skills")
-    list_p.set_defaults(func=cmd_list)
-
-    # show
-    show_p = subparsers.add_parser("show", help="Show skill details")
-    show_p.add_argument("name", help="Skill name")
-    show_p.add_argument("--content", action="store_true", help="Include SKILL.md content")
-    show_p.set_defaults(func=cmd_show)
-
-    # enable
-    enable_p = subparsers.add_parser("enable", help="Enable a skill")
-    enable_p.add_argument("name", help="Skill name")
-    enable_p.set_defaults(func=cmd_enable)
-
-    # disable
-    disable_p = subparsers.add_parser("disable", help="Disable a skill")
-    disable_p.add_argument("name", help="Skill name")
-    disable_p.set_defaults(func=cmd_disable)
-
-    # reload
-    reload_p = subparsers.add_parser("reload", help="Force reload skill catalog")
-    reload_p.set_defaults(func=cmd_reload)
-
-    # search
-    search_p = subparsers.add_parser("search", help="Search skills by name or description")
-    search_p.add_argument("query", help="Search query")
-    search_p.set_defaults(func=cmd_search)
-
-    return parser
-
-
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------

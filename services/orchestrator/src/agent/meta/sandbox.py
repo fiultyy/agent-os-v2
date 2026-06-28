@@ -7,17 +7,19 @@
 适用于受信任代码的资源和超时控制，不适用于不可信代码的严格安全隔离。
 """
 
+# NOT-WIRED (deferred: 隔离沙箱执行未接生产,仅 1 个单测文件引用;meta 三件套
+# defer 孤岛之一,见 docs/mvp-iteration-roadmap.md:32 +
+# docs/implementation-roadmap.md:136)。保留代码 + 单测(质量高,删再造成本高)。
+
 from __future__ import annotations
 
 import asyncio
-import io
 import os
 import resource
 import signal
 import subprocess
 import sys
 import tempfile
-import uuid
 from dataclasses import dataclass
 from typing import Any
 

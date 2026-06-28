@@ -62,6 +62,12 @@ class ScopeManager:
     Tracks which agents belong to which scopes, supports querying
     membership for message routing decisions, and provides scope-based
     message filtering for cross-domain communication.
+
+    NOT-WIRED (deferred): 8 个 scope 管理 API(remove_scope/join_scope/
+    leave_scope/get_scope/get_members/list_scopes/get_scope_level/can_see/
+    get_agent_scopes)零 prod 零 test 引用;bus.py 仅消费 create_scope +
+    agents_in_scope。scope 四级模型是跨域通信设计支柱,保留以便未来多 agent
+    通信扩展,勿删。
     """
 
     def __init__(self) -> None:

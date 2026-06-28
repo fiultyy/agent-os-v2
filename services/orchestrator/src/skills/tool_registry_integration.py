@@ -12,7 +12,6 @@ ToolRegistry Integration — Bridge between SkillCatalog and L3 ToolRegistry
 """
 
 import logging
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from .skill_catalog import SkillCatalog

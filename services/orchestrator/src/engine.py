@@ -13,7 +13,6 @@ import asyncio
 import logging
 import os
 from pathlib import Path
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +20,6 @@ from fastapi import FastAPI
 
 from src.memory import (
     MemoryService,
-    InMemoryStore,
     SQLiteStore,
     MemoryEventBus,
     DefaultMemoryHook,
@@ -241,28 +239,13 @@ except Exception:
     logger.warning("PitfailRegistry init failed — degrading pitfail_registry to None", exc_info=True)
     _state.pitfail_registry = None
 
-# P3: ConditionalSpawner 实例化(create_subagent 接通生产)。
-# R7: spawner 用独立 event_bus — 一个全新的 MemoryEventBus 实例,**绝不**接
-# _state.memory_event_bus(否则会触发记忆侧 agent 的 hook,违反记忆零触碰)。
-# 失败降级为 None —— routes/orchestrate.py 以 ``is not None`` guard,所以 None
-# 是安全默认(零回归)。create_subagent 已就绪(P0),注入 agent_manager 模块。
-try:
-    from src.agent.meta.conditional_spawner import ConditionalSpawner
-    # 注入 agent_manager 模块(create_subagent / teardown_subagent 已就绪 P0)。
-    # ConditionalSpawner._create_subagent 经 hasattr 守卫调
-    # agent_manager.create_subagent,接通生产生命周期。
-    from src.services import agent_manager as _agent_manager_module
-    _orchestration_bus = MemoryEventBus()
-    _state.meta_spawner = ConditionalSpawner(
-        agent_manager=_agent_manager_module, event_bus=_orchestration_bus,
-    )
-    logger.info("ConditionalSpawner wired (meta_spawner, independent bus)")
-except Exception:
-    logger.warning(
-        "ConditionalSpawner init failed — degrading meta_spawner to None",
-        exc_info=True,
-    )
-    _state.meta_spawner = None
+# NOT-WIRED (deferred): ConditionalSpawner 装配块已移除 —— 生产路径
+# /v1/orchestrate 经 routes/orchestrate.py:_agent_manager_shim() +
+# _build_multi_agent_graph() 直接调 agent_manager 模块函数,完全绕过 spawner,
+# 故 .spawn() 全树零生产调用,spawner 实例永远空配置。ConditionalSpawner 类
+# 本身保留(defer 代码,未来 CRON/EVENT/QUEUE 自动触发型 subagent 复用,见
+# docs/multi-agent-poweron-roadmap.md:8(a))。独立 _orchestration_bus 随装配块
+# 一并消失(无其他 reader)。
 
 # P1: memory event bus + default lifecycle hook. chat.py emits lifecycle
 # events instead of calling memory_service/memory_migrator directly.

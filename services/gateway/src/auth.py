@@ -12,7 +12,6 @@ Keys are persisted to disk so they survive service restarts:
 
 from __future__ import annotations
 
-import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path

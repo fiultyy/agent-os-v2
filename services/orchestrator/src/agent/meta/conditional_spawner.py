@@ -12,10 +12,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
@@ -51,6 +49,12 @@ class ConditionalSpawner:
     - CRON: 使用 croniter 解析 cron 表达式，定时触发
     - EVENT: 订阅 event_bus 的事件，事件匹配时触发
     - QUEUE: 维护一个计数器，累积到阈值时触发
+
+    NOT-WIRED (deferred): 触发主入口 spawn() 及 _should_spawn_cron/
+    _should_spawn_queue 子路径全树零生产调用 —— 生产 /v1/orchestrate 经
+    _agent_manager_shim 绕过 spawner。meta_spawner 实例装配块已从 engine.py
+    移除(休眠孤岛消除)。本类保留为 CRON/EVENT/QUEUE 自动触发型 subagent 复用
+    类型(create_subagent 已就绪),见 docs/multi-agent-poweron-roadmap.md:8(a)。
     """
 
     def __init__(self, agent_manager, event_bus=None) -> None:
@@ -248,6 +252,10 @@ class ConditionalSpawner:
             return agent_id
 
         return None
+
+    # NOT-WIRED (test-only): 队列状态/调整 API(get_active_agents/mark_agent_done/
+    # mark_agent_failed/dequeue/reset_queue)仅 test_conditional_spawner.py 引用,
+    # 生产未消费。待 orchestrate 路径接线队列触发时启用。
 
     def get_active_agents(self) -> list[dict]:
         """返回当前活跃的 subagent 列表。

@@ -4,6 +4,11 @@ Supports:
 - In-memory registration of AgentBaseProfile instances
 - Loading profiles from workspace files (SOUL.md → L0, AGENTS.md → L1+L2)
 - Profile switching at runtime
+
+NOT-WIRED (deferred): profile 系统零生产接线 —— ProfileRegistry 仅被
+test_profile.py 实例化,list_profiles/load_from_files/save_to_file/load_from_file
+等 API 仅 test 引用。architect.py/taskspec.py 有 profile_registry 引用但未实例化。
+保留作为 defer 子系统待接线决策。
 """
 from pathlib import Path
 import json

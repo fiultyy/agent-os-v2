@@ -1,7 +1,6 @@
 """ScoringEngine — multi-strategy scoring engine."""
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Any
 
 from .policy import ScoringPolicy, ScoringContext, ScoringSignal
 

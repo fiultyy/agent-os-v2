@@ -1,6 +1,11 @@
-"""ProfileGenerationCommittee — three-role negotiation for profile generation."""
+"""ProfileGenerationCommittee — three-role negotiation for profile generation.
+
+NOT-WIRED (deferred): committee 可观测/调参 API(get_spec/last_result/last_signal)
++ engine.set_weights/add_policy 仅 test 引用,生产未消费。属记忆评分红线(蝴蝶翼/
+ExperienceKG 写侧 committee)的接口面,保留以便观测/调参接线。
+"""
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from .policy import ScoringContext, ScoringSignal

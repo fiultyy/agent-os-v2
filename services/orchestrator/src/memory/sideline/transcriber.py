@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.memory.knowledge_graph import Entity, KnowledgeGraph, Relation
+from src.memory.knowledge_graph import KnowledgeGraph, Relation
 from src.memory.knowledge_graph import EntityExtractor
 
 logger = logging.getLogger(__name__)

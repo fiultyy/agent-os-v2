@@ -15,10 +15,9 @@ from __future__ import annotations
 
 import logging
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import IntEnum
-from typing import Any
 
 logger = logging.getLogger(__name__)
 

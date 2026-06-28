@@ -7,7 +7,6 @@ SkillCatalog — Skill 注册表 + 查询接口
 """
 
 import logging
-from pathlib import Path
 from typing import Dict, List, Optional
 
 from .skill_loader import SkillEntry, SkillLoader

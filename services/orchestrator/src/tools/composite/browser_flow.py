@@ -12,11 +12,16 @@ browser_flow - 浏览器操作流程编排
 - {op: 'wait', seconds: 1}
 
 sync/async 共享核心逻辑，消除重复代码。
+
+NOT-WIRED (deferred): async/snapshot 变体(browser_flow_execute_async /
+browser_flow_snapshot_full / code_review_summary)零引用。composite 层在
+engine.py 被显式 skip(重依赖),仅同步 browser_flow_execute / code_review_run
+导出。defer 孤岛,保留以便未来 composite 接线。
 """
 
 import asyncio
 import time
-from typing import Dict, Any, List, Optional, Callable, Awaitable
+from typing import Dict, Any, List, Optional
 
 # 导入 browser skill 工具
 from ...skills.browser.navigate import browser_navigate

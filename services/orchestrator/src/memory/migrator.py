@@ -10,16 +10,12 @@ Each migration step is independently callable and idempotent.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
-import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
 
 from src.memory.types import MemoryItem, MemoryType, MemoryScope, MemoryFilter, MemoryOrigin
-from src.memory.store import InMemoryStore
 from src.memory.service import MemoryService
 from src.memory.scorer import ImportanceScorer
 

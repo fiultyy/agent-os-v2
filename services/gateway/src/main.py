@@ -6,7 +6,7 @@ from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.auth import init_keys
-from src.config import AUTH_ENABLED, http_client
+from src.config import http_client
 from src.middleware import require_auth, require_service_key
 from src.routes import agents, prompts, conversations, resources, memories, messages, debug, kg, chat, execute
 from src.routes import auth as auth_routes

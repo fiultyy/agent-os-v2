@@ -16,8 +16,6 @@ The butterfly model implements two wings of associative recall:
 from __future__ import annotations
 
 import json
-import math
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from enum import Enum

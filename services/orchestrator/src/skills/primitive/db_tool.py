@@ -16,7 +16,7 @@ try:
 except ImportError:
     import sqlite3  # noqa: F401 — stdlib fallback
 import json
-from typing import Dict, Any, List, Optional, Union
+from typing import Dict, Any, List, Optional
 from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)

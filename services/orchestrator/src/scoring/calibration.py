@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .policy import ScoringPolicy, ScoringContext
+from .policy import ScoringPolicy
 
 
 @dataclass

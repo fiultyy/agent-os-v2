@@ -68,14 +68,10 @@ tool_executor: Any = None
 communication_bus: Any = None
 concurrency_controller: Any = None
 
-# P3: 多 agent 编排集成终点。ConditionalSpawner 实例(create_subagent 接通生产,
-# R7: 独立 event_bus — 绝不接 memory_event_bus)。engine.py 模块级实例化,失败
-# 降级为 None;call-site(routes/orchestrate.py)以 ``is not None`` guard,所以
-# None 是安全默认(与 pitfail_registry / pg_store 同模式,零回归)。
-meta_spawner: Any = None
-# 可选:多 agent 图构造器注入点(当前 _build_multi_agent_graph 直接 import 使用,
-# 此槽位预留给未来 DI / 测试替换)。None-safe。
-orchestration_graph_builder: Any = None
+# NOT-WIRED (deferred): ConditionalSpawner 实例装配块已从 engine.py 移除 ——
+# 生产 /v1/orchestrate 经 _agent_manager_shim 绕过 spawner,spawn() 零生产调用。
+# ConditionalSpawner 类本身保留(见 src/agent/meta/conditional_spawner.py,
+# 未来 CRON/EVENT 触发复用)。槽位移除以消除休眠孤岛。
 
 # ── Memory event bus ──────────────────────────────────────────────
 
@@ -165,10 +161,6 @@ def unsubscribe_memory_events(q: asyncio.Queue[str]) -> None:
 # ── Degradation accounting (#3) ────────────────────────────────────
 # Per-agent degrade counters, incremented by each side agent's _degrade().
 # Exposed via GET /debug/status — degrade is otherwise silent (logger.warning only).
-DEGRADED_AGENTS: tuple[str, ...] = (
-    "ingestor", "consolidator", "curator",
-    "task_consolidator", "backward_writer",
-)
 degraded_stats: dict[str, int] = defaultdict(int)
 
 

@@ -98,7 +98,7 @@ def orchestrate_state():
         k: getattr(_state, k, None)
         for k in (
             "llm_client", "agents", "communication_bus",
-            "concurrency_controller", "memory_event_bus", "meta_spawner",
+            "concurrency_controller", "memory_event_bus",
         )
     }
     _state.agents = {

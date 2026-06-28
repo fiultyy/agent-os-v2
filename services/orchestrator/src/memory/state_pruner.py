@@ -14,7 +14,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
 
 from src.memory.service import MemoryService
 from src.memory.types import MemoryFilter, MemoryOrigin, MemoryState

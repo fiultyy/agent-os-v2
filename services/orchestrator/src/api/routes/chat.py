@@ -36,7 +36,7 @@ from src.memory.hooks import (
 from src.memory.types import MemoryItem, MemoryOrigin
 from src.communication.message import AgentMessage, MessageType
 from src.services import _state
-from src.services.llm_client import LLMClient, LLMError
+from src.services.llm_client import LLMError
 
 logger = logging.getLogger(__name__)
 
@@ -48,11 +48,6 @@ router = APIRouter()
 
 def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
-
-
-async def _sse_error(msg: str) -> AsyncGenerator[str, None]:
-    yield _sse("error", {"message": msg})
-    yield "data: [DONE]\n\n"
 
 
 # ── Tool invocation detection ─────────────────────────────────────

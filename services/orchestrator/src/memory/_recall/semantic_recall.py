@@ -1,4 +1,9 @@
-"""Semantic (vector similarity) recall strategy."""
+"""Semantic (vector similarity) recall strategy.
+
+NOT-WIRED (deferred): SemanticRecall 未在 _recall/__init__.py 导出(仅导出
+Keyword/KG/Shared/Unified/weighted),prod + test 零引用。属召回红线模块的向量
+召回策略 defer 孤岛,保留以便未来作为召回策略注册。
+"""
 
 from src.memory.store import InMemoryStore
 from src.memory.vector import VectorStore

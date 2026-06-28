@@ -5,7 +5,7 @@ concrete implementations for common node types.
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Awaitable
+from typing import Callable, Awaitable
 
 from src.graph.state import GraphState
 

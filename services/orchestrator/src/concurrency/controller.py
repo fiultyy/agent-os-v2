@@ -58,6 +58,12 @@ class ConcurrencyController:
 
     Uses semaphores to bound parallelism, a priority queue
     for task scheduling, and per-task cancellation events.
+
+    NOT-WIRED (deferred): 8 个 tool-slot/cancellation/dependency 子能力 API
+    (acquire_tool_slot/release_tool_slot/cancel_all/is_cancelled/
+    execute_with_timeout/add_dependency/get_task_info/get_ready_tasks)零引用。
+    类本身活跃(chat.py acquire_agent_slot + orchestrate.py),这些未通电能力保留
+    以便未来并发扩展,勿删。
     """
 
     def __init__(self, max_agents: int = 10, max_tools: int = 20) -> None:

@@ -6,6 +6,13 @@ receive live events, and can request replay for catch-up.
 
 Thread-safety: uses asyncio.Lock for the subscribers dict since
 FastAPI runs on an async event loop.
+
+NOT-WIRED (deferred): canvas 查询/维护 API 超量未消费 —— emitter.emit_many/
+subscriber_count; event_store.get_session_ticks/get_event_by_id/prune_old_events;
+tab_manager.get_tab/get_tabs_for_branch/get_tabs_for_session/total_tabs/
+session_count; tracker.get_active_tick/active_tick_count 全部零引用。
+canvas_router 已挂载(engine.py)且属前端观察 iter 主功能,这些 API 面待前端消费
+时接线,保留勿删。
 """
 
 from __future__ import annotations

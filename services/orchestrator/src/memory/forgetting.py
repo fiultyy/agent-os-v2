@@ -13,10 +13,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
 
 from src.memory.types import MemoryItem, MemoryType, MemoryFilter, MemoryOrigin, MemoryState
-from src.memory.store import InMemoryStore
 from src.memory.service import MemoryService
 from src.memory.scorer import ImportanceScorer
 
