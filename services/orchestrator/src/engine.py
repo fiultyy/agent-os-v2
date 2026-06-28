@@ -241,6 +241,29 @@ except Exception:
     logger.warning("PitfailRegistry init failed — degrading pitfail_registry to None", exc_info=True)
     _state.pitfail_registry = None
 
+# P3: ConditionalSpawner 实例化(create_subagent 接通生产)。
+# R7: spawner 用独立 event_bus — 一个全新的 MemoryEventBus 实例,**绝不**接
+# _state.memory_event_bus(否则会触发记忆侧 agent 的 hook,违反记忆零触碰)。
+# 失败降级为 None —— routes/orchestrate.py 以 ``is not None`` guard,所以 None
+# 是安全默认(零回归)。create_subagent 已就绪(P0),注入 agent_manager 模块。
+try:
+    from src.agent.meta.conditional_spawner import ConditionalSpawner
+    # 注入 agent_manager 模块(create_subagent / teardown_subagent 已就绪 P0)。
+    # ConditionalSpawner._create_subagent 经 hasattr 守卫调
+    # agent_manager.create_subagent,接通生产生命周期。
+    from src.services import agent_manager as _agent_manager_module
+    _orchestration_bus = MemoryEventBus()
+    _state.meta_spawner = ConditionalSpawner(
+        agent_manager=_agent_manager_module, event_bus=_orchestration_bus,
+    )
+    logger.info("ConditionalSpawner wired (meta_spawner, independent bus)")
+except Exception:
+    logger.warning(
+        "ConditionalSpawner init failed — degrading meta_spawner to None",
+        exc_info=True,
+    )
+    _state.meta_spawner = None
+
 # P1: memory event bus + default lifecycle hook. chat.py emits lifecycle
 # events instead of calling memory_service/memory_migrator directly.
 _state.memory_event_bus = MemoryEventBus()
@@ -494,6 +517,7 @@ from src.api.routes.memory import router as memory_router
 from src.api.routes.chat import router as chat_router, root_router_health
 from src.api.routes.entities import router as entities_router
 from src.api.routes.pitfail import router as pitfail_router
+from src.api.routes.orchestrate import router as orchestrate_router
 from src.api.routes.canvas import router as canvas_router, init_canvas_routes
 from src.canvas.event_store import CanvasEventStore
 from src.canvas.emitter import SessionEventEmitter
@@ -516,6 +540,7 @@ app.include_router(memory_router, prefix="/v1")
 app.include_router(chat_router, prefix="/v1")
 app.include_router(entities_router, prefix="/v1")
 app.include_router(pitfail_router, prefix="/v1")
+app.include_router(orchestrate_router, prefix="/v1")
 
 
 # ── CLI entry point ────────────────────────────────────────────────

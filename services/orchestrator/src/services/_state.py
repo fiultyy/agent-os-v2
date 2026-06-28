@@ -68,6 +68,15 @@ tool_executor: Any = None
 communication_bus: Any = None
 concurrency_controller: Any = None
 
+# P3: 多 agent 编排集成终点。ConditionalSpawner 实例(create_subagent 接通生产,
+# R7: 独立 event_bus — 绝不接 memory_event_bus)。engine.py 模块级实例化,失败
+# 降级为 None;call-site(routes/orchestrate.py)以 ``is not None`` guard,所以
+# None 是安全默认(与 pitfail_registry / pg_store 同模式,零回归)。
+meta_spawner: Any = None
+# 可选:多 agent 图构造器注入点(当前 _build_multi_agent_graph 直接 import 使用,
+# 此槽位预留给未来 DI / 测试替换)。None-safe。
+orchestration_graph_builder: Any = None
+
 # ── Memory event bus ──────────────────────────────────────────────
 
 # P1: internal lifecycle event bus (structured events + hooks). Decoupled

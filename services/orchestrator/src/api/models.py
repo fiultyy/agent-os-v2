@@ -33,6 +33,28 @@ class ExecuteParallelRequest(BaseModel):
     session_id: str = ""
 
 
+class OrchestrateRequest(BaseModel):
+    """P3: 多 agent 编排请求(fan-out N 角色 subagent → fan-in → orchestrator 综合)。
+
+    与 :class:`ExecuteRequest` / :class:`ExecuteParallelRequest` 完全独立(R3 —
+    不给既有 request 加 mode 开关):用独立的 model + 独立的
+    ``/v1/orchestrate`` 端点,避免触碰单 agent 线性图 / P2 并行图。
+
+    ``orchestrator_agent_id`` 是 ``_state.agents`` 里的真实持久 agent(综合 +
+    记忆单点落库出口)。``sub_agents`` 是 subagent 角色规格列表,每项形如::
+
+        {"role": "researcher", "config": {...}, "input": "...", "system_prompt": "..."}
+
+    每个 role 由 :class:`AgentWorkerNode` 真实 spawn 一个临时 subagent
+    (create_subagent → run_agent_turn → teardown),区别于 P2 的预存 agent 并行。
+    """
+
+    orchestrator_agent_id: str
+    sub_agents: list[dict]
+    input: str
+    session_id: str = ""
+
+
 class StoreMemoryRequest(BaseModel):
     content: str
     agent_id: str = ""
