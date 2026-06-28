@@ -61,9 +61,12 @@ services:
     environment:
       - GATEWAY_URL=http://gateway:8000
       - DATABASE_URL=postgresql+asyncpg://agentos:agentos_dev@postgres:5432/agentos
-      - LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4
-      - LLM_API_KEY=${ANTHROPIC_AUTH_TOKEN}
-      - LLM_MODEL=glm-4-flash
+      # 私人系统(全生命周期单人用):智谱 anthropic 协议 + glm-4.7(coding plan 额度在此通道)
+      # 注:glm-4.7 走 openai paas/v4 通道会 429(资源包不足);anthropic /api/anthropic 通道有 coding plan 额度
+      - LLM_API_FORMAT=anthropic
+      - ANTHROPIC_BASE_URL=https://open.bigmodel.cn/api/anthropic
+      - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN}
+      - LLM_ANTHROPIC_MODEL=glm-4.7
       - MEMORY_EVENT_BUS_ENABLED=1
       - MEMORY_RETRIEVER_ENABLED=1
     depends_on:
