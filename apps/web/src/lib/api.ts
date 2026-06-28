@@ -129,6 +129,28 @@ export async function createAgent(data: {
   return mapAgent(raw);
 }
 
+// ── Debug status (introspective observability) ────────────────
+
+export interface DebugStatus {
+  agents: number;
+  concurrency: Record<string, unknown>;
+  kg_stats: Record<string, unknown>;
+  /** Side-agent LLM-channel degrade counts (per agent). */
+  degraded_stats: Record<string, number>;
+  sidellm_timeout: number;
+  maintenance: Record<string, unknown> | null;
+  llm_channels: {
+    main: { format: string | null; model: string | null };
+    side: { format: string | null; model: string | null } | null;
+  };
+  /** Runtime observations (error_spike/stalled) from RuntimeObserverHook. */
+  runtime_anomalies: Array<Record<string, unknown>>;
+}
+
+export async function getDebugStatus(): Promise<DebugStatus> {
+  return request<DebugStatus>("/debug/status");
+}
+
 export async function getAgent(id: string): Promise<AgentItem> {
   const raw = await request<Record<string, unknown>>(`/agents/${id}`);
   return mapAgent(raw);

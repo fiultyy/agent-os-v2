@@ -1,6 +1,8 @@
 "use client";
 
+import { useState, useEffect } from "react";
 import { useDebugStore, type ExecutionEvent, type MemoryEvent, type ObservationEvent } from "@/stores/debugStore";
+import { getDebugStatus, type DebugStatus } from "@/lib/api";
 import {
   Bug,
   Play,
@@ -86,6 +88,28 @@ export function DebugPanel() {
   const setReplayIndex = useDebugStore((s) => s.setReplayIndex);
   const clearHistory = useDebugStore((s) => s.clearHistory);
 
+  // Poll /debug/status for slow-changing system-health metrics (agents / LLM
+  // channels / side-agent degrade counts / runtime anomalies). SSE covers the
+  // realtime observation stream; this polls the snapshot every 10s.
+  const [status, setStatus] = useState<DebugStatus | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const s = await getDebugStatus();
+        if (!cancelled) setStatus(s);
+      } catch {
+        // debug/status is optional — swallow polling errors silently.
+      }
+    };
+    void poll();
+    const id = setInterval(() => void poll(), 10000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
+
   const currentEvent = replayIndex >= 0 ? events[replayIndex] : null;
 
   return (
@@ -107,6 +131,30 @@ export function DebugPanel() {
           {debugMode ? "调试中" : "开启调试"}
         </button>
       </div>
+
+      {/* System health (polled /debug/status — slow-changing metrics) */}
+      {status && (
+        <div className="border-b px-4 py-2 text-xs">
+          <div className="mb-1 font-semibold text-gray-500">系统健康</div>
+          <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-gray-600">
+            <span>agents: {status.agents}</span>
+            <span>timeout: {status.sidellm_timeout}s</span>
+            <span className="truncate">main: {status.llm_channels.main.model ?? "—"}</span>
+            <span className="truncate">side: {status.llm_channels.side?.model ?? "off"}</span>
+          </div>
+          {Object.keys(status.degraded_stats).length > 0 && (
+            <div className="mt-1 text-amber-600">
+              degrade:{" "}
+              {Object.entries(status.degraded_stats)
+                .map(([k, v]) => `${k}:${v}`)
+                .join("  ")}
+            </div>
+          )}
+          {status.runtime_anomalies.length > 0 && (
+            <div className="text-red-600">anomalies: {status.runtime_anomalies.length}</div>
+          )}
+        </div>
+      )}
 
       {/* Replay controls */}
       {events.length > 0 && (
