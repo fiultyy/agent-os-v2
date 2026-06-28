@@ -245,6 +245,10 @@ def _build_multi_agent_graph(
                     exc_info=True,
                 )
                 recall_results = []
+            logger.info(
+                "orchestrator self-recall: agent=%s hits=%d (ADR-3 自召回注入可观测)",
+                orchestrator_id, len(recall_results),
+            )
             if recall_results:
                 recall_lines: list[str] = []
                 for r in recall_results:
