@@ -41,7 +41,6 @@ apps/web/           → 前端 (Next.js + React Flow)
 services/gateway/   → API Gateway (FastAPI)
 services/orchestrator/ → Agent 编排服务 (核心)
 services/prompt-manager/ → Prompt 管理
-services/conversation-observer/ → 对话观测
 services/resource-manager/ → 资源管理
 packages/shared-types/ → 共享类型定义
 packages/proto/     → gRPC protobuf 定义

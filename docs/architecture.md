@@ -113,7 +113,6 @@ Backend: Agent Orchestrator + supporting microservices
 | **gateway** | 8000 | API Gateway (FastAPI, HTTP/SSE/WS) |
 | **orchestrator** | 8001 | Agent orchestration engine (core) |
 | **prompt-manager** | 8002 | Prompt template & version management |
-| **conversation-observer** | 8003 | Conversation monitoring & analytics |
 | **resource-manager** | 8004 | Provider adapters & model routing |
 
 ---

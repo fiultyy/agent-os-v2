@@ -21,7 +21,6 @@ pnpm install
 cd services/gateway && pip install -e "."
 cd ../orchestrator && pip install -e "."
 cd ../prompt-manager && pip install -e "."
-cd ../conversation-observer && pip install -e "."
 cd ../resource-manager && pip install -e "."
 ```
 

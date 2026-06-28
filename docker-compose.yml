@@ -40,7 +40,6 @@ services:
     environment:
       - ORCHESTRATOR_URL=http://orchestrator:8001
       - PROMPT_MANAGER_URL=http://prompt-manager:8002
-      - CONVERSATION_OBSERVER_URL=http://conversation-observer:8003
       - RESOURCE_MANAGER_URL=http://resource-manager:8004
     depends_on:
       orchestrator:
@@ -90,21 +89,6 @@ services:
       - ./services/prompt-manager/src:/app/src
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  conversation-observer:
-    profiles: ["aux"]
-    build:
-      context: ./services/conversation-observer
-      dockerfile: Dockerfile
-    ports:
-      - "8003:8003"
-    volumes:
-      - ./services/conversation-observer/src:/app/src
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health')"]
       interval: 10s
       timeout: 5s
       retries: 5

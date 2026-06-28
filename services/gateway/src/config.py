@@ -6,13 +6,10 @@ import httpx
 
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:8001")
 # gateway→orchestrator 业务路由均挂 /v1 前缀(orchestrator engine.py:367-370)。
-# 集中常量便于将来 /v2 切换;三辅助后端(pm/observer/rm)为裸路径,不走此常量。
+# 集中常量便于将来 /v2 切换;两辅助后端(pm/rm)为裸路径,不走此常量。
 # 见 docs/mvp-iteration-roadmap.md Phase 0。
 ORCHESTRATOR_API = f"{ORCHESTRATOR_URL}/v1"
 PROMPT_MANAGER_URL = os.getenv("PROMPT_MANAGER_URL", "http://localhost:8002")
-CONVERSATION_OBSERVER_URL = os.getenv(
-    "CONVERSATION_OBSERVER_URL", "http://localhost:8003"
-)
 RESOURCE_MANAGER_URL = os.getenv("RESOURCE_MANAGER_URL", "http://localhost:8004")
 
 # ── Auth configuration ────────────────────────────────────────────────────────

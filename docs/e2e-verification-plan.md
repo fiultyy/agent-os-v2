@@ -332,8 +332,6 @@ cd services/gateway && python -m uvicorn main:app --port 8100 &
 cd services/orchestrator && python -m uvicorn main:app --port 8101 &
 # Prompt Manager
 cd services/prompt-manager && python -m uvicorn main:app --port 8102 &
-# Conversation Observer
-cd services/conversation-observer && python -m uvicorn main:app --port 8103 &
 
 sleep 3
 ```
@@ -341,7 +339,7 @@ sleep 3
 ### 5.2 健康检查
 
 ```bash
-for port in 8000 8001 8002 8003; do
+for port in 8000 8001 8002; do
     echo "Port $port: $(curl -s http://localhost:$port/health)"
 done
 ```

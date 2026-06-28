@@ -1,4 +1,9 @@
-# 辅助服务归档(prompt-manager / conversation-observer / resource-manager)
+# 辅助服务归档(prompt-manager / resource-manager)
+
+> **注:conversation-observer 已于 observer 系统双层 evolve(Phase 0)彻底移除**
+> ——其 anomaly / error-spike 检测语义迁移至 orchestrator 内向观测层
+> `RuntimeObserverHook`(OBSERVER hook,纯内存环形缓冲,不进记忆召回)。
+> 本文档剩余内容仅描述 pm/rm 两项的归档状态。
 
 > 状态:**已归档(可逆)** · 决策见 `mvp-acceptance.md:86`(MVP 外 defer 边界)
 > 分支:`feat/frontend-observer-iter` · commit:见 `git log`
@@ -63,8 +68,6 @@ docker compose --profile aux up prompt-manager
 
 - **prompt-manager(8002)**:前端需要 prompt 模板面板 / A-B prompt 实验位 /
   orchestrator 需要从外部加载而非硬编码 system prompt。
-- **conversation-observer(8003)**:前端需要会话回放面板 / orchestrator 需要
-  把多轮 turn 显式落库而非仅靠记忆模块 / 需要会话级 analytics。
 - **resource-manager(8004)**:需要多 provider 动态路由 / 模型别名解析 /
   按成本选模型——且 orchestrator 当前 `default_model` 硬编码已不够用。
 

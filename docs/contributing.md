@@ -35,7 +35,6 @@ See [architecture.md](architecture.md) for the full architecture overview.
 | Gateway | `services/gateway/` | API Gateway (FastAPI) |
 | Orchestrator | `services/orchestrator/` | Core orchestration engine |
 | Prompt Manager | `services/prompt-manager/` | Prompt templates & versions |
-| Conversation Observer | `services/conversation-observer/` | Monitoring & analytics |
 | Resource Manager | `services/resource-manager/` | Provider adapters & routing |
 | Shared Types | `packages/shared-types/` | TypeScript type definitions |
 | Protobuf | `packages/proto/` | gRPC service definitions |
