@@ -168,7 +168,7 @@
 ## 7. 风险 + 执行注意
 
 - **共享热点竞争**:`chat.py`/`engine.py`/`_state.py` 是头号冲突源 → L2 独占写权,串行合并,其他线禁碰
-- **文档漂移复发**:建立机制 —— 完成度声明绑定可跑测试(每"已完成"项指向一个通过用例),孤岛扫描纳入 CI(grep 零调用 class/def 报告)
+- **文档漂移复发**:✅ **已落地**(2026-06-28,`dde05de`+`3abf3a3`):`scripts/doc_check.py`(collect `pytest --co` / islands NOT-WIRED 扫描 / verify 锚点对比)+ `.github/workflows/doc-check.yml` + docs `<!-- DOC-CHECK: tests=706 -->` 锚点;解 kg 审核 HIGH 根因(文档数字漂移),漂移 CI 红;`pyproject.toml [build-system]` 移位修(`3abf3a3`)解 CI 首跑必红
 - **审查遗留 medium/low**(执行时注意):L1 替换 18 处(非 17)· `can_parallel_with` 语义澄清(文件无重叠 ≠ 可独立合并)· 工具数量清单制(非硬编码 26)· PostgresStore.initialize() 建表与记忆 SQLite 双库并存评估
 - **执行编排**:Phase 1 的 L2/L3/L4 用 **tmux 多 session + 多 worktree 并行**(L2 独占 orchestrator,L3/L4 前端线),收敛节点按 §4 merge_order 合并
 
