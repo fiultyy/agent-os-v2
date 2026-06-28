@@ -19,6 +19,20 @@ class ExecuteRequest(BaseModel):
     session_id: str = ""
 
 
+class ExecuteParallelRequest(BaseModel):
+    """P2: 多视角并行分析请求(multi-perspective fan-out → fan-in 综合)。
+
+    与 :class:`ExecuteRequest` 完全独立(R3 — 不给 ExecuteRequest 加 mode 开关):
+    多 agent 并行用独立的 model + 独立的 ``/v1/execute_parallel`` 端点,避免触碰
+    单 agent 线性图。``agent_ids`` 是一组 *真实* agent_id(来自 ``_state.agents``),
+    每个跑一条 ``run_agent_turn`` 分支。
+    """
+
+    agent_ids: list[str]
+    input: str
+    session_id: str = ""
+
+
 class StoreMemoryRequest(BaseModel):
     content: str
     agent_id: str = ""
