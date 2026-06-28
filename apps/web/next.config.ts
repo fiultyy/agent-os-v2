@@ -13,7 +13,7 @@ const nextConfig: NextConfig = {
       // Frontend opens a same-origin ws://<host>/ws/canvas and Next rewrites it to orchestrator 8001.
       {
         source: "/ws/canvas",
-        destination: `${process.env.ORCHESTRATOR_WS_URL || "http://localhost:8001"}/ws/canvas`,
+        destination: `${process.env.ORCHESTRATOR_WS_URL || "http://localhost:8000"}/ws/canvas`,
         basePath: false,
       },
     ];

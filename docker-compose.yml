@@ -24,6 +24,7 @@ services:
     environment:
       - NEXT_PUBLIC_API_URL=http://gateway:8000
       - API_URL=http://gateway:8000
+      - ORCHESTRATOR_WS_URL=http://orchestrator:8001
     depends_on:
       gateway:
         condition: service_healthy
