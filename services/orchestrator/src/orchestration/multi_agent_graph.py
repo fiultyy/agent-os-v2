@@ -86,7 +86,9 @@ def _emit_orchestrator_synthesis_memory(
     """Orchestrator synthesizer 单点记忆沉淀(ADR-3)。
 
     TURN_END(working 记忆 → core store)→ SESSION_END fire-and-forget(会话→
-    情景迁移)→ KG extract fire-and-forget。三段对称 ``/execute`` 的每轮落库。
+    情景迁移)→ KG extract fire-and-forget。注:与 /execute 的 INGEST+KG 段对称
+    (fire-and-forget);TURN_END 段 /execute 用 await 而本 helper 用 fire-and-forget
+    (综合轮不阻塞响应);不发 INGEST(默认 MEMORY_INGESTOR_ENABLED=0 时 /execute 亦 no-op)。
 
     env gate:``_state.memory_event_bus`` / ``_state.knowledge_graph`` 任一为 None
     → 对应 emit 静默 no-op(try/except 降级,绝不 raise,综合响应仍返回)。
@@ -272,7 +274,7 @@ def _build_multi_agent_graph(
         _emit_orchestrator_synthesis_memory(
             orchestrator_id=orchestrator_id,
             session_id=session_id,
-            user_input=synth_input,
+            user_input=input,  # P2(kg审核):沉淀用原始 input(非含召回块的 synth_input),避免递归重摄入记忆膨胀
             assistant_response=response or perspectives,
         )
         state.output = response or perspectives
