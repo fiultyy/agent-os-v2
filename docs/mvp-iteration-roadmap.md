@@ -13,7 +13,7 @@
 
 ### boundary_in(MVP 必达)
 
-> ✅ **迭代后状态(2026-06-28 回填)**:下述 7 条目标经 Phase 0/1 + defer(FC/多轮/PitFail)**全部达成**。各条保留作"目标/设计说明",末尾 ✅ 标实际交付(commit 见 §4/§5)。唯一未跑:Phase 3 容器端到端验收(真 PG+LLM+前端)。
+> ✅ **迭代后状态(2026-06-28 回填)**:下述 7 条目标经 Phase 0/1 + defer(FC/多轮/PitFail)**全部达成**。各条保留作"目标/设计说明",末尾 ✅ 标实际交付(commit 见 §4/§5)。Phase 3 ✅ 已验证(`:verify` 部署 8010 + 单轮/多轮 e2e 真 LLM glm-4.7 anthropic,见 §4 + multi-agent-poweron-roadmap L8)。
 
 1. **gateway→orchestrator 全量转发补 `/v1` 前缀**(解除生产全 404)+ 前端 `/api/*` → next rewrite → gateway → orchestrator `/v1/*` **三段链路端到端可达**(审查补:原规划漏了前端 /api 这段) — ✅ Phase 0(`124bc67`,config 加 ORCHESTRATOR_API + 18 处改引用 + 首个 gateway 回归测试)
 2. `/v1/chat` 单轮对话 + `/v1/execute` SSE 流式(主路径已实现,只差 gateway 接线) — ✅ Phase 0 接线 + defer FC 升级为 LLM 原生 function-calling
