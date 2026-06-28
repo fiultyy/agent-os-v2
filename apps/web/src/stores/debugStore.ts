@@ -44,6 +44,17 @@ export interface MemoryEvent {
   timestamp?: string;
 }
 
+/** A runtime observation from the introspective observer layer (error_spike / stalled / degraded).
+ *  Payload mirrors the backend emit_runtime_observation (snake_case). */
+export interface ObservationEvent {
+  kind: string;
+  agent_id: string;
+  timestamp: string;
+  session_id?: string;
+  errors?: number;
+  window?: number;
+}
+
 interface DebugState {
   /** Whether debug mode is active. */
   debugMode: boolean;
@@ -53,6 +64,8 @@ interface DebugState {
   messages: CommMessage[];
   /** Memory lifecycle events (compress/forget/migrate). */
   memoryEvents: MemoryEvent[];
+  /** Runtime observations (error_spike/stalled/degraded) from the observer layer. */
+  observationEvents: ObservationEvent[];
   /** Currently replaying execution index (-1 = not replaying). */
   replayIndex: number;
 
@@ -60,6 +73,7 @@ interface DebugState {
   addExecutionEvent: (event: ExecutionEvent) => void;
   addMessage: (msg: CommMessage) => void;
   addMemoryEvent: (event: MemoryEvent) => void;
+  addObservationEvent: (event: ObservationEvent) => void;
   setReplayIndex: (idx: number) => void;
   clearHistory: () => void;
 }
@@ -69,6 +83,7 @@ export const useDebugStore = create<DebugState>((set) => ({
   executionEvents: [],
   messages: [],
   memoryEvents: [],
+  observationEvents: [],
   replayIndex: -1,
 
   toggleDebugMode: () => set((s) => ({ debugMode: !s.debugMode })),
@@ -84,7 +99,11 @@ export const useDebugStore = create<DebugState>((set) => ({
       memoryEvents: [...s.memoryEvents, { ...event, timestamp: new Date().toISOString() }],
     })),
 
+  addObservationEvent: (event) =>
+    set((s) => ({ observationEvents: [...s.observationEvents, event] })),
+
   setReplayIndex: (idx) => set({ replayIndex: idx }),
 
-  clearHistory: () => set({ executionEvents: [], messages: [], memoryEvents: [], replayIndex: -1 }),
+  clearHistory: () =>
+    set({ executionEvents: [], messages: [], memoryEvents: [], observationEvents: [], replayIndex: -1 }),
 }));

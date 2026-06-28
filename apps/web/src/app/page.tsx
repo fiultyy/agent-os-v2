@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Bot, Send, Loader2, MessageSquare } from "lucide-react";
 import { executeWithSSE } from "@/lib/api";
+import { dispatchSSEEvent } from "@/lib/sse-dispatch";
 import { useDebugStore } from "@/stores/debugStore";
 import { Header } from "@/components/layout/Header";
 
@@ -29,6 +30,7 @@ export default function Home() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const addMemoryEvent = useDebugStore((s) => s.addMemoryEvent);
   const addMessage = useDebugStore((s) => s.addMessage);
+  const addObservationEvent = useDebugStore((s) => s.addObservationEvent);
 
   useEffect(() => {
     fetch("/api/agents")
@@ -60,6 +62,8 @@ export default function Home() {
         text,
         sessionId || undefined,
         (event) => {
+          // Forward store-bound events (memory / agent-message / runtime-observation).
+          dispatchSSEEvent(event, { addMemoryEvent, addMessage, addObservationEvent });
           if (event.event === "node_start") {
             // Could show "thinking..." indicator for specific nodes
             const node = event.data.node as string;
@@ -88,13 +92,6 @@ export default function Home() {
               ...prev,
               { role: "assistant", content: `[Error] ${event.data.message}` },
             ]);
-          } else if (event.event === "memory_event") {
-            // Forward memory lifecycle events to the debug store
-            addMemoryEvent(event.data as unknown as import("@/stores/debugStore").MemoryEvent);
-          } else if (event.event === "agent_message") {
-            // L4: Agent 间通信消息 → CommunicationPanel
-            // (L2 后端 register_delivery_callback 桥 AgentMessage 到此 SSE 事件)
-            addMessage(event.data as unknown as import("@/stores/debugStore").CommMessage);
           }
         }
       );

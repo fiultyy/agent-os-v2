@@ -8,6 +8,7 @@ import { useFlowStore } from "@/stores/flowStore";
 import { useAgentStore } from "@/stores/agentStore";
 import { useDebugStore } from "@/stores/debugStore";
 import { executeWithSSE } from "@/lib/api";
+import { dispatchSSEEvent } from "@/lib/sse-dispatch";
 import { Play, Loader2 } from "lucide-react";
 
 export function ExecutePanel() {
@@ -19,6 +20,8 @@ export function ExecutePanel() {
   const [executing, setExecuting] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const addMemoryEvent = useDebugStore((s) => s.addMemoryEvent);
+  const addMessage = useDebugStore((s) => s.addMessage);
+  const addObservationEvent = useDebugStore((s) => s.addObservationEvent);
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId);
 
@@ -39,6 +42,8 @@ export function ExecutePanel() {
         undefined,
         (event) => {
           const { event: type, data } = event;
+          // Forward store-bound events (memory / agent-message / runtime-observation).
+          dispatchSSEEvent(event, { addMemoryEvent, addMessage, addObservationEvent });
           const msg = type === "node_complete"
             ? `[${data.node}] ${data.output ?? "done"}`
             : type === "execution_complete"
@@ -48,10 +53,6 @@ export function ExecutePanel() {
             : null;
           if (msg) {
             setLogs((prev) => [...prev, msg]);
-          }
-          // Forward memory lifecycle events to the debug store
-          if (type === "memory_event") {
-            addMemoryEvent(data as unknown as import("@/stores/debugStore").MemoryEvent);
           }
           // Update memory count
           if (type === "execution_complete") {

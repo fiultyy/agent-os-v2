@@ -1,6 +1,6 @@
 "use client";
 
-import { useDebugStore, type ExecutionEvent, type MemoryEvent } from "@/stores/debugStore";
+import { useDebugStore, type ExecutionEvent, type MemoryEvent, type ObservationEvent } from "@/stores/debugStore";
 import {
   Bug,
   Play,
@@ -15,6 +15,7 @@ import {
   Zap,
   Brain,
   ArrowRightLeft,
+  AlertTriangle,
 } from "lucide-react";
 
 const STATUS_ICON: Record<string, React.ReactNode> = {
@@ -27,6 +28,12 @@ const MEMORY_EVENT_ICON: Record<string, React.ReactNode> = {
   compress: <Zap className="h-3 w-3 text-amber-500" />,
   forget: <Brain className="h-3 w-3 text-purple-500" />,
   migrate: <ArrowRightLeft className="h-3 w-3 text-cyan-500" />,
+};
+
+const OBSERVATION_ICON: Record<string, React.ReactNode> = {
+  error_spike: <AlertTriangle className="h-3 w-3 text-red-500" />,
+  stalled: <Clock className="h-3 w-3 text-amber-500" />,
+  degraded: <AlertTriangle className="h-3 w-3 text-orange-500" />,
 };
 
 function MemoryEventCard({ evt }: { evt: MemoryEvent }) {
@@ -53,11 +60,28 @@ function MemoryEventCard({ evt }: { evt: MemoryEvent }) {
   );
 }
 
+function ObservationEventCard({ evt }: { evt: ObservationEvent }) {
+  const icon = OBSERVATION_ICON[evt.kind] ?? <AlertTriangle className="h-3 w-3 text-gray-500" />;
+  const agent = evt.agent_id ? evt.agent_id.slice(0, 8) : "—";
+  const detail = evt.kind === "error_spike"
+    ? `${evt.errors ?? 0} errors / ${evt.window ?? 0} steps`
+    : "";
+  return (
+    <div className="flex items-center gap-2 rounded bg-red-50 px-3 py-1.5 text-xs">
+      {icon}
+      <span className="font-medium">{evt.kind}</span>
+      <span className="text-gray-500">agent:{agent}</span>
+      <span className="ml-auto text-gray-400">{detail}</span>
+    </div>
+  );
+}
+
 export function DebugPanel() {
   const debugMode = useDebugStore((s) => s.debugMode);
   const toggleDebugMode = useDebugStore((s) => s.toggleDebugMode);
   const events = useDebugStore((s) => s.executionEvents);
   const memoryEvents = useDebugStore((s) => s.memoryEvents);
+  const observationEvents = useDebugStore((s) => s.observationEvents);
   const replayIndex = useDebugStore((s) => s.replayIndex);
   const setReplayIndex = useDebugStore((s) => s.setReplayIndex);
   const clearHistory = useDebugStore((s) => s.clearHistory);
@@ -169,9 +193,23 @@ export function DebugPanel() {
         </div>
       )}
 
+      {/* Runtime observations (introspective observability: error_spike/stalled) */}
+      {observationEvents.length > 0 && (
+        <div className="border-b">
+          <div className="px-4 py-2 text-xs font-semibold text-gray-500">
+            运行时观察 ({observationEvents.length})
+          </div>
+          <div className="max-h-40 space-y-1 overflow-y-auto px-4 pb-3">
+            {[...observationEvents].reverse().map((evt, idx) => (
+              <ObservationEventCard key={idx} evt={evt} />
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Event timeline */}
       <div className="flex-1 overflow-y-auto p-4">
-        {events.length === 0 && memoryEvents.length === 0 ? (
+        {events.length === 0 && memoryEvents.length === 0 && observationEvents.length === 0 ? (
           <div className="py-8 text-center text-xs text-gray-400">
             {debugMode ? "等待执行事件..." : "开启调试模式以记录事件"}
           </div>

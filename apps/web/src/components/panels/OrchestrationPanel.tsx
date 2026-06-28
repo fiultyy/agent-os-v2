@@ -14,6 +14,8 @@ import {
   Sparkles,
 } from "lucide-react";
 import { orchestrateWithSSE, type OrchestrateSubAgent, type SSEEvent } from "@/lib/api";
+import { dispatchSSEEvent } from "@/lib/sse-dispatch";
+import { useDebugStore } from "@/stores/debugStore";
 
 // ── Types ─────────────────────────────────────────────────────
 
@@ -56,6 +58,12 @@ export function OrchestrationPanel() {
   const [finalOutput, setFinalOutput] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Forward store-bound SSE events (memory / agent-message / runtime-observation)
+  // to the debug store, alongside the local node-log handling below.
+  const addMemoryEvent = useDebugStore((s) => s.addMemoryEvent);
+  const addMessage = useDebugStore((s) => s.addMessage);
+  const addObservationEvent = useDebugStore((s) => s.addObservationEvent);
+
   useEffect(() => {
     fetch("/api/agents")
       .then((r) => (r.ok ? r.json() : []))
@@ -97,7 +105,10 @@ export function OrchestrationPanel() {
         input,
         subAgents,
         undefined,
-        (event: SSEEvent) => handleSSEEvent(event, setNodeLogs, setFinalOutput, setError)
+        (event: SSEEvent) => {
+          dispatchSSEEvent(event, { addMemoryEvent, addMessage, addObservationEvent });
+          handleSSEEvent(event, setNodeLogs, setFinalOutput, setError);
+        }
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
