@@ -1,30 +1,30 @@
 ---
-id: delete-agent
-title: 删除一个 agent
-page: /agents
-api: DELETE /v1/agents/:id
-priority: P1
+name: delete-agent
+target: http://localhost:3000/agents
+tags: [smoke, lifecycle, api]
+timeout_ms: 60000
 ---
 
-# 意图
-用户想删除一个不再需要的 agent,清理 agent 列表。这是 agent 生命周期的删除侧(与 create-agent 对称),验证 DELETE 通路。
+# 删除一个 Agent
 
-# 前置
+## 目标
+验证 Agent 删除通路:能从 /agents 列表删除一个 agent,被删 agent 从列表消失且后端不再返回。
+
+## 前置
 - 已创建至少一个 agent(见 create-agent)
 - /agents 页面有 agent 卡片可删
 
-# 步骤
-1. 打开 /agents 页面
-2. 找到要删除的 agent 卡片
-3. hover 卡片,点击删除图标(Trash2 垃圾桶)
-4. 在浏览器确认对话框点「确定」
+## 步骤
+1. (observe) 打开 /agents 页面,查看当前 agent 列表
+2. (extract) 抽取当前 agent 卡片数量
+3. (act) 找到要删除的 agent 卡片,hover 后点击删除按钮(垃圾桶图标)
+4. (act) 在确认对话框点击「确定」
+5. (observe) 查看被删 agent 是否从列表消失
+6. (extract) 再次抽取 agent 卡片数量,与删除前对比应减少 1
+7. (extract) 抽取 /api/agents 列表,确认不再包含被删 agent
 
-# 验证
-- UI:被删 agent 从列表消失,卡片数量减少
-- API:`GET /api/agents` 不再返回该 agent
-- 负向:再次删除同一 id → 404 `{"error":"Agent not found"}`
-
-# 失败模式
-- agent 不存在 → 404(DELETE 端点返回 `{"error":"Agent not found"}`)
-- 删除不可恢复(无软删除,硬删 _state.agents)
-- 前端删除失败显示「删除失败」提示
+## 权威信号
+- 被删 agent 的卡片从 /agents 列表中消失
+- 删除后列表 agent 数量比删除前少 1
+- 删除操作未弹出「删除失败」错误提示
+- GET /api/agents 响应中不再出现被删 agent 的 id

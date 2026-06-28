@@ -1,28 +1,29 @@
 ---
-id: create-agent
-title: 创建一个助手 agent
-page: /agents
-api: POST /v1/agents
-priority: P0
+name: create-agent
+target: http://localhost:3000/agents
+tags: [smoke, core, canvas]
+timeout_ms: 60000
 ---
 
-# 意图
-用户想创建一个新的 agent 助手,配置名称/模型/系统提示词,以便后续与之对话或用于多 agent 编排。这是系统的入口操作(无 agent 无法对话/编排)。
+# 创建 Agent 助手
 
-# 前置
-- 系统 running(前端 3000 + 后端 8000)
-- 已登录(若鉴权开启,/login)
+## 目标
+验证用户能在 /agents 页面通过创建表单新建一个 Agent(配置名称/模型/系统提示词),创建后该 Agent 出现在列表中,系统入口操作可用。
 
-# 步骤(自然语言,agentic 自主执行)
-1. 打开 /agents 页面
-2. 在创建表单填写:名称"研究助手"、model 选 `glm-4.7`、system_prompt"你是研究助手,善于用中文简洁回答"
-3. 点击「创建」
-4. 等待列表刷新
+## 前置
+- 系统已启动(前端 3000 + 后端 8000)
+- 已登录(若鉴权开启,需进入 /login 完成)
 
-# 验证(可观测判据)
-- UI:/agents 列表出现"研究助手"卡片
-- API:`GET /api/agents` 返回含 `name="研究助手"` `model="glm-4.7"` 的项
+## 步骤
+1. (act) 打开 /agents 页面
+2. (observe) 查看创建表单可见
+3. (act) 在创建表单中填写名称"研究助手"
+4. (act) 在创建表单中为 model 选择 `glm-4.7`
+5. (act) 在 system_prompt 字段填写"你是研究助手,善于用中文简洁回答"
+6. (act) 点击「创建」按钮
+7. (observe) 等待 Agent 列表刷新
 
-# 失败模式(已知边界)
-- model 必填(空 → 创建失败);名称允许重复(无唯一约束)
-- 单容器部署:前端经 `/api/*` rewrite → `8000/v1/agents`(next.config 已加 /v1,6250c82)
+## 权威信号
+- /agents 列表中出现名称为"研究助手"的 Agent 卡片
+- 该 Agent 卡片显示模型为 `glm-4.7`
+- 提交后页面无错误提示(model 为空时会创建失败;名称允许重复)

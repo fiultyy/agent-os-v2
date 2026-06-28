@@ -1,29 +1,31 @@
 ---
-id: agent-persist-restart
-title: 重启 orchestrator 后 agent 仍在(或确认 in-memory 限制)
-page: /agents
-api: GET /v1/agents
-priority: P1
+name: agent-persist-restart
+target: http://localhost:3000/agents
+tags: [smoke, lifecycle, api]
+timeout_ms: 120000
 ---
 
-# 意图
-用户重启 orchestrator 容器/进程后,期望自定义 agent 仍在(持久化双向:写 + 启动灌回)。验证 agent 持久化是否工作 —— 同时确认单容器无 DATABASE_URL 时的 in-memory 限制。
+# 重启后 Agent 持久化验证
 
-# 前置
-- 已创建一个自定义 agent(非默认助手),记下 id
-- 持久化依赖 `DATABASE_URL`(pg_store);单容器无此 env 时 agent 是 in-memory
+## 目标
+验证重启 orchestrator 容器后自定义 agent 是否仍在(持久化双向:写 + 启动灌回),并确认无 DATABASE_URL 时的 in-memory 限制。
 
-# 步骤
-1. 创建一个自定义 agent,记下 id 和 name
-2. 重启 orchestrator(如 `podman restart agent-os-orchestrator` 或重建)
-3. 重启完成后,打开 /agents 页面 或 `GET /api/agents`
+## 前置
+- 已创建一个自定义 agent(非默认助手),记下其 name 和 model
+- 持久化依赖 `DATABASE_URL`(pg_store);单容器无此 env 时 agent 为 in-memory,重启后丢失
 
-# 验证
-- **有 DATABASE_URL**(pg 持久):自定义 agent 完整恢复(name/model/system_prompt/tools);默认助手不重复创建(restore 后列表非空,init_default_agent 跳过)
-- **无 DATABASE_URL**(单容器 in-memory):重启后自定义 agent 丢失,只剩默认助手 —— 这是已知限制(in-memory),非 bug;需配 DATABASE_URL 才持久
-- API:`GET /api/agents` 重启后的列表
+## 步骤
+1. (observe) 查看重启前 /agents 页面或 GET /api/agents,确认自定义 agent 存在
+2. (extract) 记下重启前自定义 agent 的 name 和 model
+3. (act) 重启 orchestrator 容器(如 `podman restart agent-os-orchestrator` 或重建)
+4. (observe) 查看重启完成后 orchestrator 服务已重新可用(打开 /agents 页面能加载)
+5. (extract) 重启后 GET /api/agents,抽取 agent 列表
+6. (observe) 查看重启后列表中自定义 agent 是否仍在(name 与 model 是否匹配重启前记录)
 
-# 失败模式
-- pg 连接失败 → 降级 in-memory(agent 丢,但不影响服务启动)
-- 无 pg 时自定义 agent 重启丢失(in-memory 限制)
-- restore 异常返回 0,不影响启动流程
+## 权威信号
+- 重启前自定义 agent 在列表中可见(其 name 与 model 已记下)
+- 重启后 /agents 页面能正常加载(无服务不可用错误)
+- 配置了 DATABASE_URL(pg 持久)时:重启后列表中自定义 agent 完整恢复(name 与 model 与重启前一致)
+- 配置了 DATABASE_URL 时:默认助手不重复创建(重启后列表 agent 数量与重启前一致,无双倍默认项)
+- 无 DATABASE_URL(单容器 in-memory)时:重启后自定义 agent 丢失,列表只剩默认助手(已知限制,非 bug)
+- pg 连接失败时降级 in-memory 且服务仍能启动(列表为空或仅默认助手,无启动失败)

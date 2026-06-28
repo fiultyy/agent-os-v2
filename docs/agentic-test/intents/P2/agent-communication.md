@@ -1,28 +1,27 @@
 ---
-id: agent-communication
-title: agent 间通信(agent_message SSE)
-page: /memory(通信 tab)
-api: SSE agent_message
-priority: P2
+name: agent-communication
+target: http://localhost:3000/memory
+tags: [smoke, edge, api]
+timeout_ms: 120000
 ---
 
-# 意图
-用户观察 agent 间的通信消息(agent_message 事件),验证多 agent 通信桥(CommunicationBus → emit_agent_message → SSE → CommunicationPanel)。
+# Agent 间通信(agent_message SSE)
 
-# 前置
-- 多 agent 场景(编排 或 agent 间直接消息);单 agent 线性执行无通信事件
+## 目标
+验证多 agent 编排场景下 agent_message 事件流通畅,通信面板显示 agent 间消息。
 
-# 步骤
-1. 打开 /memory 页面,切到「通信」tab(CommunicationPanel)
-2. 触发多 agent 编排(见 multi-agent-orchestrate)或 agent 间消息
-3. 观察 agent_message 事件流
+## 前置
+- 多 agent 场景(编排或 agent 间直接消息);单 agent 线性执行无通信事件
 
-# 验证
-- SSE:`event: agent_message` + `{message_id, sender_id, recipient_id, content, message_type}`
-- UI:CommunicationPanel 显示消息列表(sender → recipient,type,content,priority)
-- message_type:task/result/broadcast/request/response/error
+## 步骤
+1. (act) 打开 /memory 页面,切到「通信」tab(CommunicationPanel)
+2. (act) 触发多 agent 编排或 agent 间消息发送
+3. (observe) 等待并查看通信面板消息流
+4. (extract) 抽取 agent_message 事件中 sender_id、recipient_id、content、message_type 字段
 
-# 失败模式
-- 单 agent 线性执行 → 无 agent_message 事件(正常)
-- 桥接失败(_bridge_agent_delivery 异常)→ 静默降级,不阻断主流程
-- 触发场景:编排节点完成广播(orchestrate.py:127-132)/ `POST /v1/agents/{id}/messages`
+## 权威信号
+- 通信面板(CommunicationPanel)可见
+- 通信面板显示消息列表,每条消息包含 sender → recipient、type、content
+- agent_message 事件结构含 message_id、sender_id、recipient_id、content、message_type 字段
+- message_type 取值属于 task/result/broadcast/request/response/error 之一
+- 单 agent 线性执行时无 agent_message 事件(无通信面板消息为正常)

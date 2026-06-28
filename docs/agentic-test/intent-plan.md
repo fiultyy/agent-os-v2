@@ -90,7 +90,8 @@ docs/agentic-test/
 - ✅ 已写 P0(4 个:create-agent/single-agent-chat/multi-agent-orchestrate/memory-recall)
 - ✅ 已写 P1(6 个:delete-agent/agent-persist-restart/fc-tool-call/multi-turn-fc/canvas-live-ws/canvas-layer2-submit)
 - ✅ 已写 P2(6 个:login/agent-communication/execution-history/pitfall-query/agent-list-empty/orchestrate-no-orchestrator)
-- **全部 16 个 intent 完成**,agentic test Phase 0/1(CLI test-run / MCP skill)待实施
+- **全部 16 个 intent 完成,已转 qa-agent-farm v0.2 标准格式**(fan-out workflow:frontmatter `name`/`target`(完整 URL)/`tags`/`timeout_ms` + 步骤 `act`/`observe`/`extract` 前缀 + 权威信号;对齐 Stagehand 运行时,否则 agentic test 跑不动)。v0.2 模板见 `qa-agent-farm/intents/_TEMPLATE.md`。
+- agentic test Phase 0/1(CLI `test-run` / MCP skill)待实施
 
 ## 与 agentic test 衔接(Phase 0/1)
 

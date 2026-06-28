@@ -1,33 +1,31 @@
 ---
-id: multi-agent-orchestrate
-title: 多 agent 编排(researcher+writer→综合)
-page: /memory(编排 tab)
-api: POST /v1/orchestrate
-priority: P0
+name: multi-agent-orchestrate
+target: http://localhost:3000/memory
+tags: [smoke, core]
+timeout_ms: 120000
 ---
 
-# 意图
-用户想让多个子 agent(researcher+writer)并行处理一个任务,fan-in 汇聚,synthesizer 综合成多视角答案。这是多 agent 编排里程碑(ADR-1/2/3 闭环)的核心用户价值。
+# 多 agent 编排(researcher+writer→综合)
 
-# 前置
-- 已创建一个 orchestrator agent(作综合者,选它)
-- 后端 `/v1/orchestrate` 端点在(8000,anthropic 协议+glm-4.7)
+## 目标
+验证 orchestrator 能调度 researcher+writer 子 agent 并行处理任务,fan-in 汇聚后由 synthesizer 综合成融合两视角的答案。
 
-# 步骤
-1. 打开 /memory 页面,切到「编排」tab(第4 tab)
-2. 选 orchestrator agent(下拉)
-3. 输入任务"一句话介绍光合作用"
-4. 配置 sub_agents:`researcher`(研究员,提供事实)+ `writer`(作家,润色)—— 各填 role + system_prompt
-5. 点击「触发编排」
-6. 观察 SSE 实时事件流
+## 前置
+- 已创建一个 orchestrator agent(作综合者),用于在下拉中选择
+- 后端 `/v1/orchestrate` 端点可用(anthropic 协议 + glm-4.7)
 
-# 验证
-- UI:编排面板显示 `multi_agent` 的 branches(researcher/writer 各自 output)→ `fan_in` 汇聚 → `synthesizer` 综合输出
-- API:`POST /api/orchestrate` SSE 含 `execution_complete.output`(综合答案,融合两视角)
-- ADR-3 闭环:编排后 `GET /api/memories?agent_id=<orchestrator>` 含 orchestrator 沉淀记忆(episodic/agent)
-- 自召回注入:第2次编排时 orchestrator 召回第1次记忆(综合轮 retrieve,日志 `orchestrator self-recall: hits=N`)
+## 步骤
+1. (act) 打开 /memory 页面,切到「编排」tab(第 4 个 tab)
+2. (act) 在下拉中选择 orchestrator agent
+3. (act) 输入任务"一句话介绍光合作用"
+4. (act) 配置 sub_agents:添加 `researcher`(研究员,提供事实)与 `writer`(作家,润色),各填 role + system_prompt
+5. (act) 点击「触发编排」按钮
+6. (observe) 查看 SSE 实时事件流的输出
 
-# 失败模式
-- 未选 orchestrator → 404(orchestrator not found)
-- sub_agents 空 → 400
-- LLM 429(资源包不足)→ branches output 含 error;glm-4.7 须走 anthropic 协议(/api/anthropic coding plan),openai paas/v4 会 429
+## 权威信号
+- 编排面板显示 `multi_agent` 的 branches:researcher 与 writer 各自产生 output
+- 编排面板显示 `fan_in` 汇聚节点
+- 编排面板显示 `synthesizer` 综合输出(融合 researcher 事实视角与 writer 润色视角的答案)
+- 事件流中出现 `execution_complete.output` 事件,含综合答案文本
+- 编排完成后,查询 orchestrator 的记忆列表可见沉淀记忆(episodic/agent 类型)
+- 第 2 次编排时,日志显示 orchestrator 自召回注入(含 `orchestrator self-recall: hits=N` 文案)

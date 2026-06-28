@@ -1,29 +1,30 @@
 ---
-id: login
-title: JWT 登录(仅 gateway 部署)
-page: /login
-api: POST /auth/token
-priority: P2
+name: login
+target: http://localhost:3000/login
+tags: [smoke, edge, auth]
+timeout_ms: 60000
 ---
 
-# 意图
-用户通过 API key 登录,获取 JWT(access + refresh token),后续请求带 Bearer 认证。验证 JWT 鉴权闭环。
+# JWT 登录鉴权闭环
 
-# 前置
-- **gateway 部署 + AUTH_ENABLED=true**(单容器无 gateway → 此 intent 不能跑,见失败模式)
+## 目标
+验证用户通过 API key 登录获取 JWT(access + refresh token),后续请求带 Bearer 认证。
+
+## 前置
+- gateway 已部署且 AUTH_ENABLED=true(单容器无 gateway → 此 intent 不能跑)
 - AUTH_API_KEYS 配置了有效 API key
 
-# 步骤
-1. 打开 /login 页面
-2. 输入 API key
-3. 提交登录
+## 步骤
+1. (act) 打开 /login 登录页面
+2. (act) 在 API key 输入框填写有效 API key
+3. (act) 提交登录表单
+4. (observe) 查看登录后页面跳转状态
+5. (extract) 抽取 POST /auth/token 响应中的 access_token 与 refresh_token
 
-# 验证
-- UI:登录成功跳转 /;失败显示错误信息
-- API:`POST /auth/token` 返回 `{access_token, refresh_token, token_type, expires_in}`
-- token 存 localStorage(`agent_os_access_token`),后续请求带 `Authorization: Bearer`
-
-# 失败模式
-- **单容器部署(无 gateway)**:orchestrator 8000 无 `/auth` 路由 → login intent **不能跑**(AUTH_ENABLED 默认 false,无需认证)
-- API key 无效 → 401
-- access token 15 分钟过期 → refresh token(7 天)刷新
+## 权威信号
+- 登录成功后页面跳转到首页 / 路径
+- 登录成功后页面不再显示登录表单
+- 页面通过 API key 无效时显示错误提示(401 相关文案)可见
+- POST /auth/token 响应包含 access_token、refresh_token、token_type、expires_in 四个字段
+- 浏览器 localStorage 中存在 agent_os_access_token 键
+- 后续请求头携带 Authorization: Bearer 文案

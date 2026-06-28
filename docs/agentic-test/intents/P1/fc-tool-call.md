@@ -1,30 +1,31 @@
 ---
-id: fc-tool-call
-title: 对话中 LLM 调工具(function-calling 单轮)
-page: /
-api: POST /v1/execute
-priority: P1
+name: fc-tool-call
+target: http://localhost:3000/
+tags: [smoke, lifecycle, api]
+timeout_ms: 120000
 ---
 
-# 意图
-用户问一个需要工具的问题(如「读取文件 X」),LLM 通过原生 function-calling(tool_use)调工具,工具结果回注后综合回答。验证 FC 原生 tool_use 通路(defer 通电项,anthropic 原生 tool_use + openai 兼容)。
+# 对话中 LLM 调工具(function-calling 单轮)
 
-# 前置
-- 已创建一个 agent
-- 后端注册工具(15 primitive:file_read/http_get/db_query 等 + 3 skill:code_read/search 等)
+## 目标
+验证 LLM 面对需要工具的问题时,通过原生 function-calling(tool_use)调用工具、工具结果回注后综合回答的完整通路。
+
+## 前置
+- 已存在至少一个 agent
+- 后端已注册工具(file_read/http_get/db_query 等 primitive + code_read/search 等 skill)
 - LLM 支持 function-calling(anthropic 原生 tool_use)
 
-# 步骤
-1. 打开 / 页面,选一个 agent
-2. 输入需要工具的问题(如「读取 /tmp/test.txt 的内容」或「搜索代码中的 foo」)
-3. 发送,观察 SSE 流
+## 步骤
+1. (act) 打开应用首页,选一个 agent 进入对话
+2. (act) 在输入框填写一个需要工具的问题(如「读取 /tmp/test.txt 的内容」或「搜索代码中的 foo」)
+3. (act) 发送消息
+4. (observe) 查看 SSE 流式响应的逐步输出
+5. (extract) 抽取对话中出现的事件序列与工具调用、工具结果、最终回答文本
 
-# 验证
-- SSE 事件序列:`node_start(llm)` → `node_complete(llm, 决定调工具)` → `node_start(tool)` → `node_complete(tool, 工具结果)` → 综合
-- 最终回答基于工具结果(LLM 拿到 tool_result 后回答)
-- 原生 tool_use(非正则解析),tool_result 回注下一轮
-
-# 失败模式
-- 工具不存在 → tool_result 含「Tool not found」+ PitFail 记录(/v1/pitfall 可查)
-- 工具执行失败(超时/文件不存在/权限)→ tool_result「[Tool error] ...」+ PitFail(error 分类)
-- LLM 不支持 FC → 无 tool_use,直接回答(降级,正常)
+## 权威信号
+- SSE 事件序列出现 `node_start`(llm)与对应的 `node_complete`
+- 事件中出现工具调用节点(`node_start`/`node_complete` 关联 tool)
+- 工具调用后出现工具结果(tool_result)文本
+- 最终回答基于工具结果内容(回答引用了被读取/被搜索的真实数据,而非泛泛回应)
+- 工具调用表现为原生 tool_use(非正则解析的伪调用)
+- 若工具不存在或执行失败,响应中出现可观测的错误提示(如「Tool not found」或「[Tool error] ...」)
