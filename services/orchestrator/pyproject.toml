@@ -27,6 +27,7 @@ hot-reload = [
 [project.scripts]
 "agent-os" = "skills.cli:skill_cli_main"
 
+[build-system]
 requires = ["setuptools>=75"]
 build-backend = "setuptools.build_meta"
 
