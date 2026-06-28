@@ -4,6 +4,8 @@
 > **里程碑**:让 meta 三件套(ConditionalSpawner/MetaAgentNode/SandboxExecutor)+ ParallelNode 接生产图,实现真正多 agent 协作。
 > **铁律**:`/execute` 单 agent 线性图零回归 + 记忆模块零触碰。
 > ParallelNode 准备已完成(`874da6a`:join-barrier 修 + 18 单测)。
+>
+> ✅ **里程碑达成(2026-06-28)**:P0-P3 全完成,提交链 `25e802e`(P0 create_subagent)→ `78d6f5c`(P1 MetaAgentNode/run_agent_turn)→ `8fa2e1f`(P2 ParallelNode demo)→ `386aae2`(P3 /v1/orchestrate)。`POST /v1/orchestrate` → fan-out N subagent(spawn→run→teardown 闭环)→ fan-in 综合 → synthesizer,SSE 全程可见。**客观隔离判据**:四测试文件(test_multi_turn_tool_loop/test_graph_engine/test_parallel_nodes/test_parallel_production_graph)git diff 0 行 + 37 passed。全套 692 passed 零新增 failed。红线 R1-R8 全守。⚠️ 真实 HTTP 端到端冒烟待容器(单测+OpenAPI 已证装配)。
 
 ## 北极星判据
 
