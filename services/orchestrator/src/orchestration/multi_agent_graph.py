@@ -18,12 +18,24 @@ synthesizer 复用 :func:`run_agent_turn` 调 **orchestrator**(主 agent)做综�
 这是 R1 的"记忆单点落库"出口:fan-in 之后只有 orchestrator 这一个真实 agent
 跑 LLM,记忆(若挂)只在此点触发;分支 subagent 全程零 memory。
 
+ADR-3(编排记忆沉淀)::
+
+    synthesizer 综合轮返回 response 后,orchestrator 单点 emit
+    TURN_END/SESSION_END + KG extract(对称于 ``/execute`` 单 agent 每轮落库),
+    让编排闭环也沉淀记忆。emit 复用既有 ``memory_event_bus`` 入口(与
+    ``chat.py`` 的 ``/chat`` + ``_node_llm`` 同模式),评分内部逻辑零改动。
+    env gate:``memory_event_bus`` / ``knowledge_graph`` 未 wired → no-op(try/except
+    降级不崩,与 ``/execute`` 降级同)。
+
 红线
 ----
 R1(记忆零触碰):
-    - 分支(AgentWorkerNode)经 run_agent_turn,后者已剥离记忆(P1)。
+    - 分支(AgentWorkerNode)经 run_agent_turn,后者已剥离记忆(P1),
+      **全程零 memory emit**(grep clean,测试按 agent_id 过滤断言)。
     - synthesizer 经 run_agent_turn(orchestrator_id)—— orchestrator 是真实
-      持久 agent,记忆在其自身执行图(若挂)单点落库。本函数体零 memory 调用。
+      持久 agent,记忆单点落库只在 synthesizer 综合轮后的
+      ``_emit_orchestrator_synthesis_memory`` helper 里(模块级,本函数体零直接
+      ``memory_event_bus.emit`` 调用)。
 R2(主路径冻结):
     本函数 *不 import 也不修改* ``_build_execution_graph`` / ``/execute`` /
     ``_build_parallel_graph`` —— 物理隔离,纯新文件。
@@ -38,6 +50,7 @@ R2(主路径冻结):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -46,8 +59,85 @@ from src.graph import FanInNode, ParallelNode, StateGraph
 from src.graph.nodes import FunctionNode, GraphNode
 from src.graph.state import GraphState
 from src.orchestration.agent_worker_node import AgentWorkerNode
+from src.memory import MemoryScope, MemoryType
+from src.memory.event_bus import EventType
+from src.memory.hooks import SessionContext, TurnContext
+from src.memory.types import MemoryItem
+from src.services import _state
 
 logger = logging.getLogger(__name__)
+
+
+# ── ADR-3:orchestrator fan-in 单点记忆沉淀 helper ──────────────────────
+# 对称于 ``chat.py`` 的 ``/chat`` + ``_node_llm`` 每轮落库模式:TURN_END 存 working
+# 记忆 → fire-and-forget SESSION_END(会话→情景迁移)→ fire-and-forget KG extract。
+# 复用既有 ``memory_event_bus`` emit 入口(评分内部逻辑零改动)。env gate:
+# ``memory_event_bus`` / ``knowledge_graph`` 未 wired → no-op(try/except 降级不崩,
+# 与 ``/execute`` 降级同)。本 helper 只被 synthesizer(orchestrator)单点调用 ——
+# 分支(AgentWorkerNode → run_agent_turn)零记忆,守恒 R1。
+
+
+def _emit_orchestrator_synthesis_memory(
+    orchestrator_id: str,
+    session_id: str,
+    user_input: str,
+    assistant_response: str,
+) -> None:
+    """Orchestrator synthesizer 单点记忆沉淀(ADR-3)。
+
+    TURN_END(working 记忆 → core store)→ SESSION_END fire-and-forget(会话→
+    情景迁移)→ KG extract fire-and-forget。三段对称 ``/execute`` 的每轮落库。
+
+    env gate:``_state.memory_event_bus`` / ``_state.knowledge_graph`` 任一为 None
+    → 对应 emit 静默 no-op(try/except 降级,绝不 raise,综合响应仍返回)。
+    不触碰五维/召回/蝴蝶翼/ExperienceKG 写侧评分 —— 全走既有 hook 入口。
+    """
+    # ① TURN_END:把综合轮存成 working 记忆(core store)。
+    try:
+        bus = _state.memory_event_bus
+        if bus is not None:
+            working_item = MemoryItem(
+                content=f"User: {user_input}\nAssistant: {assistant_response}",
+                agent_id=orchestrator_id,
+                session_id=session_id,
+                memory_type=MemoryType.WORKING,
+                scope=MemoryScope.AGENT,
+            )
+            asyncio.create_task(
+                bus.emit(
+                    EventType.TURN_END,
+                    TurnContext(
+                        agent_id=orchestrator_id,
+                        session_id=session_id,
+                        working_item=working_item,
+                    ),
+                )
+            )
+            # ② SESSION_END:fire-and-forget 会话→情景迁移(对称 /chat)。
+            asyncio.create_task(
+                bus.emit(
+                    EventType.SESSION_END,
+                    SessionContext(agent_id=orchestrator_id, session_id=session_id),
+                )
+            )
+    except Exception:
+        logger.warning(
+            "orchestrator TURN_END/SESSION_END emit failed (env gate no-op)",
+            exc_info=True,
+        )
+
+    # ③ KG extract:fire-and-forget 实体/关系抽取(对称 /chat + /execute)。
+    try:
+        kg = _state.knowledge_graph
+        if kg is not None and hasattr(kg, "extract_and_ingest"):
+            text = f"User: {user_input}\nAssistant: {assistant_response}"
+            asyncio.create_task(
+                asyncio.to_thread(
+                    kg.extract_and_ingest, text=text, memory_id=session_id,
+                )
+            )
+    except Exception:
+        logger.warning("orchestrator KG extraction failed (env gate no-op)", exc_info=True)
 
 
 def _build_multi_agent_graph(
@@ -85,8 +175,11 @@ def _build_multi_agent_graph(
 
     Red lines honoured here:
         R1 — no ``memory_event_bus.emit`` / ``_trigger_*`` anywhere in this
-             function body (grep clean). Branch subagents carry no memory;
-             the orchestrator's synthesizer turn is the single memory point.
+             function body (AST/grep clean); branch subagents carry no memory.
+             The orchestrator's synthesizer turn is the single memory point,
+             sedimented by the module-level
+             :func:`_emit_orchestrator_synthesis_memory` helper called from
+             ``_synth_handler`` (ADR-3).
         R2 — ``_build_execution_graph`` / ``/execute`` / ``_build_parallel_graph``
              are untouched (物理隔离).
     """
@@ -124,6 +217,9 @@ def _build_multi_agent_graph(
     # ── synthesizer:复用 run_agent_turn(orchestrator_id) 综合 ─────────
     # R1 出口:fan-in 之后只有 orchestrator(主 agent)跑 LLM。orchestrator 是
     # 真实持久 agent,记忆(若挂)只在此点单点落库;分支 subagent 全程零 memory。
+    # ADR-3:synthesizer 综合轮返回后,orchestrator 单点 emit 记忆(TURN_END/
+    # SESSION_END + KG,复用既有 memory_event_bus 入口,对称 /execute 每轮落库)。
+    # 分支经 AgentWorkerNode → run_agent_turn 零记忆不变(run_agent_turn 不改)。
     async def _synth_handler(state: GraphState) -> GraphState:
         perspectives = state.output or ""
         synth_input = (
@@ -135,6 +231,13 @@ def _build_multi_agent_graph(
             agent_id=orchestrator_id,
             input=synth_input,
             session_id=session_id,
+        )
+        # ADR-3:orchestrator 单点记忆沉淀(env gate:memory 未 wired → no-op)。
+        _emit_orchestrator_synthesis_memory(
+            orchestrator_id=orchestrator_id,
+            session_id=session_id,
+            user_input=synth_input,
+            assistant_response=response or perspectives,
         )
         state.output = response or perspectives
         state.current_node = "synthesizer"

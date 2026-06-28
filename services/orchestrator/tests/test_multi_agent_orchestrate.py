@@ -15,6 +15,7 @@ pysqlite3 注入由 ``tests/conftest.py`` 统一处理,本文件不重复 patch�
 from __future__ import annotations
 
 import ast
+import asyncio
 import inspect
 
 import pytest
@@ -98,7 +99,7 @@ def orchestrate_state():
         k: getattr(_state, k, None)
         for k in (
             "llm_client", "agents", "communication_bus",
-            "concurrency_controller", "memory_event_bus",
+            "concurrency_controller", "memory_event_bus", "knowledge_graph",
         )
     }
     _state.agents = {
@@ -414,41 +415,177 @@ async def test_orchestrate_endpoint_rejects_empty_sub_agents(orchestrate_state):
     assert resp.body
 
 
-# ── 4. 零 memory 调用(R1)— orchestrate 路径不触发记忆事件 ─────────
+# ── 4. 记忆沉淀(ADR-3)— 分支零 memory,orchestrator 单点 emit ──────
+
+
+def _extract_agent_id(args, kwargs) -> str:
+    """从 emit(*args, **kwargs) 里提 agent_id(位置 ctx 或 working_item)。
+
+    emit 的签名是 ``emit(event_type, ctx)``,ctx 携带 ``agent_id``
+    (TurnContext/SessionContext)或 ``working_item.agent_id``(TurnContext)。
+    """
+    if len(args) >= 2:
+        ctx = args[1]
+        aid = getattr(ctx, "agent_id", None)
+        if aid is not None:
+            return aid
+        wi = getattr(ctx, "working_item", None)
+        return getattr(wi, "agent_id", "<unknown>")
+    return "<no-ctx>"
 
 
 @pytest.mark.asyncio
 async def test_orchestrate_no_memory_emit_on_branches(orchestrate_state):
-    """orchestrate 路径不 emit memory 事件(分支 subagent 零 memory)。
+    """R1:分支(subagent)零 memory emit;只有 orchestrator 单点 emit。
 
-    装一个哨兵 event_bus 到 _state.memory_event_bus,统计 emit 次数。
-    /v1/orchestrate 端点体不应经 memory_event_bus.emit(与 /execute 不同)。
-    直接 await 路由函数 + 消费 body_iterator。
+    装一个哨兵 event_bus 到 _state.memory_event_bus,记录每次 emit 的 agent_id。
+    ADR-3 后 synthesizer 综合轮 orchestrator 单点 emit,故断言由"全路径零 emit"
+    细化为"按 agent_id 过滤":所有 emit 的 agent_id 必须全是 orchestrator,
+    任何分支 subagent 的 agent_id 都不得出现。
     """
-    emitted = []
+    emitted: list[str] = []
 
     class _SentinelBus:
         async def emit(self, *a, **k):
-            emitted.append((a, k))
+            emitted.append(_extract_agent_id(a, k))
 
         def set_enabled(self, *a, **k):
             pass
 
     _state.memory_event_bus = _SentinelBus()
 
+    am = _RecordingAgentManager()
     req = OrchestrateRequest(
         orchestrator_agent_id="orchestrator",
         sub_agents=[
             {"role": "role_a", "config": {"system_prompt": "[role_a] A"}},
         ],
         input="task",
+        session_id="sess-r1",
     )
-    resp = await orch_mod.orchestrate(req)
-    async for chunk in resp.body_iterator:
-        # 消费完整流以驱动 run_graph。
-        pass
+    # 注入真实 agent_manager shim(端点会自建 shim,但这里跑 _build_multi_agent_graph
+    # 直接证据更稳:用端点跑则需 monkeypatch;这里直接跑图断言 emit 过滤断言更精确)。
+    graph = _build_multi_agent_graph(
+        orchestrator_id="orchestrator",
+        sub_agents_spec=req.sub_agents,
+        input=req.input,
+        session_id=req.session_id,
+        agent_manager=am,
+    )
+    from src.graph import GraphState
 
-    # orchestrate 端点不 emit memory 事件(零 memory 调用 — R1)。
-    assert emitted == [], (
-        f"R1 violated: /v1/orchestrate must not emit memory events, got {emitted}"
+    state = GraphState(input=req.input, agent_id="orchestrator", session_id=req.session_id)
+    await graph.run(state)
+    # fire-and-forget 的 emit(create_task)让事件循环跑完。
+    await asyncio.sleep(0.05)
+
+    branch_ids = set(am.spawned_ids)
+    # R1:分支 subagent agent_id 零 emit。
+    branch_emits = [aid for aid in emitted if aid in branch_ids]
+    assert branch_emits == [], (
+        f"R1 violated: branch subagents must not emit memory, "
+        f"got branch emits {branch_emits} (spawned={branch_ids}, all={emitted})"
     )
+    # ADR-3:所有 emit 的 agent_id 全是 orchestrator(单点)。
+    non_orch = [aid for aid in emitted if aid != "orchestrator"]
+    assert non_orch == [], (
+        f"ADR-3 violated: all emits must be orchestrator_id, got non-orch {non_orch}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_orchestrator_single_point_emit(orchestrate_state):
+    """ADR-3:synthesizer 综合轮后 orchestrator 单点 emit TURN_END + SESSION_END。
+
+    证据:
+    - TURN_END 至少 1 次(agent_id == orchestrator,working_item 非空)。
+    - SESSION_END 至少 1 次(agent_id == orchestrator)。
+    - 综合轮最终 output == "SYNTH-RESULT"(综合仍正常返回)。
+    """
+    from src.memory.event_bus import EventType
+
+    emits: list[tuple] = []
+
+    class _RecordingBus:
+        async def emit(self, *a, **k):
+            emits.append(a)
+
+        def set_enabled(self, *a, **k):
+            pass
+
+    _state.memory_event_bus = _RecordingBus()
+
+    am = _RecordingAgentManager()
+    graph = _build_multi_agent_graph(
+        orchestrator_id="orchestrator",
+        sub_agents_spec=[
+            {"role": "role_a", "config": {"system_prompt": "[role_a] A"}},
+            {"role": "role_b", "config": {"system_prompt": "[role_b] B"}},
+        ],
+        input="task",
+        session_id="sess-synth",
+        agent_manager=am,
+    )
+    from src.graph import GraphState
+
+    state = GraphState(input="task", agent_id="orchestrator", session_id="sess-synth")
+    final = await graph.run(state)
+    await asyncio.sleep(0.05)
+
+    # 综合仍正常返回。
+    assert final.output == "SYNTH-RESULT", final.output
+
+    # 拆分事件类型。
+    event_types = [a[0] for a in emits]
+    turn_ends = [
+        a for a in emits if a and a[0] == EventType.TURN_END
+    ]
+    session_ends = [
+        a for a in emits if a and a[0] == EventType.SESSION_END
+    ]
+    assert turn_ends, (
+        f"ADR-3: orchestrator must emit TURN_END after synth, got events {event_types}"
+    )
+    assert session_ends, (
+        f"ADR-3: orchestrator must emit SESSION_END after synth, got events {event_types}"
+    )
+    # TURN_END 的 agent_id 必须是 orchestrator。
+    for a in turn_ends:
+        assert _extract_agent_id(a, {}) == "orchestrator"
+    for a in session_ends:
+        assert _extract_agent_id(a, {}) == "orchestrator"
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_env_gate_memory_unwired_noop(orchestrate_state):
+    """env gate:memory_event_bus 为 None(memory 未 wired)→ emit no-op 不崩,
+    综合仍返回 SYNTH-RESULT。
+
+    场景:测试/未启用 memory 的部署 —— _state.memory_event_bus / knowledge_graph
+    为 None。_emit_orchestrator_synthesis_memory 必须静默降级,绝不 raise,
+    synthesizer 综合轮照常返回。
+    """
+    _state.memory_event_bus = None
+    _state.knowledge_graph = None
+
+    am = _RecordingAgentManager()
+    graph = _build_multi_agent_graph(
+        orchestrator_id="orchestrator",
+        sub_agents_spec=[
+            {"role": "role_a", "config": {"system_prompt": "[role_a] A"}},
+        ],
+        input="task",
+        session_id="sess-gate",
+        agent_manager=am,
+    )
+    from src.graph import GraphState
+
+    state = GraphState(input="task", agent_id="orchestrator", session_id="sess-gate")
+    # 不崩即通过;综合返回照常。
+    final = await graph.run(state)
+    await asyncio.sleep(0.05)
+
+    assert final.output == "SYNTH-RESULT", final.output
+    # 分支 spawn/teardown 闭环不受 env gate 影响。
+    assert len(am.spawn_calls) == 1
+    assert am.teardown_calls == am.spawned_ids
