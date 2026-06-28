@@ -61,6 +61,11 @@ services:
     environment:
       - GATEWAY_URL=http://gateway:8000
       - DATABASE_URL=postgresql+asyncpg://agentos:agentos_dev@postgres:5432/agentos
+      - LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4
+      - LLM_API_KEY=${ANTHROPIC_AUTH_TOKEN}
+      - LLM_MODEL=glm-4-flash
+      - MEMORY_EVENT_BUS_ENABLED=1
+      - MEMORY_RETRIEVER_ENABLED=1
     depends_on:
       postgres:
         condition: service_healthy
