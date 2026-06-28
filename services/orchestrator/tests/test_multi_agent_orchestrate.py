@@ -100,6 +100,7 @@ def orchestrate_state():
         for k in (
             "llm_client", "agents", "communication_bus",
             "concurrency_controller", "memory_event_bus", "knowledge_graph",
+            "retriever",
         )
     }
     _state.agents = {
@@ -589,3 +590,156 @@ async def test_orchestrate_env_gate_memory_unwired_noop(orchestrate_state):
     # 分支 spawn/teardown 闭环不受 env gate 影响。
     assert len(am.spawn_calls) == 1
     assert am.teardown_calls == am.spawned_ids
+
+
+
+# ── 4. ADR-3 编排自召回注入(真正闭环最后一块)──────────────────────
+
+
+class _StubRetriever:
+    """只读 retrieve 替身:返回固定历史项(不触召回路径/排序/五维)。"""
+
+    def __init__(self, items: list[str], *, raise_on_call: bool = False):
+        from src.memory.types import MemoryItem
+
+        self._items = [
+            MemoryItem(content=txt, agent_id="orchestrator") for txt in items
+        ]
+        self.raise_on_call = raise_on_call
+        self.calls: list[dict] = []
+
+    async def retrieve(self, query, agent_id, top_k=10, **kw):
+        self.calls.append({"query": query, "agent_id": agent_id, "top_k": top_k})
+        if self.raise_on_call:
+            raise RuntimeError("stub retrieve boom")
+        return [{"item": it, "score": 0.9} for it in self._items]
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_self_recall_injects(orchestrate_state):
+    """ADR-3 闭环:_synth_handler 召回 orchestrator 历史注入 synth_input。
+
+    证据:
+    - _state.retriever.retrieve 被以 agent_id == orchestrator 调用(只读)。
+    - 综合轮 LLM 调用的 user 内容含历史项文本("相关历史记忆" + 历史项)。
+    - 综合仍正常返回 SYNTH-RESULT(_ScriptedLLM 按 "Synthesize" 路由不变)。
+    """
+    stub = _StubRetriever(items=["历史决策A", "历史约束B"])
+    _state.retriever = stub
+
+    am = _RecordingAgentManager()
+    graph = _build_multi_agent_graph(
+        orchestrator_id="orchestrator",
+        sub_agents_spec=[
+            {"role": "role_a", "config": {"system_prompt": "[role_a] A"}},
+        ],
+        input="task",
+        session_id="sess-recall",
+        agent_manager=am,
+    )
+    from src.graph import GraphState
+
+    state = GraphState(input="task", agent_id="orchestrator", session_id="sess-recall")
+    final = await graph.run(state)
+    await asyncio.sleep(0.05)
+
+    # 召回被调,agent_id == orchestrator(只读 retriever)。
+    assert stub.calls, "retriever.retrieve must be called"
+    assert all(c["agent_id"] == "orchestrator" for c in stub.calls)
+
+    # 综合轮 LLM 调用的 user 内容含历史注入。
+    synth_calls = [
+        c for c in _state.llm_client.calls
+        if any("Synthesize" in (m.get("content", "")) for m in c[1])
+    ]
+    assert synth_calls, "synthesizer LLM call must happen"
+    synth_user = "".join(
+        m.get("content", "") for m in synth_calls[0][1]
+        if m.get("role") == "user"
+    )
+    assert "相关历史记忆" in synth_user
+    assert "历史决策A" in synth_user and "历史约束B" in synth_user
+
+    # 综合仍正常返回。
+    assert final.output == "SYNTH-RESULT", final.output
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_self_recall_env_gate_retriever_none(
+    orchestrate_state,
+):
+    """env gate:_state.retriever 为 None(召回未 wired)→ no-op 不崩,
+    synth_input 不含历史("相关历史记忆" 不出现),综合仍返回 SYNTH-RESULT。
+    """
+    _state.retriever = None
+
+    am = _RecordingAgentManager()
+    graph = _build_multi_agent_graph(
+        orchestrator_id="orchestrator",
+        sub_agents_spec=[
+            {"role": "role_a", "config": {"system_prompt": "[role_a] A"}},
+        ],
+        input="task",
+        session_id="sess-gate-recall",
+        agent_manager=am,
+    )
+    from src.graph import GraphState
+
+    state = GraphState(
+        input="task", agent_id="orchestrator", session_id="sess-gate-recall",
+    )
+    final = await graph.run(state)
+    await asyncio.sleep(0.05)
+
+    # 不崩 + 综合照常返回。
+    assert final.output == "SYNTH-RESULT", final.output
+    # synth_input 不含历史(retriever None no-op)。
+    synth_calls = [
+        c for c in _state.llm_client.calls
+        if any("Synthesize" in (m.get("content", "")) for m in c[1])
+    ]
+    assert synth_calls
+    synth_user = "".join(
+        m.get("content", "") for m in synth_calls[0][1]
+        if m.get("role") == "user"
+    )
+    assert "相关历史记忆" not in synth_user
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_self_recall_retriever_raise_noop(orchestrate_state):
+    """env gate:retriever.retrieve 抛异常 → 降级 no-op 不崩,综合仍返回。
+    召回失败绝不能阻断综合轮(只读 recall,失败即丢弃历史)。
+    """
+    _state.retriever = _StubRetriever(items=["x"], raise_on_call=True)
+
+    am = _RecordingAgentManager()
+    graph = _build_multi_agent_graph(
+        orchestrator_id="orchestrator",
+        sub_agents_spec=[
+            {"role": "role_a", "config": {"system_prompt": "[role_a] A"}},
+        ],
+        input="task",
+        session_id="sess-recall-raise",
+        agent_manager=am,
+    )
+    from src.graph import GraphState
+
+    state = GraphState(
+        input="task", agent_id="orchestrator", session_id="sess-recall-raise",
+    )
+    final = await graph.run(state)
+    await asyncio.sleep(0.05)
+
+    # retrieve 抛异常被吞 → 综合仍返回,不崩。
+    assert final.output == "SYNTH-RESULT", final.output
+    synth_calls = [
+        c for c in _state.llm_client.calls
+        if any("Synthesize" in (m.get("content", "")) for m in c[1])
+    ]
+    assert synth_calls
+    synth_user = "".join(
+        m.get("content", "") for m in synth_calls[0][1]
+        if m.get("role") == "user"
+    )
+    assert "相关历史记忆" not in synth_user

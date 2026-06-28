@@ -222,10 +222,46 @@ def _build_multi_agent_graph(
     # 分支经 AgentWorkerNode → run_agent_turn 零记忆不变(run_agent_turn 不改)。
     async def _synth_handler(state: GraphState) -> GraphState:
         perspectives = state.output or ""
+        # ADR-3 闭环最后一块:综合轮前召回 orchestrator 自己的历史记忆(只读
+        # retrieve,不改排序 match×lif/五维/蝴蝶翼/origin)注入 synth_input ——
+        # 编排真正闭环(沉淀→召回→注入综合)。env gate:_state.retriever 未 wired
+        # (None)→ no-op,synth_input 不含历史,走原 perspectives 逻辑,绝不崩。
+        # R1:分支(AgentWorkerNode → run_agent_turn)零记忆不变,只 orchestrator
+        # 综合轮单点召回(只读)。run_agent_turn 不改。
+        memory_block = ""
+        retriever = _state.retriever
+        if retriever is not None:
+            try:
+                recall_results = await retriever.retrieve(
+                    query=perspectives or "",
+                    agent_id=orchestrator_id,
+                    top_k=5,
+                )
+            except Exception:
+                logger.warning(
+                    "orchestrator self-recall failed (env gate no-op)",
+                    exc_info=True,
+                )
+                recall_results = []
+            if recall_results:
+                recall_lines: list[str] = []
+                for r in recall_results:
+                    item = r.get("item") if isinstance(r, dict) else None
+                    if item is None:
+                        continue
+                    content = getattr(item, "content", "") or ""
+                    if content:
+                        recall_lines.append(f"- {content}")
+                if recall_lines:
+                    memory_block = (
+                        "相关历史记忆:\n"
+                        + "\n".join(recall_lines)
+                        + "\n\n"
+                    )
         synth_input = (
             "You are the orchestrator. Synthesize the following sub-agent "
             "perspectives into a single unified answer:\n\n"
-            f"{perspectives}"
+            f"{memory_block}{perspectives}"
         )
         response = await run_agent_turn(
             agent_id=orchestrator_id,
