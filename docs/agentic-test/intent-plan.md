@@ -87,8 +87,9 @@ docs/agentic-test/
 
 ## 编写状态
 
-- ✅ 已写 P0(4 个,本轮)
-- ⏳ P1/P2 待写(清单已列,按 agentic test 推进逐个补)
+- ✅ 已写 P0(4 个:create-agent/single-agent-chat/multi-agent-orchestrate/memory-recall)
+- ✅ 已写 P1(6 个:delete-agent/agent-persist-restart/fc-tool-call/multi-turn-fc/canvas-live-ws/canvas-layer2-submit)
+- ⏳ P2 待写(6 个:login/agent-communication/execution-history/pitfall-query/agent-list-empty/orchestrate-no-orchestrator)
 
 ## 与 agentic test 衔接(Phase 0/1)
 
