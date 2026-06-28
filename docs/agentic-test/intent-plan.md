@@ -89,7 +89,8 @@ docs/agentic-test/
 
 - ✅ 已写 P0(4 个:create-agent/single-agent-chat/multi-agent-orchestrate/memory-recall)
 - ✅ 已写 P1(6 个:delete-agent/agent-persist-restart/fc-tool-call/multi-turn-fc/canvas-live-ws/canvas-layer2-submit)
-- ⏳ P2 待写(6 个:login/agent-communication/execution-history/pitfall-query/agent-list-empty/orchestrate-no-orchestrator)
+- ✅ 已写 P2(6 个:login/agent-communication/execution-history/pitfall-query/agent-list-empty/orchestrate-no-orchestrator)
+- **全部 16 个 intent 完成**,agentic test Phase 0/1(CLI test-run / MCP skill)待实施
 
 ## 与 agentic test 衔接(Phase 0/1)
 
