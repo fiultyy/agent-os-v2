@@ -1,0 +1,54 @@
+# 规划 §7 文档数字 CI 回写守门
+# 解 kg 审核 HIGH 根因:文档数字漂移(文档 692/14 vs 实测 706 collected + 1 collection error),
+# 所有"已完成"原本靠手跑 pytest 快照,无 CI 校验。
+#
+# 本 workflow 跑 scripts/doc_check.py 的 collect + verify + islands:
+#   - collect : pytest --co 解析 collected 数(不执行,避免环境性 flake)
+#   - verify  : 锚点 <!-- DOC-CHECK: tests=N --> vs 实测对比,漂移红
+#   - islands : NOT-WIRED defer 孤岛 allowlist(报告,不 fail)
+#
+# 红线:零触碰 services/(pytest 只 --co 收集,不执行 → 不触发 on_turn_end/emit)
+
+name: doc-check
+
+on:
+  push:
+    branches:
+      - 'feat/**'
+      - 'main'
+  pull_request:
+    branches:
+      - 'main'
+
+# 同分支新 push 取消旧 run
+concurrency:
+  group: doc-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  doc-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install orchestrator deps
+        working-directory: services/orchestrator
+        run: |
+          python -m pip install --upgrade pip
+          # 装项目依赖(若 pyproject/requirements 在则用之),否则仅装 pytest 兜底
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f pyproject.toml ] && grep -q "dependencies" pyproject.toml; then pip install -e . || true; fi
+          pip install pytest
+
+      - name: doc-check (collect + verify + islands)
+        env:
+          # 指向 orchestrator venv(CI 无 venv 时 doc_check 自动用 setup-python 的 python)
+          DOC_CHECK_PYTHON: python
+        run: python scripts/doc_check.py collect verify islands

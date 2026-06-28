@@ -128,7 +128,7 @@
 - **merge_order**:L6 最后合并;协调 `context/__init__.py`(若记忆簇后续也动 context)
 - **validation**:`grep -r 'InterceptLayer|ReasoningLayer|CAContextCoding|PitfallContextBuilder|LLMNode|ToolCallNode' services/orchestrator/src/` 零命中(自身定义已删);`pytest -q` 无 ImportError;`cd apps/web && npm run build` 无报错
 
-### Phase 3 — MVP 验收 + 基线收敛【L1+L2+L3+L4+L6 合并主分支】· ✅ **部署验证通过**(2026-06-28);本地冒烟装配完整(engine import OK + 18 工具 + pitfail/memory/kg,orchestrator **692 passed / 14 failed**(实跑 HEAD c4a99dd;失败项=butterfly_wing 7 + memory_graph_endpoint + VectorStore 环境性 baseline,零新增回归;P0-P3 多 agent 编排 +9 测试使 passed 增),gateway 6 passed);**容器部署验证通过**(2026-06-28:`:verify` 镜像临时容器 8010,/health + /v1/agents[默认助手 restore] + /v1/pitfall/ + /v1/memories 全可达,PitfailRegistry wired,启动无 ImportError;生产 `:latest` 22h 容器未触碰,记忆数据零风险)
+### Phase 3 — MVP 验收 + 基线收敛【L1+L2+L3+L4+L6 合并主分支】· ✅ **部署验证通过**(2026-06-28);本地冒烟装配完整(engine import OK + 18 工具 + pitfail/memory/kg,orchestrator **692 passed / 14 failed**(实跑 HEAD c4a99dd;失败项=butterfly_wing 7 + memory_graph_endpoint + VectorStore 环境性 baseline,零新增回归;P0-P3 多 agent 编排 +9 测试使 passed 增) <!-- DOC-CHECK: tests=706 --> [锚点=collect 数(稳定可重现 `pytest --co`),非执行 passed 数(环境性 baseline 抖动);CI 回写见 `scripts/doc_check.py`],gateway 6 passed);**容器部署验证通过**(2026-06-28:`:verify` 镜像临时容器 8010,/health + /v1/agents[默认助手 restore] + /v1/pitfall/ + /v1/memories 全可达,PitfailRegistry wired,启动无 ImportError;生产 `:latest` 22h 容器未触碰,记忆数据零风险)
 
 **MVP 交付闸门** —— 端到端五步(可复现命令记入 `docs/mvp-acceptance.md`):
 
@@ -148,7 +148,7 @@
 | 里程碑 | 内容 | 前置 |
 |---|---|---|
 | **记忆进化通电**(第一优先) | ✅ PitFail `92be2cd`/merge `df225ca`:registry 实例化 + 工具失败 hook(match→increment复发 / record新)+ /v1/pitfall API(4 GET)+ _classify_tool_error,9 测试绿;蝴蝶翼写侧接线待(记忆簇后续,蝴蝶翼红线需先与记忆迭代分支协调) | — |
-| **LLM function-calling + 多轮 loop** | ✅ 完成(FC `c248894`/merge `5f9b22b` + 多轮 `8cdc48b`/merge `7a87b68`):chat tools 参数 + tool_use 解析(anthropic 原生 + openai 兼容)+ 正则降级兜底 + 18 工具 schema;多轮(tool→llm 循环 + tool_result 回注 + MAX_TOOL_ITERATIONS + 死循环 bugfix)。12 测试绿;实测 **692 passed / 14 failed**(butterfly_wing/memory_graph/VectorStore 环境性 baseline,零新增回归;多 agent 编排 P0-P3 后,2026-06-28) | done |
+| **LLM function-calling + 多轮 loop** | ✅ 完成(FC `c248894`/merge `5f9b22b` + 多轮 `8cdc48b`/merge `7a87b68`):chat tools 参数 + tool_use 解析(anthropic 原生 + openai 兼容)+ 正则降级兜底 + 18 工具 schema;多轮(tool→llm 循环 + tool_result 回注 + MAX_TOOL_ITERATIONS + 死循环 bugfix)。12 测试绿;实测 **692 passed / 14 failed**(butterfly_wing/memory_graph/VectorStore 环境性 baseline,零新增回归;多 agent 编排 P0-P3 后,2026-06-28) <!-- DOC-CHECK: tests=706 --> | done |
 | **多 Agent 编排** | 准备 ✅(`874da6a`,2026-06-28:修 BFS fan-in join-barrier 汇聚重复执行 bug + ParallelNode/FanIn/Subgraph 18 单测固化语义,pending-queue 去重兼容循环图);**通电待** meta create_subagent 生命周期(天级,从无到有 + 碰 agent_manager/chat.py)+ 真实多 agent 场景;信任域 ScopeManager / Checkpoint resume 随本簇统一规划 | 图引擎基线(Phase 1 _resolve_next + `874da6a` join-barrier)✅ |
 | **辅助服务命运决策** | ✅ **归档**(`07f9921`,2026-06-28):compose 解耦 gateway depends_on + `profiles:[aux]` 隔离 + 三路由 502 兜底,代码全保留可逆;⚠️ `profiles` 仅 Compose v2 生效(本机 v1.29.2 静默忽略,但 depends_on 解耦已使主链路不被 aux 拖垮,核心收益达成);通电待真实需求(prompt 面板/会话回放落库/多 provider 动态路由);gRPC 无消费场景继续 defer | 视 MVP 反馈 |
 
