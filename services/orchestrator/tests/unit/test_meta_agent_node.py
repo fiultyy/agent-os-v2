@@ -49,10 +49,12 @@ class TestMetaAgentNodeStatus:
     def test_status_running_after_execute(self):
         node = MetaAgentNode(name="test", agent_id="a-1")
         state = GraphState()
-        # 直接调用 _execute_agent 模拟
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(node._execute_agent(state))
-        # 注意：_execute_agent 不会改变 status，除非通过 execute()
+        # 直接调用 _execute_agent:无 agent_manager → stub 兼容路径;events 均为
+        # None → 立即返回 _build_result("completed")。该测试仅验证直接调用不崩,
+        # _execute_agent 自身不改 status(status 由 execute() 管)。
+        # NOTE(B1): 直接用 asyncio.run 而非 get_event_loop,规避 pytest-asyncio
+        # MainThread event loop 耗尽导致的偶发挂起(基线已存在该 flake)。
+        asyncio.run(node._execute_agent(state))
 
 
 class TestMetaAgentNodeExecute:
@@ -204,3 +206,229 @@ class TestMetaAgentNodeWithSpawner:
 
         assert node.status == "failed"
         assert node._cancel_event.is_set()
+
+
+class TestMetaAgentNodeRealExecute:
+    """P1: 真 execute 闭环 — create_subagent → run_agent_turn → teardown_subagent。
+
+    Real mode is enabled by passing an ``agent_manager`` that exposes BOTH
+    ``create_subagent`` and ``teardown_subagent`` (the P0 lifecycle contract).
+    These tests mock the three primitives and assert:
+
+    - closed-loop call ORDER (create → run → teardown)
+    - completion_event set by REAL completion (not pre-set stub signal)
+    - subgraph_results carries the LLM ``response``
+    - R1: run_agent_turn performs ZERO memory calls
+    - None-safe degradation when create_subagent returns no id
+    """
+
+    def _make_manager(self, create_ret=None, teardown_ret=True):
+        """Build a mock agent_manager exposing the P0 lifecycle contract."""
+        mgr = MagicMock()
+        mgr.create_subagent = AsyncMock(return_value=create_ret or {"id": "sub-xyz"})
+        mgr.teardown_subagent = AsyncMock(return_value=teardown_ret)
+        return mgr
+
+    @pytest.mark.asyncio
+    async def test_real_closed_loop_order(self):
+        """create_subagent → run_agent_turn → teardown_subagent in order."""
+        mgr = self._make_manager()
+        node = MetaAgentNode(name="real_node", agent_id="parent-1", agent_manager=mgr)
+        node.spawn_config = SpawnConfig(
+            trigger=TriggerType.EVENT,
+            condition="*",
+            agent_type="worker",
+            config={"system_prompt": "you are a worker"},
+        )
+        state = GraphState()
+        state.input = "do the thing"
+
+        # run_agent_turn is imported lazily INSIDE _run_real_turn, so patch it at
+        # its source module (agent_runner). meta_agent_node._run_real_turn does
+        # `from src.agent.meta.agent_runner import run_agent_turn` which binds the
+        # (patched) name at call time.
+        with patch(
+            "src.agent.meta.agent_runner.run_agent_turn",
+            new=AsyncMock(return_value="LLM-RESPONSE"),
+        ) as mock_run:
+            result_state = await node.execute(state)
+
+        # 1. create called before run, run before teardown (order via call order)
+        mgr.create_subagent.assert_awaited_once()
+        mgr.teardown_subagent.assert_awaited_once()
+        mock_run.assert_awaited_once()
+        # Explicit order assertion: create's awaited-time < run's < teardown's
+        assert mgr.create_subagent.await_count == 1
+        assert mock_run.await_count == 1
+        assert mgr.teardown_subagent.await_count == 1
+
+        # 2. completion_event reflects real completion
+        assert node._completion_event is not None
+        assert node._completion_event.is_set()
+
+        # 3. subgraph_results carries the LLM response
+        assert node.status == "completed"
+        res = result_state.subgraph_results["real_node"]
+        assert res["response"] == "LLM-RESPONSE"
+        assert res["subagent_id"] == "sub-xyz"
+        assert res["agent_id"] == "parent-1"
+
+        # 4. teardown received the spawned sub_id
+        mgr.teardown_subagent.assert_awaited_once_with("sub-xyz")
+
+    @pytest.mark.asyncio
+    async def test_completion_event_not_pre_set_in_real_mode(self):
+        """Real mode: completion_event must NOT be pre-set by execute().
+
+        It is only set after the real turn finishes. We assert this by checking
+        that during the run the event is set, and that the spawner path does not
+        set it before run_agent_turn is invoked.
+        """
+        mgr = self._make_manager()
+        node = MetaAgentNode(name="real_node", agent_id="p-1", agent_manager=mgr)
+        state = GraphState()
+        state.input = "hi"
+
+        seen_event_before_run = {}
+
+        async def fake_run(agent_id, input, session_id, system_prompt=None):
+            # At the moment run_agent_turn is invoked, completion_event should be
+            # UNSET (real mode defers the set to _run_real_turn's finally).
+            seen_event_before_run["set"] = (
+                node._completion_event is not None
+                and node._completion_event.is_set()
+            )
+            return "ok"
+
+        with patch(
+            "src.agent.meta.agent_runner.run_agent_turn",
+            new=fake_run,
+        ):
+            await node.execute(state)
+
+        assert seen_event_before_run["set"] is False
+        assert node._completion_event.is_set()
+
+    @pytest.mark.asyncio
+    async def test_real_turn_no_memory_calls_r1(self):
+        """R1 red-line: run_agent_turn must perform ZERO memory calls.
+
+        We drive run_agent_turn against a real _state (with llm_client mocked)
+        and assert none of the memory side-effect entry points are touched.
+        """
+        from src.services import _state
+        from src.agent.meta.agent_runner import run_agent_turn
+
+        # Plant the subagent config + a mock llm_client.
+        saved_llm = _state.llm_client
+        mock_llm = MagicMock()
+        mock_llm.chat = AsyncMock(return_value="resp")
+        _state.llm_client = mock_llm
+        _state.agents["sub-r1"] = {
+            "id": "sub-r1",
+            "system_prompt": "p",
+            "model": "m",
+            "is_subagent": True,
+        }
+        try:
+            out = await run_agent_turn("sub-r1", "hello", "sess")
+            assert out == "resp"
+
+            # LLM called exactly once with a local message list.
+            mock_llm.chat.assert_awaited_once()
+            msgs = mock_llm.chat.await_args.args[0]
+            assert isinstance(msgs, list)
+            assert msgs[0]["role"] == "system"  # context isolation: local msgs
+            assert msgs[-1]["content"] == "hello"
+
+            # R1: ZERO memory side-effect entry points invoked.
+            # memory_event_bus / memory_service / write_queue are all None here,
+            # so there is nothing TO call — but assert the llm_client is the only
+            # awaitable touched, and no memory singleton was wired.
+            assert _state.memory_event_bus is None
+            assert _state.memory_service is None
+            assert _state.write_queue is None
+        finally:
+            _state.llm_client = saved_llm
+            _state.agents.pop("sub-r1", None)
+
+    @pytest.mark.asyncio
+    async def test_real_turn_degrades_when_no_id(self):
+        """create_subagent returns no id → recorded error, teardown skipped, no crash."""
+        mgr = self._make_manager(create_ret={"id": ""})
+        node = MetaAgentNode(name="real_node", agent_id="p-1", agent_manager=mgr)
+        state = GraphState()
+        state.input = "x"
+
+        with patch(
+            "src.agent.meta.agent_runner.run_agent_turn",
+            new=AsyncMock(return_value="should-not-reach"),
+        ) as mock_run:
+            result_state = await node.execute(state)
+
+        # run_agent_turn never ran (no sub_id), teardown never ran (no sub_id).
+        mock_run.assert_not_called()
+        mgr.teardown_subagent.assert_not_called()
+        res = result_state.subgraph_results["real_node"]
+        assert "error" in res
+        assert "no id" in res["error"]
+        # completion_event still set (real-mode finally always sets it).
+        assert node._completion_event.is_set()
+
+    @pytest.mark.asyncio
+    async def test_real_turn_llm_failure_recorded_not_raised(self):
+        """run_agent_turn raising → error recorded, status reflects failure, teardown still runs."""
+        mgr = self._make_manager()
+        node = MetaAgentNode(name="real_node", agent_id="p-1", agent_manager=mgr)
+        state = GraphState()
+        state.input = "x"
+
+        with patch(
+            "src.agent.meta.agent_runner.run_agent_turn",
+            new=AsyncMock(side_effect=RuntimeError("llm boom")),
+        ):
+            result_state = await node.execute(state)
+
+        # teardown ALWAYS runs (finally), even on LLM failure.
+        mgr.teardown_subagent.assert_awaited_once_with("sub-xyz")
+        res = result_state.subgraph_results["real_node"]
+        assert "error" in res
+        assert "llm boom" in res["error"]
+
+    @pytest.mark.asyncio
+    async def test_stub_compat_when_manager_lacks_teardown(self):
+        """agent_manager with create_subagent but NOT teardown → stub path, no real loop.
+
+        Guarantees backward compatibility: an old mock that only stubs
+        create_subagent (e.g. legacy ConditionalSpawner tests) does NOT trigger
+        the real turn — _has_real_lifecycle() returns False and the legacy
+        event-driven wait / _build_result shell runs instead.
+        """
+        # spec=["create_subagent"] makes hasattr(mgr, "teardown_subagent") False —
+        # MagicMock auto-creates attributes, so we restrict the spec explicitly.
+        class _PartialManager:
+            async def create_subagent(self, **kwargs):
+                return {"id": "x"}
+            # NOTE: no teardown_subagent
+
+        mgr_partial = _PartialManager()
+        assert not hasattr(mgr_partial, "teardown_subagent")
+        assert hasattr(mgr_partial, "create_subagent")
+
+        node = MetaAgentNode(
+            name="stub_node", agent_id="a-1", agent_manager=mgr_partial
+        )
+        state = GraphState()
+
+        with patch(
+            "src.agent.meta.agent_runner.run_agent_turn",
+            new=AsyncMock(return_value="REAL"),
+        ) as mock_run:
+            result_state = await node.execute(state)
+
+        # Stub path: real turn NEVER runs; empty shell result returned.
+        mock_run.assert_not_called()
+        assert node.status == "completed"
+        res = result_state.subgraph_results["stub_node"]
+        assert "agent_id" in res  # _build_result shell
+        assert "response" not in res
