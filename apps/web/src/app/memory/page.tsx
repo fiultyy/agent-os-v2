@@ -3,11 +3,12 @@
 import { MemoryPanel } from "@/components/panels/MemoryPanel";
 import { CommunicationPanel } from "@/components/panels/CommunicationPanel";
 import { DebugPanel } from "@/components/panels/DebugPanel";
+import { OrchestrationPanel } from "@/components/panels/OrchestrationPanel";
 import { Header } from "@/components/layout/Header";
 import { useState } from "react";
-import { Brain, MessageSquare, Bug } from "lucide-react";
+import { Brain, MessageSquare, Bug, Workflow } from "lucide-react";
 
-type Tab = "memory" | "communication" | "debug";
+type Tab = "memory" | "communication" | "debug" | "orchestration";
 
 export default function MemoryPage() {
   const [activeTab, setActiveTab] = useState<Tab>("memory");
@@ -16,6 +17,7 @@ export default function MemoryPage() {
     { id: "memory", label: "记忆", icon: <Brain className="h-4 w-4" /> },
     { id: "communication", label: "通信", icon: <MessageSquare className="h-4 w-4" /> },
     { id: "debug", label: "调试", icon: <Bug className="h-4 w-4" /> },
+    { id: "orchestration", label: "编排", icon: <Workflow className="h-4 w-4" /> },
   ];
 
   return (
@@ -45,6 +47,7 @@ export default function MemoryPage() {
           {activeTab === "memory" && <MemoryPanel />}
           {activeTab === "communication" && <CommunicationPanel />}
           {activeTab === "debug" && <DebugPanel />}
+          {activeTab === "orchestration" && <OrchestrationPanel />}
         </div>
       </div>
     </div>

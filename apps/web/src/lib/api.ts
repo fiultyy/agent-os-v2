@@ -214,6 +214,97 @@ export async function executeWithSSE(
   }
 }
 
+// ── Orchestrate (SSE) ─────────────────────────────────────────
+//
+// 编排 prod caller 第一步:复用 executeWithSSE 的模式(API_BASE + fetch +
+// SSE 解析),但 POST 独立的 /v1/orchestrate 端点(OrchestrateRequest)。SSE
+// 事件类型见后端 orchestrate.py 的 event_stream:agent_status / node_start /
+// node_complete(node: multi_agent | fan_in | synthesizer)/ execution_complete /
+// error。与 /v1/execute 物理隔离(R2),前端调用方亦独立 —— 不改 executeWithSSE。
+
+export interface OrchestrateSubAgent {
+  role: string;
+  system_prompt?: string;
+  input?: string;
+  config?: Record<string, unknown>;
+}
+
+export async function orchestrateWithSSE(
+  orchestratorAgentId: string,
+  input: string,
+  subAgents: OrchestrateSubAgent[],
+  sessionId?: string,
+  onEvent?: (event: SSEEvent) => void
+): Promise<void> {
+  const doFetch = async (headers: Record<string, string>): Promise<Response> => {
+    return fetch(`${API_BASE}/orchestrate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers },
+      body: JSON.stringify({
+        orchestrator_agent_id: orchestratorAgentId,
+        input,
+        sub_agents: subAgents,
+        session_id: sessionId || "",
+      }),
+    });
+  };
+
+  let res = await doFetch(authHeaders());
+
+  // Auto-refresh on 401 — mirror the logic in executeWithSSE / request().
+  if (res.status === 401) {
+    if (!_refreshPromise) {
+      _refreshPromise = refreshTokens().then((r) => r?.access_token ?? null);
+    }
+    const newToken = await _refreshPromise.catch(() => null);
+    _refreshPromise = null;
+
+    if (newToken) {
+      res = await doFetch({ Authorization: `Bearer ${newToken}` });
+    } else {
+      if (typeof window !== "undefined") {
+        window.location.href = "/login";
+      }
+      throw new Error("Authentication required");
+    }
+  }
+
+  if (!res.ok || !res.body) {
+    throw new Error(`Orchestrate failed: ${res.status}`);
+  }
+
+  // SSE 解析逻辑与 executeWithSSE 完全同形(复用模式,不共享状态)。
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let currentEvent = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      if (line.startsWith("event: ")) {
+        currentEvent = line.slice(7);
+      } else if (line.startsWith("data: ")) {
+        const dataStr = line.slice(6);
+        if (dataStr === "[DONE]") return;
+        try {
+          const data = JSON.parse(dataStr);
+          onEvent?.({ event: currentEvent, data });
+        } catch {
+          // skip non-JSON data lines
+        }
+        currentEvent = "";
+      }
+    }
+  }
+}
+
 // ── Memory API ────────────────────────────────────────────────
 
 export async function getMemories(
