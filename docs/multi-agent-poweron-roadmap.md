@@ -5,7 +5,7 @@
 > **铁律**:`/execute` 单 agent 线性图零回归 + 记忆模块零触碰。
 > ParallelNode 准备已完成(`874da6a`:join-barrier 修 + 18 单测)。
 >
-> ✅ **里程碑达成(2026-06-28)**:P0-P3 全完成,提交链 `25e802e`(P0 create_subagent)→ `78d6f5c`(P1 MetaAgentNode/run_agent_turn)→ `8fa2e1f`(P2 ParallelNode demo)→ `386aae2`(P3 /v1/orchestrate)。`POST /v1/orchestrate` → fan-out N subagent(spawn→run→teardown 闭环)→ fan-in 综合 → synthesizer,SSE 全程可见。**客观隔离判据**(kg 审核订正 2026-06-28):三文件(test_multi_turn_tool_loop/test_graph_engine/test_parallel_nodes)git diff 0 行 + `test_parallel_production_graph` 为本里程碑 P2 新增(324 行,非"零改动")。全套 **692 passed / 14 failed**(14 均既有 butterfly_wing/vectorstore 环境性 baseline,零新增回归;P1 修 B1 flake 使 15→14)。<!-- DOC-CHECK: tests=706 -->(锚点=collect 数 706,稳定可重现;执行 passed 692 受环境性 baseline 抖动,CI 回写以 collect 锚点为准,见 `scripts/doc_check.py`)红线 R1-R8 代码层全守。⚠️ **kg 审核诚实发现**:(a) ~~`meta_spawner` 休眠孤岛~~ **已清理**(`d1e64ef`:删 engine.py 装配块 + _state 槽位,生产经 _agent_manager_shim 绕过;ConditionalSpawner 类保留 defer);(b) "记忆单点落库"叙述幻觉——实际**全路径零落库**(R1 严格副产物,编排结果入记忆待后续决策);(c) `/v1/orchestrate` + `/execute_parallel` 无生产 caller(demo 端点孤岛,待消费);(d) ~~`orchestration_graph_builder` 纯死字段~~ **已删**(`d1e64ef`)。**清理**:`d1e64ef` 还删 DEGRADED_AGENTS 死字段 + _sse_error/build_skill_parser 死函数 + ~25 未用 import;10 defer 孤岛(SandboxExecutor/ScopeManager/ConcurrencyController/canvas API 等)加 `# NOT-WIRED` 标注。真实 HTTP 端到端冒烟待容器。
+> ✅ **里程碑达成(2026-06-28)**:P0-P3 全完成,提交链 `25e802e`(P0 create_subagent)→ `78d6f5c`(P1 MetaAgentNode/run_agent_turn)→ `8fa2e1f`(P2 ParallelNode demo)→ `386aae2`(P3 /v1/orchestrate)。`POST /v1/orchestrate` → fan-out N subagent(spawn→run→teardown 闭环)→ fan-in 综合 → synthesizer,SSE 全程可见。**客观隔离判据**(kg 审核订正 2026-06-28):三文件(test_multi_turn_tool_loop/test_graph_engine/test_parallel_nodes)git diff 0 行 + `test_parallel_production_graph` 为本里程碑 P2 新增(324 行,非"零改动")。全套 **692 passed / 14 failed**(14 均既有 butterfly_wing/vectorstore 环境性 baseline,零新增回归;P1 修 B1 flake 使 15→14)。<!-- DOC-CHECK: tests=706 -->(锚点=collect 数 706,稳定可重现;执行 passed 692 受环境性 baseline 抖动,CI 回写以 collect 锚点为准,见 `scripts/doc_check.py`)红线 R1-R8 代码层全守。⚠️ **kg 审核诚实发现**:(a) ~~`meta_spawner` 休眠孤岛~~ **已清理**(`d1e64ef`:删 engine.py 装配块 + _state 槽位,生产经 _agent_manager_shim 绕过;ConditionalSpawner 类保留 defer);(b) ~~"记忆单点落库"幻觉~~ **编排记忆沉淀 ✅(ADR-3 done `b721532`/merge `0f1aa1e`)**:orchestrator fan-in 单点 emit TURN_END/SESSION_END+KG(复用既有 caller,R1 分支零记忆,env gate);engine.py memory_event_bus 生产已 wire(emit 被消费落库);⚠️ 残余:**召回侧闭环待验证**(orchestrator agent-self 记忆能否被召回路径按 agent_id 消费);(c) `/v1/orchestrate` + `/execute_parallel` 无生产 caller(demo 端点孤岛,待消费);(d) ~~`orchestration_graph_builder` 纯死字段~~ **已删**(`d1e64ef`)。**清理**:`d1e64ef` 还删 DEGRADED_AGENTS 死字段 + _sse_error/build_skill_parser 死函数 + ~25 未用 import;10 defer 孤岛(SandboxExecutor/ScopeManager/ConcurrencyController/canvas API 等)加 `# NOT-WIRED` 标注。真实 HTTP 端到端冒烟待容器。
 
 ## 北极星判据
 
@@ -55,7 +55,7 @@ P2 ParallelNode demo(独立,可与 P1 并行)
 ### P3 · 调度入口 /v1/orchestrate(L 2-3 天,消费 P0+P1)
 - **改**:新增 routes/orchestrate.py + orchestration/multi_agent_graph.py + agent_worker_node.py;models.py +OrchestrateRequest;_state.py +meta_spawner/+orchestration_graph_builder(None-safe);engine.py include_router
 - **要点**:物理隔离(新文件/router/request);`_build_multi_agent_graph`(orchestrator→ParallelNode(AgentWorkerNode)→FanInNode→synthesizer);AgentWorkerNode 调 create_subagent + _run_agent_turn + teardown
-- **客观判据**:三文件零改动全绿 + 端到端 curl 多 agent + 零主路径 diff + 记忆全路径零触碰(R1;非"单点落库"——编排结果入记忆待后续决策)
+- **客观判据**:三文件零改动全绿 + 端到端 curl 多 agent + 零主路径 diff + 记忆 R1 分支零触碰;orchestrator 综合轮单点 emit(ADR-3 `0f1aa1e`)
 
 **推荐执行序**:P0 → P2‖P1 → P3(4-5 天优化路径)
 
@@ -71,7 +71,7 @@ P2 ParallelNode demo(独立,可与 P1 并行)
 
 | # | 红线 | 落地 |
 |---|---|---|
-| R1 | 记忆模块零触碰 | create_subagent 严禁 init_agent_blocks;_node_llm_for/_run_agent_turn 剥离 memory_event_bus.emit/_trigger_*;**实际全路径零落库**(run_agent_turn 有意 docstring 守卫;orchestrator 综合轮不沉淀记忆;编排结果入记忆待后续决策) |
+| R1 | 记忆模块零触碰 | create_subagent 严禁 init_agent_blocks;_node_llm_for/_run_agent_turn 剥离 memory_event_bus.emit/_trigger_*;**分支零落库**(run_agent_turn 不变);orchestrator 综合轮单点 emit(ADR-3 `0f1aa1e`,复用既有 caller,env gate) |
 | R2 | /execute 线性图冻结 | _build_execution_graph(chat.py:548)+/execute(chat.py:678)一行不改 |
 | R3 | 不给 ExecuteRequest 加 mode 开关 | 多 agent 用独立 OrchestrateRequest/ExecuteParallelRequest |
 | R4 | L2 独占写权区最小侵入 | _state 只加 None-safe 字段;engine 只 include_router+实例化;chat 只加新函数 |
