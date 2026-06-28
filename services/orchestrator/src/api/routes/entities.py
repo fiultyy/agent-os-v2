@@ -64,6 +64,9 @@ async def debug_status() -> dict:
         # #3: side-agent 降级计数(degrade 否则静默)。#1: 生效 timeout。
         "degraded_stats": dict(_state.degraded_stats),
         "sidellm_timeout": _state.SIDELLM_TIMEOUT,
+        # 内向观测:运行时观察(anomaly/error-spike)的内存环形缓冲快照
+        # (RuntimeObserverHook)。与 degraded_stats(side-agent LLM 通道降级)区分。
+        "runtime_anomalies": _state.recent_observations(20),
         # idle-trigger 可观测:写入水位 / 各层最后触发时间 / 提炼积压(origin=AGENT
         # 未提炼数)。直接读 watcher 快照(实时),未装配时为 None。
         "maintenance": (

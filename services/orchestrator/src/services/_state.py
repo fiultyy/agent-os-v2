@@ -190,3 +190,54 @@ def log_execution_step(node_name: str, state: Any, status: str = "done") -> None
     execution_log.append(entry)
     if len(execution_log) > MAX_EXECUTION_LOG:
         del execution_log[: len(execution_log) - MAX_EXECUTION_LOG]
+
+
+# ── Runtime observation (introspective observability) ──────────────
+# In-memory ring buffer of runtime observations (anomaly / error-spike /
+# stalled). PURE MEMORY — never persisted to memory_service / memories.db /
+# the recall path (memory red-line R1-R8). Surfaced via /debug/status
+# (recent_observations) and pushed live as ``runtime_observation`` SSE events
+# (consumed by the front-end DebugPanel). Distinct from degraded_stats, which
+# counts side-agent LLM-channel degrade, not agent execution anomalies.
+
+runtime_observations: list[dict[str, Any]] = []
+MAX_RUNTIME_OBSERVATIONS: int = 200
+
+
+def emit_runtime_observation(
+    kind: str, agent_id: str, detail: dict[str, Any] | None = None,
+) -> None:
+    """Broadcast a runtime observation as an SSE event (mirrors emit_agent_message)."""
+    payload: dict[str, Any] = {
+        "kind": kind,
+        "agent_id": agent_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    if detail:
+        payload.update(detail)
+    _push_sse(sse("runtime_observation", payload))
+
+
+def record_observation(
+    kind: str, agent_id: str, detail: dict[str, Any] | None = None,
+) -> None:
+    """Append a runtime observation to the in-memory ring buffer and push it live.
+
+    The buffer feeds ``GET /debug/status``; the live push feeds the front-end
+    DebugPanel. Pure in-memory — must never write to memory_service / memories.
+    """
+    entry: dict[str, Any] = {
+        "kind": kind,
+        "agent_id": agent_id,
+        "detail": detail or {},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    runtime_observations.append(entry)
+    if len(runtime_observations) > MAX_RUNTIME_OBSERVATIONS:
+        del runtime_observations[: len(runtime_observations) - MAX_RUNTIME_OBSERVATIONS]
+    emit_runtime_observation(kind, agent_id, detail)
+
+
+def recent_observations(limit: int = 50) -> list[dict[str, Any]]:
+    """Read-only snapshot of recent runtime observations (newest first)."""
+    return list(reversed(runtime_observations[-limit:]))

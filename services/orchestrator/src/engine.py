@@ -304,6 +304,7 @@ from src.memory.sideline.ingestor_agent import IngestorAgent, IngestorHook
 from src.memory.sideline.consolidator_agent import ConsolidatorAgent, ConsolidatorHook
 from src.memory.sideline.retriever_agent import RetrieverAgent, RetrieverHook
 from src.memory.sideline.curator_agent import CuratorAgent, CuratorHook
+from src.memory.runtime_observer import RuntimeObserverHook
 from src.memory.neural_field import (
     NeuralFieldEngine,
     NeuralFieldStore,
@@ -371,6 +372,14 @@ if os.getenv("MEMORY_NEURAL_FIELD_ENABLED", "0") == "1":
         # OBSERVER 返回 None,emit 取 last non-None,不覆盖 IngestorHook 的 IngestorResult。
         _state.neural_hook, EventType.TURN_END, EventType.INGEST,
     )
+
+# Runtime observer hook — introspective observability (error-spike detection).
+# Pure read of _state.execution_log → runtime_observations ring buffer; zero
+# LLM, zero memory writes. Unconditional (non-fatal; auto-skipped under
+# MEMORY_EVENT_BUS_ENABLED=0 degradation). OBSERVER priority, returns None.
+_state.memory_event_bus.register(
+    RuntimeObserverHook(), EventType.TURN_END, EventType.SESSION_END,
+)
 
 # Ensure data directory exists for SQLite databases
 Path("data").mkdir(exist_ok=True)
