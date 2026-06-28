@@ -214,46 +214,38 @@ class ConditionalSpawner:
         return None
 
     async def _create_subagent(self, config: SpawnConfig) -> str | None:
-        """创建 subagent。"""
-        if hasattr(self._agent_manager, "create_subagent"):
-            result = await self._agent_manager.create_subagent(
-                agent_type=config.agent_type,
-                config=config.config,
-            )
-            if isinstance(result, dict):
-                agent_id = result.get("id") or result.get("agent_id")
-            elif isinstance(result, str):
-                agent_id = result
-            else:
-                agent_id = None
+        """创建 subagent。
 
-            if agent_id:
-                self._active_agents[agent_id] = {
-                    "agent_id": agent_id,
-                    "agent_type": config.agent_type,
-                    "config": config.config,
-                    "spawned_at": datetime.now(timezone.utc).isoformat(),
-                    "status": "running",
-                }
-                return agent_id
+        Delegates to ``agent_manager.create_subagent``. The ``hasattr`` guard
+        preserves backward compatibility with old mocks that don't expose
+        ``create_subagent`` (in which case spawn is a no-op returning None).
+        The dead "call agent_manager as a callable" fallback was removed —
+        ``agent_manager`` is a module, never a callable, so that branch always
+        raised ``TypeError``.
+        """
+        if not hasattr(self._agent_manager, "create_subagent"):
+            return None
 
-        # Fallback: 直接调用 agent_manager
-        try:
-            agent_id = await self._agent_manager(
-                agent_type=config.agent_type,
-                **config.config,
-            )
-            if agent_id:
-                self._active_agents[agent_id] = {
-                    "agent_id": agent_id,
-                    "agent_type": config.agent_type,
-                    "config": config.config,
-                    "spawned_at": datetime.now(timezone.utc).isoformat(),
-                    "status": "running",
-                }
-                return agent_id
-        except Exception as e:
-            logger.error(f"Failed to create subagent: {e}")
+        result = await self._agent_manager.create_subagent(
+            agent_type=config.agent_type,
+            config=config.config,
+        )
+        if isinstance(result, dict):
+            agent_id = result.get("id") or result.get("agent_id")
+        elif isinstance(result, str):
+            agent_id = result
+        else:
+            agent_id = None
+
+        if agent_id:
+            self._active_agents[agent_id] = {
+                "agent_id": agent_id,
+                "agent_type": config.agent_type,
+                "config": config.config,
+                "spawned_at": datetime.now(timezone.utc).isoformat(),
+                "status": "running",
+            }
+            return agent_id
 
         return None
 

@@ -64,6 +64,109 @@ async def init_default_agent() -> dict[str, Any] | None:
     return agent
 
 
+async def create_subagent(
+    agent_type: str,
+    config: dict[str, Any],
+    parent_id: str = "",
+    session_id: str = "",
+) -> dict[str, Any]:
+    """Create a *transient* subagent for multi-agent orchestration.
+
+    Unlike :func:`create_agent_data`, a subagent is a short-lived runtime entity
+    (spawned by ConditionalSpawner / MetaAgentNode) — it is **never** persisted
+    to the five-block memory layout. Memory red-line R1: this function MUST NOT
+    call ``memory_service.init_agent_blocks`` or any ``memory_*`` helper;
+    subagents carry no long-term memory.
+
+    Contract (R6, locked by ``conditional_spawner._create_subagent`` L223-228):
+    always returns ``{"id": <uuid>}``.
+
+    Basic fields (name/model/system_prompt) are taken from ``config`` when
+    present, otherwise defaulted. The agent dict additionally carries:
+    ``is_subagent=True, parent_id, agent_type, spawned_at, status="running"``.
+
+    Side effects are best-effort and None-safe:
+    - ``communication_bus.register_agent(id, session_id)`` when the bus exists;
+    - ``pg_store.store_agent(agent)`` when PG is wired (failure degrades — the
+      in-memory dict is the source of truth for subagents).
+    """
+    agent_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    agent: dict[str, Any] = {
+        "id": agent_id,
+        "name": config.get("name", f"subagent-{agent_type}"),
+        "description": config.get("description", ""),
+        "status": "running",
+        "model": config.get("model", "glm-4-flash"),
+        "system_prompt": config.get("system_prompt", ""),
+        "tools": list(config.get("tools", [])),
+        # ── subagent-specific markers ──
+        "is_subagent": True,
+        "parent_id": parent_id,
+        "agent_type": agent_type,
+        "session_id": session_id,
+        "spawned_at": now,
+        "created_at": now,
+        "updated_at": now,
+    }
+    _state.agents[agent_id] = agent
+
+    # communication_bus: None-safe register (broadcast delivery membership)
+    bus = _state.communication_bus
+    if bus is not None:
+        try:
+            bus.register_agent(agent_id, session_id)
+        except Exception:  # bus failure must not abort subagent creation
+            pass
+
+    # pg_store: best-effort persist, degrade to in-memory only
+    if _state.pg_store is not None:
+        try:
+            await _state.pg_store.store_agent(agent)
+        except Exception:
+            pass
+
+    # NOTE(intentional): no memory_service.init_agent_blocks call — R1 red-line.
+    return {"id": agent_id}
+
+
+async def teardown_subagent(agent_id: str) -> bool:
+    """Tear down a previously-spawned subagent.
+
+    Red-line R5: the ``is_subagent is True`` guard is mandatory — a persistent
+    agent (``is_subagent`` absent or False) is NEVER removed here, preventing
+    accidental deletion of long-lived agents via the subagent teardown path.
+
+    Returns ``True`` on successful removal, ``False`` if the agent is missing or
+    is not a subagent. Side effects (``communication_bus.unregister_agent``,
+    ``pg_store.delete_agent``) are None-safe / best-effort.
+    """
+    agent = _state.agents.get(agent_id)
+    if agent is None:
+        return False
+    if agent.get("is_subagent") is not True:
+        # R5 guard: refuse to tear down non-subagent (persistent) agents.
+        return False
+
+    session_id = agent.get("session_id", "")
+    bus = _state.communication_bus
+    if bus is not None:
+        try:
+            bus.unregister_agent(agent_id, session_id)
+        except Exception:
+            pass
+
+    del _state.agents[agent_id]
+
+    if _state.pg_store is not None:
+        try:
+            await _state.pg_store.delete_agent(agent_id)
+        except Exception:
+            pass
+
+    return True
+
+
 async def restore_agents_from_pg() -> int:
     """Restore persisted agents from PG into the in-memory ``agents`` dict.
 
