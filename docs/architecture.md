@@ -5,6 +5,13 @@
 
 ---
 
+> ⚠️ **本文为 2026-04 设计快照,非实现现状。** 实际进度与接线状态以
+> `docs/mvp-iteration-roadmap.md` 及 `agentos-mvp-roadmap` memory 为准。文中多处组件
+> 实际 **defer 或 NOT-WIRED**,未接生产:服务间 **gRPC**(实际走 HTTP/SSE/WS,
+> `grpcio` 零运行时接线)、Meta Agent **Sandbox / ConditionalSpawn**(源码自标
+> NOT-WIRED)、Parallel Execution 路由 `execute_parallel`(已挂载生产但无 prod caller)。
+> 请把本文当**设计参考**,勿当**实现清单**。
+
 ## Meta Agent vs Side Agent 区分
 
 ### Meta Agent（Agent 自身机制）
