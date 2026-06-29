@@ -1,10 +1,9 @@
 """End-to-end integration tests for D-30 scoring system."""
-import pytest
 
 
 def test_full_committee_pipeline():
     """Test complete pipeline: scoring -> committee -> agents."""
-    from src.scoring import ScoringEngine, ScoringContext, ScoringSignal
+    from src.scoring import ScoringEngine, ScoringContext
     from src.scoring.policies import ButterflySignalPolicy, ReuseThresholdPolicy
     from src.scoring.committee import ProfileGenerationCommittee
     from src.scoring.agents import RefinerAgent
@@ -60,7 +59,7 @@ def test_full_committee_pipeline():
 
 def test_calibration_system():
     """Test calibration system finds better thresholds."""
-    from src.scoring.calibration import ScoringCalibrationSystem, BundleHistory
+    from src.scoring.calibration import BundleHistory
     from src.scoring.policies import ButterflySignalPolicy
     
     history = BundleHistory()
@@ -78,7 +77,7 @@ def test_calibration_system():
 
 def test_butterfly_signal_triggers_committee():
     """Strong butterfly signal should trigger committee."""
-    from src.scoring import ScoringEngine, ScoringContext, ScoringSignal
+    from src.scoring import ScoringEngine, ScoringContext
     from src.scoring.policies import ButterflySignalPolicy
     
     policy = ButterflySignalPolicy(

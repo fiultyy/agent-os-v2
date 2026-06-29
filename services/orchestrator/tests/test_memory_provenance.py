@@ -31,7 +31,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.memory.types import (
-    MemoryItem, MemoryFilter, MemoryType, MemoryScope, MemoryOrigin,
+    MemoryItem, MemoryFilter, MemoryType, MemoryOrigin,
 )
 from src.memory.store import InMemoryStore
 from src.memory.sqlitestore import SQLiteStore

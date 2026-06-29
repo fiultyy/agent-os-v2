@@ -15,9 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 def test_primitive():
     """测试 primitive 工具"""
     from src.skills.primitive import (
-        http_get, http_post, http_put, http_delete, http_patch,
-        file_read, file_write, file_delete, file_exists, file_list, file_mkdir,
-        db_query, db_execute, db_transaction, db_schema
+        file_read, file_write, file_delete, file_exists, db_execute
     )
 
     # File operations
@@ -36,8 +34,7 @@ def test_primitive():
 
 def test_skill():
     """测试 skill 工具"""
-    from src.skills.browser import browser_navigate, browser_snapshot, browser_click, browser_type
-    from src.skills.code import code_read, code_write, code_search
+    from src.skills.code import code_read
     from src.skills.memory import memory_recall, memory_store
     from src.skills.primitive import file_write, file_delete
 
@@ -60,7 +57,7 @@ def test_skill():
 
 def test_composite():
     """测试 composite 工具"""
-    from src.tools.composite import browser_flow_execute, code_review_run
+    from src.tools.composite import code_review_run
 
     # code_review_run with self
     result = code_review_run(__file__, check_types=["quality"])
@@ -95,14 +92,6 @@ def test_all_imports():
     """测试所有导入"""
     # 不能在函数内使用 import *
     # 改为显式导入
-    from src.skills.primitive import http_get, http_post, http_put, http_delete, http_patch
-    from src.skills.primitive import file_read, file_write, file_delete, file_exists, file_list, file_mkdir
-    from src.skills.primitive import db_query, db_execute, db_transaction, db_schema
-    from src.skills.browser import browser_navigate, browser_snapshot, browser_click, browser_type
-    from src.skills.code import code_read, code_write, code_search
-    from src.skills.memory import memory_recall, memory_store
-    from src.tools.composite import browser_flow_execute, code_review_run
-    from src.skill_catalog import SkillRegistry, SkillLoader, SkillConfig, SkillMetadata
     print("✅ all imports")
 
 

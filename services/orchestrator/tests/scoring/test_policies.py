@@ -1,6 +1,5 @@
 """Tests for scoring policies."""
-import pytest
-from src.scoring.policy import ScoringContext, ScoringSignal
+from src.scoring.policy import ScoringContext
 from src.scoring.policies import ButterflySignalPolicy, ReuseThresholdPolicy
 
 

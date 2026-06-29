@@ -1,5 +1,4 @@
 """Tests for RefinerAgent and ArchitectAgent."""
-import pytest
 
 
 def test_refiner_output_schema():

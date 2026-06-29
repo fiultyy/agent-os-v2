@@ -8,7 +8,6 @@ SkillConfig — Skill 配置管理 + schema 验证
 """
 
 import logging
-import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 

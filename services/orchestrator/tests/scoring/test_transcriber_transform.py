@@ -1,5 +1,4 @@
 """Tests for Transcriber TaskSpec transformation."""
-import pytest
 
 
 def test_transcriber_output_schema():

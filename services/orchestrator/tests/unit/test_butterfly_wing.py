@@ -647,7 +647,6 @@ class TestDefaultStore:
     def test_get_default_store_creates_instance(self):
         """C5: get_default_store() creates a global store."""
         # Use a temp path to avoid interference
-        import shutil
         temp_path = tempfile.mktemp(suffix=".db")
         store1 = get_default_store(db_path=temp_path)
         store2 = get_default_store(db_path=temp_path)

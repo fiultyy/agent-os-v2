@@ -8,25 +8,20 @@ Covers:
 - 7.5 Active forgetting
 """
 
-import asyncio
-import math
 import sys
 import os
 import pytest
-import tempfile
 
 # Ensure src is importable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.memory.types import (
-    MemoryItem, MemoryRef, MemoryBlock, MemoryFilter,
-    MemoryType, MemoryScope, MemoryOrigin, RecallMode,
+    MemoryItem, MemoryType, MemoryScope, MemoryOrigin, RecallMode,
 )
 from src.memory.store import InMemoryStore
 from src.memory.service import MemoryService
 from src.memory.scorer import (
-    ImportanceScorer, ImportanceScore, WeightTemplate,
-    TemplatePreset, PRESETS,
+    ImportanceScorer, PRESETS,
     score_recency, score_frequency, score_relevance,
     score_emotional_weight, score_actionability,
 )
@@ -38,7 +33,7 @@ from src.memory.migrator import (
     MemoryMigrator, WorkingToSessionMigrator,
     SessionToEpisodicMigrator, EpisodicToSemanticMigrator,
 )
-from src.memory.forgetting import ActiveForgetting, ForgetResult
+from src.memory.forgetting import ActiveForgetting
 
 
 # ── Helpers ──────────────────────────────────────────────────────────

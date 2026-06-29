@@ -1,16 +1,10 @@
 """Tests for UnifiedRecall — P4 keyword + KG fusion."""
 
-import asyncio
-from dataclasses import dataclass
-from typing import Any
-from unittest.mock import AsyncMock
 
 import pytest
 
 from src.memory._recall.unified_recall import UnifiedRecall
-from src.memory._recall.keyword_recall import KeywordRecall
-from src.memory._recall.kg_recall import KGRecall
-from src.memory.types import MemoryItem, MemoryType, MemoryScope
+from src.memory.types import MemoryItem
 
 
 # ── Helpers ──────────────────────────────────────────────────────────

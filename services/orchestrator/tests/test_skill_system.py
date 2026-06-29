@@ -4,7 +4,6 @@ Unit tests for SkillLoader + SkillCatalog
 
 import pytest
 import tempfile
-import shutil
 from pathlib import Path
 
 
@@ -584,7 +583,6 @@ class TestSkillConfig:
 
     def test_is_enabled_default_true(self):
         """Skill not in config is considered enabled by default."""
-        import os
         from skills.skill_config import SkillConfig
         with tempfile.TemporaryDirectory() as td:
             cfg = SkillConfig(Path(td) / "skills.yaml")

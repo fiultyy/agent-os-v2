@@ -42,13 +42,7 @@ IGNORED_DIRS = frozenset({".git", "__pycache__", "node_modules", ".venv"})
 
 try:
     from watchdog.observers import Observer
-    from watchdog.events import (
-        FileSystemEventHandler,
-        FileModifiedEvent,
-        FileCreatedEvent,
-        FileDeletedEvent,
-        FileMovedEvent,
-    )
+    from watchdog.events import FileSystemEventHandler
     _WATCHDOG_AVAILABLE = True
 except ImportError:
     _WATCHDOG_AVAILABLE = False

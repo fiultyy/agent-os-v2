@@ -1,10 +1,7 @@
 """Tests for ProfileGenerationCommittee."""
-import pytest
-from unittest.mock import MagicMock
 from src.scoring.policy import ScoringContext, ScoringSignal
 from src.scoring.engine import ScoringEngine
-from src.scoring.taskspec import TRANSCRIBER_SPEC, REFINER_SPEC
-from src.scoring.committee import ProfileGenerationCommittee, CommitteeResult
+from src.scoring.committee import ProfileGenerationCommittee
 
 
 def dummy_transcriptor(ctx, signal):

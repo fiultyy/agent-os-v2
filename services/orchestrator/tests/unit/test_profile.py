@@ -9,12 +9,9 @@ Tests cover:
 - Runtime profile switching
 - Compilation produces different outputs for different profiles
 """
-import json
 import tempfile
-import os
 from pathlib import Path
 
-import pytest
 
 from agent.profile import AgentBaseProfile, LayerProfile
 from agent.profile_registry import ProfileRegistry
@@ -513,7 +510,6 @@ class TestModuleImports:
             DefaultPlugins,
             PluginRegistry,
             ProfilePlugin,
-            get_plugin_registry,
         )
 
         assert AgentBaseProfile is not None

@@ -37,9 +37,9 @@ import pytest
 from src.api.models import StoreMemoryRequest
 from src.api.routes import memory as memory_route
 from src.services import _state
-from src.memory.db_watcher import MemoryDBWatcher, _parse_iso, _now_ts
+from src.memory.db_watcher import MemoryDBWatcher, _parse_iso
 from src.memory.types import (
-    MemoryItem, MemoryFilter, MemoryType, MemoryScope, MemoryOrigin,
+    MemoryFilter, MemoryOrigin,
 )
 from src.memory.store import InMemoryStore
 from src.memory.service import MemoryService

@@ -11,7 +11,6 @@ All state is wired through the canvas module's singletons.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -19,7 +18,7 @@ import re
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 from src.canvas.branch import Branch, BranchStatus, BranchStore
 from src.canvas.events import (

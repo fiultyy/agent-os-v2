@@ -7,7 +7,6 @@ code_write - 写入代码文件
 - 原子写入（先写临时文件再重命名）
 """
 
-import os
 import shutil
 from pathlib import Path
 from typing import Dict, Any, Optional

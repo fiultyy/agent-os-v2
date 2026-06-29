@@ -21,7 +21,6 @@ from typing import Any
 
 from src.memory.hooks import (
     CompressContext,
-    CompressResult,
     ConsolidateContext,
     CurateContext,
     DelegateContext,

@@ -7,7 +7,7 @@ memory_store - 记忆存储
 - 删除记忆
 """
 
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 from functools import lru_cache
 import logging

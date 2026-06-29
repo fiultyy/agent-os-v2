@@ -1,5 +1,4 @@
 """Tests for ScoringEngine."""
-import pytest
 from src.scoring import ScoringEngine, ScoringPolicy, ScoringContext, ScoringSignal
 
 

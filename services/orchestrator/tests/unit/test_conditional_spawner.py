@@ -1,8 +1,7 @@
 """Tests for conditional_spawner.py."""
 
-import asyncio
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 from src.agent.meta.conditional_spawner import (
     ConditionalSpawner,

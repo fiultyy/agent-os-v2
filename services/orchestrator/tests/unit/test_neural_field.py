@@ -16,7 +16,6 @@ import os
 import sys
 import tempfile
 
-import pytest
 
 # Patch corrupted miniconda sqlite3 with pysqlite3 before any import that
 # transitively touches sqlite3 (mirrors start.py / other test modules).
@@ -326,7 +325,6 @@ class TestSnapshotRestore:
         # stable 仍在
         assert store.load_snapshot(stable_sid) is not None
         # 非 stable 只剩最近 3 个（i=3,4,5）
-        import sqlite3 as _sql
 
         rows = store._conn.execute(
             "SELECT snapshot_id FROM neural_snapshot WHERE agent_id=? AND is_stable=0",

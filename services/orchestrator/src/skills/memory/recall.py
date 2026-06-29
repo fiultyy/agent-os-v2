@@ -7,7 +7,7 @@ memory_recall - 记忆检索
 - kg: 知识图谱搜索
 """
 
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 
 
 def memory_recall(

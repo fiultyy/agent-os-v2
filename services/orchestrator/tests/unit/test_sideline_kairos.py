@@ -1,7 +1,6 @@
 """Tests for KairosAgent (LIF timing injection)."""
 
 import pytest
-from datetime import datetime, timezone
 
 from src.memory.sideline.kairos import KairosAgent, LIFState
 

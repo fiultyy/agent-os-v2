@@ -7,9 +7,8 @@ code_read - 读取代码文件
 - 语法错误检测（基础）
 """
 
-import os
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 
 
 # 代码语言映射

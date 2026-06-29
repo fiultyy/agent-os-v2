@@ -8,7 +8,7 @@ LIF (Leakage-Integration-Fire) 电位触发时机注入。
 - KairosAgent: 通过 LIF 电位阈值触发（无需 LLM）
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 

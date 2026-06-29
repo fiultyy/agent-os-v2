@@ -16,10 +16,8 @@ test_parallel_nodes 三文件互不依赖;后者零改动全绿 = 物理隔离�
 pysqlite3 注入由 ``tests/conftest.py`` 统一处理,本文件不重复 patch。
 """
 
-import asyncio
 import inspect
 import re
-import types
 
 import pytest
 
@@ -209,8 +207,6 @@ async def test_execute_parallel_emits_sse_for_par_and_fanin(parallel_state) -> N
 
     sse_events: list[str] = []
 
-    from fastapi.encoders import jsonable_encoder
-    import json
 
     async def collect():
         req = ExecuteParallelRequest(

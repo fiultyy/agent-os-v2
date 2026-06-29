@@ -11,7 +11,7 @@ code_search - 代码搜索
 import os
 import re
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 
 
 def code_search(

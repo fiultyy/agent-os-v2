@@ -39,7 +39,6 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -48,7 +47,7 @@ import pytest
 from src.api.routes import memory as memory_route
 from src.memory.compressor import AsyncCompressor, ContextMonitor, SyncCompressor
 from src.memory.default_hook import DefaultMemoryHook
-from src.memory.event_bus import EventType, MemoryEventBus
+from src.memory.event_bus import MemoryEventBus
 from src.memory.migrator import MemoryMigrator
 from src.memory.service import MemoryService
 from src.memory.sideline.retriever_agent import RetrieverAgent

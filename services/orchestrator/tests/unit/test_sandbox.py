@@ -1,9 +1,6 @@
 """Tests for sandbox.py."""
 
-import asyncio
-import os
 import pytest
-import tempfile
 
 from src.agent.meta.sandbox import SandboxExecutor, SandboxResult
 
