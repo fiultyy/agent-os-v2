@@ -1,5 +1,7 @@
 # D-31: Endless Canvas — Layer 1 Observability + Layer 2 Control
 
+> ⚠️ **历史文档**(写于当时, 记录当时的架构设计草案 / Endless Canvas Layer 1-2 观测+控制规划)。当前系统现状以 `docs/mvp-iteration-roadmap.md` + `agentos-mvp-roadmap` memory 为准; 正文可能含已变更 / 已 defer / 已重构 的内容, 仅供历史参考。
+
 **状态**: 设计草案 v2
 **日期**: 2026-04-23
 **目标**: 推理流的无限画布，前端观测 + 预构建控制

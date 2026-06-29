@@ -1,5 +1,7 @@
 # Agent OS v2 — 解构规格文档 (Deconstruct Spec)
 
+> ⚠️ **历史文档**(写于当时, 记录当时的架构解构设计/实现计划)。当前系统现状以 `docs/mvp-iteration-roadmap.md` + `agentos-mvp-roadmap` memory 为准; 正文可能含已变更 / 已 defer / 已重构 的内容, 仅供历史参考。
+
 > 版本: 1.0
 > 创建: 2026-05-01
 > 状态: Draft

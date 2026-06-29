@@ -1,5 +1,7 @@
 # D-31 前端集成计划
 
+> ⚠️ **历史文档**(写于当时, 记录当时的实现计划)。当前系统现状以 `docs/mvp-iteration-roadmap.md` + `agentos-mvp-roadmap` memory 为准; 正文可能含已变更 / 已 defer / 已重构 的内容, 仅供历史参考。
+
 > 编写时间: 2026-04-24
 > 状态: Draft（待评审）
 

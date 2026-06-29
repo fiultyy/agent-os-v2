@@ -1,5 +1,7 @@
 # Agent OS 与 Multica：编排维度正交性分析
 
+> ⚠️ **历史文档**(写于当时, 记录当时的架构设计/正交性分析)。当前系统现状以 `docs/mvp-iteration-roadmap.md` + `agentos-mvp-roadmap` memory 为准; 正文可能含已变更 / 已 defer / 已重构 的内容, 仅供历史参考。
+
 > 分析日期: 2026-04-20
 > 参考资料: `docs/architecture.md`, `RESEARCH-multica-analysis.md`
 

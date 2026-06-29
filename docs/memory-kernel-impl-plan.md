@@ -1,5 +1,7 @@
 # 记忆内核实施 Plan（Part 1 + Part 2）
 
+> ⚠️ **历史文档**(写于当时, 记录当时的实现计划/实施蓝图)。当前系统现状以 `docs/mvp-iteration-roadmap.md` + `agentos-mvp-roadmap` memory 为准; 正文可能含已变更 / 已 defer / 已重构 的内容, 仅供历史参考。
+
 > 基于 [`memory-kernel-design.md`](./memory-kernel-design.md) + workflow 规划（7 agent）+ 三视角对抗审查修正。
 > 这是**修正后**的可执行实施蓝图——已吸收审查的 critical/high 修正。
 

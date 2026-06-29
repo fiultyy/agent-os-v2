@@ -1,5 +1,7 @@
 # D-31 Endless Canvas E2E 验证计划
 
+> ⚠️ **历史文档**(写于当时, 记录当时的 E2E 验证计划与验收状态)。当前系统现状以 `docs/mvp-iteration-roadmap.md` + `agentos-mvp-roadmap` memory 为准; 正文可能含已变更 / 已 defer / 已重构 的内容, 仅供历史参考。
+
 **创建时间**: 2026-04-23
 **状态**: 待执行
 **负责人**: 项目专家-00

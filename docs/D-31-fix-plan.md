@@ -1,5 +1,7 @@
 # D-31 Endless Canvas 修复计划
 
+> ⚠️ **历史文档**(写于当时, 记录当时的实现计划/修复排期)。当前系统现状以 `docs/mvp-iteration-roadmap.md` + `agentos-mvp-roadmap` memory 为准; 正文可能含已变更 / 已 defer / 已重构 的内容, 仅供历史参考。
+
 **状态**: 修复计划
 **日期**: 2026-04-23
 **基于**: 代码审查评分 4.5/10，6 CRITICAL + 14 WARNING

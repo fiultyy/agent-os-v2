@@ -1,5 +1,7 @@
 # agent-os-v2 记忆系统迭代计划(P0–P4)
 
+> ⚠️ **历史文档**(写于当时, 记录当时的记忆系统迭代实现计划 P0–P4 / M1–M6)。当前系统现状以 `docs/mvp-iteration-roadmap.md` + `agentos-mvp-roadmap` memory 为准; 正文可能含已变更 / 已 defer / 已重构 的内容, 仅供历史参考。
+
 > **版本**:v1 · 2026-06-19
 > **来源**:基于《Agent 编排 / Agent OS 外部持久记忆存储研究》报告**第七章**(Harness 接入框架 L0–L5)、**第八章**(agent-os-v2 vs hermes 对比)的互鉴结论,经 **5 路并行代码勘察 + 综合研判**产出(ultracode workflow `wf_a8a68ef6-62f`,6 agent / 287k tokens)。
 > **主线**:先堵风险(P0 provenance)→ 再解耦(P1 事件总线)→ 后加速能力(P2 cache / P3 巩固 / P4 技能),全程不推倒现有优势。

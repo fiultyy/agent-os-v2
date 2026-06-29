@@ -1,5 +1,7 @@
 # Agent OS 解构任务清单
 
+> ⚠️ **历史文档**(写于当时, 记录当时的实现计划 / 解构任务清单)。当前系统现状以 `docs/mvp-iteration-roadmap.md` + `agentos-mvp-roadmap` memory 为准; 正文可能含已变更 / 已 defer / 已重构 的内容, 仅供历史参考。
+
 > 将 Python Agent OS 逐步重构为以 Pi (TypeScript) 为核心依赖的新架构。
 > 创建时间: 2026-05-01
 

@@ -1,5 +1,7 @@
 # Agent OS v2 — Deconstruct 实施进度
 
+> ⚠️ **历史文档**(写于当时, 记录当时的实现计划/进度状态)。当前系统现状以 `docs/mvp-iteration-roadmap.md` + `agentos-mvp-roadmap` memory 为准; 正文可能含已变更 / 已 defer / 已重构 的内容, 仅供历史参考。
+
 > 整体进度: **~8%**（Phase 0 全部完成，Phase 1 待启动）
 > 最后更新: 2026-05-02 08:10
 
