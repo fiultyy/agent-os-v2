@@ -224,7 +224,7 @@ async def canvas_websocket(
 
             elif cmd == "replay":
                 after_id = msg.get("after_event_id")
-                await _emitter.replay(session_id, ws, after_event_id)
+                await _emitter.replay(session_id, ws, after_id)
 
             elif cmd == "layer2.submit":
                 # Validate required fields
