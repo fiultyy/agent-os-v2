@@ -6,13 +6,14 @@
 
 | 接入面 | 机制 | LLM | 触发方式 | 触达 |
 |---|---|---|---|---|
-| **轮询** | `MemoryDBWatcher` 60s loop | ❌ 零 LLM | 自动（检测外部 db 写入） | `prune → forget → migrate` |
-| **`/memory/notify`** | 外部应用主动请求 | ❌ 零 LLM | 外部应用写库后调用 | 同上（即时） |
+| **轮询 tier(1)** | `MemoryDBWatcher` 60s loop 的确定性链 | ❌ 零 LLM | 自动（检测外部 db 写入） | `prune → forget → migrate`（仅 `origin=AGENT`） |
+| **轮询 tier(2)/(3)** | 同一 60s loop 的 idle 链 | ✅ LLM（`MEMORY_INGESTOR_ENABLED` / `MEMORY_CONSOLIDATOR_ENABLED` 开启时） | 每个 60s tick 无条件入口，内部按 write-idle + per-agent cadence 闸自门控 | idle ≥ `MEMORY_IDLE_THRESHOLD` → `IngestorAgent.ingest`（批量上限 `MEMORY_IDLE_EXTRACT_BATCH_LIMIT`=50）；idle ≥ `MEMORY_IDLE_CONSOLIDATE_THRESHOLD` → `emit CONSOLIDATE`（`ConsolidatorAgent`），trigger=`idle_poll` |
+| **`/memory/notify`** | 外部应用主动请求 | ❌ 零 LLM | 外部应用写库后调用 | 同 tier(1)（即时） |
 | **`/memory/consolidate`** | 外部应用主动请求 | ✅ LLM | 外部应用按需触发 | `task_consolidator` 经验提取 |
 
 **Provenance 保证（P0）**：所有确定性维护（轮询 + `/notify`）**只动 `origin=AGENT` 的记忆**；`origin=FOREGROUND`（用户 / 外部应用写入）的记忆受保护，**永不被自动归档 / 迁移 / 合并**。外部写入的 foreground 记忆靠下次对话 `recall`（compiler 每轮重查）被动可见，但不被自动整理——这是设计上的安全边界，不是缺陷。
 
-**零侵入**：本机制为纯 ADD——不改任何现有 `store/recall/prune/forget/migrate` 签名，不碰红线（`butterfly_wing` / `permissions` / `scorer` / `_recall`），不新增 LLM 代码（`/consolidate` 复用现有 `task_consolidator`）。
+**零侵入（签名层）**：本机制不改任何现有 `store/recall/prune/forget/migrate` 签名，不碰红线（`butterfly_wing` / `permissions` / `scorer` / `_recall`）。`/consolidate` 复用现有 `task_consolidator`。**注**：60s loop 的 tier(2)/(3) idle 链（`run_idle_maintenance` / `_run_extract`）是新写入 watcher 模块的 LLM 驱动代码，复用既有 `IngestorAgent` / `ConsolidatorAgent`（经 `_state.ingestor` / `_state.consolidator`），受 `MEMORY_INGESTOR_ENABLED` / `MEMORY_CONSOLIDATOR_ENABLED` env gate（默认关）——即「不新增 LLM 客户端/模型，但 loop 结构确含 LLM tier」。
 
 ---
 
@@ -29,9 +30,11 @@
 
 **时间戳格式约定**：外部应用写入 `updated_at` 必须用 tz-aware ISO 8601 UTC，与 `datetime.now(timezone.utc).isoformat()` 一致（例 `2026-06-20T10:00:00.123456+00:00`）。无法解析的时间戳视为远古，不触发维护（不因垃圾数据空跑）。
 
-### 1.2 60s loop — 确定性维护链（零 LLM）
+### 1.2 60s loop — tier(1) 确定性链（零 LLM）+ tier(2)/(3) idle 链（LLM）
 
-检测到外部写入后，对每个 agent 跑**确定性链**（顺序、参数与 24h `_sweep_loop` 一致）：
+60s loop（`_watch_loop`）是**三层**结构：
+
+- **tier(1) 确定性链（零 LLM）**：仅当检测到外部写入（`has_external_changes` 返回非 None）时，对每个 agent 跑确定性链（顺序、参数与 24h `_sweep_loop` 一致）：
 
 ```
 state_pruner.prune(agent_id)           # ACTIVE→STALE→ARCHIVED(30/90 天)
@@ -41,8 +44,14 @@ state_pruner.prune(agent_id)           # ACTIVE→STALE→ARCHIVED(30/90 天)
 
 - **每步独立 `try/except`，永不抛**；任一步失败只记 `last_error`，不阻断其余。
 - **per-agent `asyncio.Lock`**：`/notify` 与 60s loop 对同一 agent 不会重叠（防止 migrate 竞态产生重复 semantic 记忆）。
-- 周期可配：`MEMORY_DB_WATCH_INTERVAL`（秒，默认 60）。
+- 周期可配：`MEMORY_DB_WATCH_INTERVAL`（秒，默认 60）控制 60s poll tick。此外 watcher 的 LLM idle tier（extract/consolidate）由四个写空闲阈值 env 控制：`MEMORY_IDLE_THRESHOLD`（默认 60，extract/consolidate 触发所需的写空闲下限）、`MEMORY_IDLE_EXTRACT_INTERVAL`（默认 300，per-agent extract 最小间隔）、`MEMORY_IDLE_CONSOLIDATE_THRESHOLD`（默认 300，per-agent consolidate 最小间隔）、`MEMORY_IDLE_EXTRACT_BATCH_LIMIT`（默认 50，单次 extract sweep 批量上限，防长 LLM 批阻塞确定性链）。
 - 与现有 24h `_sweep_loop` **并存互不干扰**（两个独立 startup hook）。
+
+- **tier(2) extract（IngestorAgent，glm-4-flash / anthropic 侧通道，需 `MEMORY_INGESTOR_ENABLED=1`）**：每个 60s tick **无条件调用 `run_idle_once_all(trigger="idle_poll")`**，内部按 idle ≥ `MEMORY_IDLE_THRESHOLD` AND per-agent cadence `MEMORY_IDLE_EXTRACT_INTERVAL` 期满 AND `pending_extract>0` 自门控；满足时批量（上限 `MEMORY_IDLE_EXTRACT_BATCH_LIMIT`=50）对 `origin=AGENT` 且 `metadata.extracted` 未置的记忆调 `_state.ingestor.ingest(...)`，处理后标 `metadata.extracted=True` 去重。
+- **tier(3) consolidate（ConsolidatorAgent，需 `MEMORY_CONSOLIDATOR_ENABLED=1`）**：idle ≥ `MEMORY_IDLE_CONSOLIDATE_THRESHOLD` AND per-agent cadence 期满时，`emit EventType.CONSOLIDATE` → `ConsolidatorHook` → `ConsolidatorAgent`（仅动 `origin=AGENT` episodic → semantic）。
+- **idle debounce**：检测到新写入会 reset write-idle clock，把 tier(2)/(3) 推迟到下一个静默窗；只有零成本的 tier(1) 在写入持续期间继续跑。
+- env gate 默认关闭（`MEMORY_INGESTOR_ENABLED` / `MEMORY_CONSOLIDATOR_ENABLED` 默认 `"0"`），未开启时 `_state.ingestor` / `_state.consolidator` 为 None，内部 `is not None` 守卫使 tier(2)/(3) 成 no-op。
+- P0 红线：tier(2) query 层 `filter origin=AGENT` + 每项复查 FOREGROUND；tier(3) 仅动 AGENT episodic；FOREGROUND 记忆三层均不触达。
 
 ### 1.3 SSE 事件
 
@@ -65,12 +74,13 @@ data: {"event": "prune", "agent_id": "<id>", "trigger": "poll|notify", "scanned"
 ### 2.1 请求
 
 ```json
-{ "agent_id": "", "force": false }
+{ "agent_id": "", "force": false, "curate": false }
 ```
 | 字段 | 类型 | 默认 | 含义 |
 |---|---|---|---|
 | `agent_id` | string | `""` | 空 = 对所有 agent 跑；指定 = 只对该 agent |
 | `force` | bool | `false` | `true` = 无条件跑（绕过 `updated_at` 变更检查） |
+| `curate` | bool | `false` | `true` 且已装配 CuratorAgent 时，**fire-and-forget**（独立 async task）触发一次 ④ CuratorAgent 经验整理，与同步确定性链隔离；不影响零 LLM 的 prune/forget/migrate |
 
 ### 2.2 响应
 
@@ -80,9 +90,11 @@ data: {"event": "prune", "agent_id": "<id>", "trigger": "poll|notify", "scanned"
   "processed": 1,
   "results": [
     {"agent_id": "<id>", "trigger": "notify", "pruned": {...}, "forgot": {...}, "migrated": N, "status": "ok"}
-  ]
+  ],
+  "curate_triggered": false
 }
 ```
+- `curate_triggered: bool` — `true` 表示本次已异步派发 CURATE 事件（需 `curate=true` 且 CuratorAgent 已装配）；`false` 表示未派发（CuratorAgent 未装配或未请求）。该 fire-and-forget 整理任务**不进入**同步 `run_maintenance` 零 LLM 链。
 - `status: "unavailable"`（`db_watcher` 未装配）→ `{"status":"unavailable","results":[]}`
 - `status: "noop"`（`force=false` 且无外部变更）→ 该 agent 跳过
 - 每个结果含 `pruned`/`forgot`/`migrated` 计数；`status: "skipped"` 表示该 agent 正在维护中（锁占用）。
@@ -94,26 +106,37 @@ curl -X POST http://127.0.0.1:8000/v1/memory/notify \
   -H "Content-Type: application/json" \
   -d '{"agent_id": "", "force": true}'
 ```
+```bash
+# 触发一次 fire-and-forget CuratorAgent 整理（需 CuratorAgent 已装配）
+curl -X POST http://127.0.0.1:8000/v1/memory/notify \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id": "<id>", "curate": true}'
+```
 
 ---
 
-## 3. `POST /v1/memory/consolidate` — 按需 LLM 巩固
+## 3. `POST /v1/memory/consolidate` — 按需 LLM 巩固（双模式）
 
-外部应用按需触发**经验提取**：从 `messages` 提取关键决策 / 踩坑 / 工具模式，经 `BackwardWriter` 按置信度写回。**复用现有 `task_consolidator`，不新增 LLM 代码**。
+本端点支持两种 `mode`：
+- **默认 `mode=task_consolidator`**：从 `messages` 提取关键决策 / 踩坑 / 工具模式，经 `BackwardWriter` 按置信度写回（复用现有 `task_consolidator`，不新增 LLM 代码）。
+- **`mode=merge`**：触发 ② `ConsolidatorAgent`，对既有 episodic 记忆做 episodic→semantic 的理解驱动合并（LLM，与上述任务后经验沉淀是两条独立路径）。
 
 ### 3.1 请求
 
 ```json
-{ "agent_id": "<id>", "session_id": "<id>", "messages": [{"role":"user","content":"..."}], "timeout": 8.0 }
+{ "agent_id": "<id>", "session_id": "<id>", "messages": [{"role":"user","content":"..."}], "timeout": 8.0, "mode": "task_consolidator" }
 ```
 | 字段 | 类型 | 默认 | 含义 |
 |---|---|---|---|
-| `agent_id` | string | `""` | 写回归属 agent |
-| `session_id` | string | `""` | 写回归属 session |
-| `messages` | list[dict] \| null | null | 待提取的对话；**空则拒绝** |
+| `agent_id` | string | `""` | 写回归属 agent（`merge` 模式缺省时取首个 agent） |
+| `session_id` | string | `""` | 写回归属 session（仅 `task_consolidator` 用） |
+| `messages` | list[dict] \| null | null | 待提取的对话；**空则拒绝**（仅 `task_consolidator`） |
 | `timeout` | float | 8.0 | **被 clamp 到 ≤ 8.0**（防 worker 耗尽） |
+| `mode` | string | `"task_consolidator"` | `task_consolidator`=任务后经验提取；`merge`=episodic→semantic 合并（`_state.consolidator` 未装配时返回 `unavailable`/`consolidator_disabled`） |
 
-### 3.2 响应（映射 `ConsolidateResult`）
+### 3.2 响应
+
+**`mode=task_consolidator`（默认，映射 `ConsolidateResult`）：**
 
 ```json
 {
@@ -126,6 +149,21 @@ curl -X POST http://127.0.0.1:8000/v1/memory/notify \
   "error": null
 }
 ```
+
+**`mode=merge`（映射 `ConsolidatorAgent` 合并结果）：**
+
+```json
+{
+  "triggered": true,
+  "degraded": false,
+  "written": false,
+  "merged_count": 3,
+  "semantic_ids": ["<id>", "<id>"],
+  "archived_ids": ["<id>"],
+  "error": null
+}
+```
+（无 `confidence` / `memory_id` / `channel`；`_state.consolidator` 未装配时返回 `{"status":"unavailable","reason":"consolidator_disabled"}`。）
 
 ### 3.3 行为与防护
 

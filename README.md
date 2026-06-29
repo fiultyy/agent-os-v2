@@ -15,8 +15,8 @@
 ## 技术栈
 
 - **前端**: React + React Flow + Zustand + Next.js 15 (App Router)
-- **后端**: Python 3.12 微服务 (FastAPI + gRPC)
-- **通信**: HTTP/SSE/WebSocket + gRPC
+- **后端**: Python 3.12 微服务 (FastAPI; gRPC proto 定义已预留,未接线)
+- **通信**: HTTP/SSE/WebSocket (gRPC 预留,未启用)
 - **数据**: RAG / GraphRAG
 
 ## 快速开始
@@ -42,7 +42,6 @@ services/gateway/   → API Gateway (FastAPI)
 services/orchestrator/ → Agent 编排服务 (核心)
 services/prompt-manager/ → Prompt 管理
 services/resource-manager/ → 资源管理
-packages/shared-types/ → 共享类型定义
 packages/proto/     → gRPC protobuf 定义
 ```
 

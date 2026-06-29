@@ -16,7 +16,7 @@
 | 蝴蝶翼 | `ButterflyRecallStrategy` 是召回策略,wing filtering + match×lif ranking | `butterfly_wing.py:687,712,727` |
 | 神经场 LIF | `_spread` 沿 KG 边扩散 + `lif_weight` + `_kg_neighbors` | `neural_field.py:259,335,101` |
 
-**即 LIF+KG+蝴蝶翼三因子内部已协同打分召回**。Gap 不是"没接入",而是 **GET /memories 只吐平铺排序列表(memory.py:143 `_mem_to_dict(item, score)`),丢弃了图结构**。本 spec 的环节③ = 把内部已算的图组装暴露。
+**即 LIF+KG+蝴蝶翼三因子内部已协同打分召回**。Gap 不是"没接入",而是 **GET /memories 只吐平铺排序列表(memory.py:113 定义 `_mem_to_dict` / :171 调用 `_mem_to_dict(r["item"], score=r["score"])`),丢弃了图结构**。本 spec 的环节③ = 把内部已算的图组装暴露。
 
 ---
 
@@ -25,8 +25,8 @@
 ### 阶段 0 — openclaw 底座(执行 session 进行中,暂停渲染)
 Gap3/4 的 openclaw 消费侧基础(scope 传递 + origin/state 解析)。是图召回的前提底座,但 **暂停 formatRecallBlock 平铺渲染**(阶段 3 要图渲染,避免返工)。
 
-### 阶段 1 — agent-os-v2 图召回端点 【承重】
-新增 `GET /v1/memory/graph`,组装内部图结构返回。
+### 阶段 1 — agent-os-v2 图召回端点 ✅ 已完成(commit 90926b7)
+`GET /v1/memory/graph` 已实现并合入:`services/orchestrator/src/api/routes/memory.py:196`(memory_router 挂 prefix=`/v1`,见 `engine.py:531`)。组装 entity/memory 节点 + kg_relation/lif_spread/butterfly_assoc 三类边 + activated_path + meta(lif_snapshot_id/total_nodes),feature-gated 降级 + `LIF_THRESHOLD=0.05` 阈值过滤。RetrieverAgent.retrieve(`detail=True`)(`retriever_agent.py:73`)已扩展透出 match_score/lif_weight/activated_entities。配套单测 `tests/test_memory_graph_endpoint.py`(6 个)+ 召回往返测试(`test_orchestrator_recall_closure.py`)。
 
 ### 阶段 2 — openclaw side agent 实体提炼
 用 `runtimeContext.llm.complete` 调简单模型,从最新 turn prompt 提炼实体关键字,替代 `normalizeKeyword` 首句截取。
@@ -38,9 +38,9 @@ turn N 提炼实体 + 调图召回(不阻塞当轮)→ 跨 turn 缓存 → turn 
 
 ---
 
-## 2. 环节③图结构 schema(阶段 1 核心)
+## 2. 环节③图结构 schema(阶段 1 ✅ 已实现)
 
-**新端点**:`GET /v1/memory/graph`
+**端点**(已落地,见 `services/orchestrator/src/api/routes/memory.py:196`):`GET /v1/memory/graph`
 - query param:`entities`(逗号分隔,side agent 提炼的)、`agent_id`、`scope`、`top_k`(默认 8)
 - 内部:用 entities 命中 KG 实体 → RetrieverAgent 召回(memory×score)+ 神经场扩散路径 + 蝴蝶翼联想 → 组装图
 
@@ -97,13 +97,9 @@ turn N 提炼实体 + 调图召回(不阻塞当轮)→ 跨 turn 缓存 → turn 
 
 ## 3. 各侧改动
 
-### agent-os-v2 侧(阶段 1)
-- 新增 `GET /v1/memory/graph`(`api/routes/memory.py`):
-  - 接 `entities`/`agent_id`/`scope`/`top_k`
-  - 调 RetrieverAgent 拿 ranked items(含 match_score/lif_weight)+ KG 实体邻居 + 蝴蝶翼 wing + 神经场 field/snapshot
-  - 组装 nodes/edges/activated_path/meta
-  - scope 过滤(d7823d7 候选层已支持)+ origin/state(d7823d7 已透出)
-- RetrieverAgent 可能需暴露中间结构(当前 `retrieve` 只返回 ranked [{item,score}],需扩展返回 match/lif/kg_neighbors 明细供图组装 —— **设计点:扩展返回 vs 图端点内部重算**,优先扩展返回避免重算)
+### agent-os-v2 侧(阶段 1 ✅ 已完成)
+- `GET /v1/memory/graph`(`services/orchestrator/src/api/routes/memory.py:196`)已实现:接 entities/agent_id/scope/top_k → RetrieverAgent.retrieve(`detail=True`) 取 ranked(match_score/lif_weight)+ KG 实体邻居 + 蝴蝶翼 wing + 神经场 field/snapshot → 组装 nodes/edges/activated_path/meta;scope 过滤(d7823d7)+ origin/state 透出(d7823d7)。
+- RetrieverAgent.retrieve 已扩展 `detail` 参数(`retriever_agent.py:73`,默认 `False` 保留老契约):`detail=True` 时追加只读 match_score/lif_weight/activated_entities,采用"扩展返回"路径(避免图端点重算),未改 match×lif 排序权重(红线未动)。
 
 ### openclaw 侧
 **阶段 0**(执行 session):
@@ -133,12 +129,12 @@ turn N 提炼实体 + 调图召回(不阻塞当轮)→ 跨 turn 缓存 → turn 
 | 阶段 | 依赖 | 工作量(估) | 责任 |
 |---|---|---|---|
 | 0 底座 | 无 | ~1d(进行中,暂停渲染后更小) | openclaw(执行 session) |
-| 1 图端点 | 无 | ~4d(承重:组装图 + RetrieverAgent 扩展) | agent-os-v2(新 session) |
+| 1 图端点 | 无 | ✅已完成(`memory.py:196` `GET /v1/memory/graph` + `retriever_agent.py:73` detail 开关 + `test_memory_graph_endpoint.py`) | agent-os-v2 |
 | 2 实体提炼 | 无 | ~2d(side agent + 模型) | openclaw |
 | 3 异步流水线 | 0+1+2 | ~4d(跨turn缓存 + 图渲染 + 编排) | openclaw |
 | 4 联调 | 全部 | ~2d | 双侧 |
 
-**总 ~13d**。0/1/2 可并行(0 在 worktree,1 在 agent-os-v2,2 可并入 worktree);3 依赖三者;4 收尾。
+**总 ~9d**(阶段 1 已完成,剩余 0+2+3+4 ≈ 1+2+4+2)。0/2 可并行;3 依赖 0+2(1 已就绪);4 收尾。
 
 ---
 
@@ -154,7 +150,7 @@ turn N 提炼实体 + 调图召回(不阻塞当轮)→ 跨 turn 缓存 → turn 
 ---
 
 ## 6. 风险
-1. **RetrieverAgent 扩展返回**(阶段 1 设计点):当前 `retrieve` 只返回 ranked 列表,图组装需 match/lif/kg_neighbors 明细。扩展返回可能动到 RECALL hook 契约 → 优先"扩展可选字段"而非改签名,或图端点内部独立调底子算(重算成本)
+1. **RetrieverAgent 扩展返回**(阶段 1 ✅ 已落地):`retrieve` 已加 opt-in `detail: bool = False` 参数,默认 `False` 保持老契约(RECALL hook / `GET /memories` / 单测零回归);置 `True` 时每个 result dict 追加只读明细字段 `match_score` / `lif_weight` / `score` / query 命中的 KG 实体列表 `activated_entities`,不引入新打分/扩散逻辑(红线:`entry["score"] = match × lif` 排序权重未动)。图端点 `GET /v1/memory/graph` 已以 `detail=True` 调用消费(match/lif/activated_entities)。风险(动 RECALL hook 契约 / 重算成本)已消解
 2. **图体积**:nodes+edges 可能膨胀(大 KG),需 top_k 限制 + 激活阈值过滤(只保留 lif_activation > threshold)
 3. **异步时序竞态**:turn N 召回未完成 turn N+1 就到 → 缓存 drain 策略(等到完成或跳过本轮)
 4. **side agent 成本**:每轮一次 LLM 提炼 → 用最便宜模型 + 只对足够长 prompt 触发(短 prompt 跳过)

@@ -11,7 +11,7 @@
 ```bash
 docker compose up -d
 curl http://localhost:8000/health            # {"status":"ok"}
-curl http://localhost:8000/v1/agents          # 经 gateway /v1 转发(Phase 0 解锁),返回 agent 列表
+curl http://localhost:8000/agents            # gateway 对客户端裸路径,内部转发到 orchestrator /v1(Phase 0),返回 agent 列表
 ```
 
 ## 本地冒烟(已验证 · 装配证据)
@@ -32,7 +32,7 @@ curl http://localhost:8000/v1/agents          # 经 gateway /v1 转发(Phase 0 �
 ### Step 1 — 创建 agent(持久化到 PG)
 
 ```bash
-AGENT=$(curl -s -X POST http://localhost:8000/v1/agents \
+AGENT=$(curl -s -X POST http://localhost:8000/agents \
   -H 'Content-Type: application/json' \
   -d '{"name":"验收助手","model":"glm-4-flash","system_prompt":"你是助手"}')
 echo "$AGENT"   # {"id":"<agent_id>", "name":"验收助手", ...}
@@ -45,7 +45,7 @@ docker compose exec postgres psql -U agentos -c "SELECT id,name FROM agents;"
 ### Step 2 — 多轮对话 + function-calling 工具
 
 ```bash
-curl -N -X POST http://localhost:8000/v1/execute \
+curl -N -X POST http://localhost:8000/execute \
   -H 'Content-Type: application/json' \
   -d '{"agent_id":"<agent_id>","input":"读一下 /etc/hostname 文件内容"}'
 ```
@@ -54,7 +54,7 @@ curl -N -X POST http://localhost:8000/v1/execute \
 ### Step 3 — 记忆召回
 
 ```bash
-curl 'http://localhost:8000/v1/memories?query=hostname&agent_id=<agent_id>&scope=agent&limit=5'
+curl 'http://localhost:8000/memories?query=hostname&agent_id=<agent_id>&scope=agent&limit=5'
 ```
 **预期**:200,返回对话沉淀的相关记忆(召回排序 f98a1a0,low_info_reply/importance tie-breaker)。
 
@@ -71,7 +71,7 @@ curl 'http://localhost:8000/v1/memories?query=hostname&agent_id=<agent_id>&scope
 ```bash
 docker compose restart orchestrator
 sleep 5
-curl http://localhost:8000/v1/agents | grep 验收助手
+curl http://localhost:8000/agents | grep 验收助手
 ```
 **预期**:Step 1 创建的 agent 仍在(PostgresStore 持久化 + `restore_agents_from_pg` 启动灌回,L2 双向通电)。
 
@@ -83,7 +83,9 @@ curl http://localhost:8000/v1/agents | grep 验收助手
 
 ## 已知边界(MVP 外 defer,见 mvp-iteration-roadmap.md §5)
 
-蝴蝶翼写侧(记忆红线)/ Checkpoint resume(长任务断点续传)/ ParallelNode 编排(多 Agent)/ 信任域 ScopeManager(通信隔离)/ 辅助服务 observer·rm·pm(归档/通电决策)/ gRPC(100% 未接线)。
+蝴蝶翼写侧(记忆红线)/ Checkpoint resume(长任务断点续传)/ 信任域 ScopeManager(通信隔离)/ 辅助服务 observer·rm·pm(归档/通电决策)/ gRPC(100% 未接线)。
+
+> 注:多 Agent 编排(POST /v1/orchestrate:ParallelNode→FanInNode→synthesizer)已随 commit `386aae2`(2026-06-28,P3)通电交付,不再属 defer 项;本清单已据此移除。
 
 ## 装配状态总览(MVP boundary_in)
 

@@ -31,10 +31,9 @@ See [architecture.md](architecture.md) for the full architecture overview.
 
 | Module | Path | Description |
 |--------|------|-------------|
-| Frontend | `apps/web/` | Next.js + React Flow + Zustand |
+| Frontend | `apps/web/` | Next.js + @xyflow/react + Zustand |
 | Gateway | `services/gateway/` | API Gateway (FastAPI) |
 | Orchestrator | `services/orchestrator/` | Core orchestration engine |
 | Prompt Manager | `services/prompt-manager/` | Prompt templates & versions |
 | Resource Manager | `services/resource-manager/` | Provider adapters & routing |
-| Shared Types | `packages/shared-types/` | TypeScript type definitions |
 | Protobuf | `packages/proto/` | gRPC service definitions |

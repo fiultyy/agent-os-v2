@@ -58,11 +58,18 @@ Backend:  Agent Orchestrator + 支持性微服务
 
 ### 1.4 微服务列表
 
+默认运行栈（无 profile，`docker compose up` 即起）：
+
 | 服务 | 端口 | 描述 |
 |------|------|------|
 | **web** | 3000 | Next.js 前端 + React Flow 画布 |
 | **gateway** | 8000 | FastAPI API 网关（HTTP/SSE/WS） |
 | **orchestrator** | 8001 | Agent 编排引擎（核心） |
+
+辅助服务（`profiles: ["aux"]` 归档，默认不启动，需 `--profile aux` 显式拉起；未启动时 gateway 对其路由统一返回 502 兜底，可逆）：
+
+| 服务 | 端口 | 描述 |
+|------|------|------|
 | **prompt-manager** | 8002 | Prompt 模板与版本管理 |
 | **resource-manager** | 8004 | Provider 适配器与模型路由 |
 
@@ -97,7 +104,7 @@ Frontend (TypeScript): ~1,300 行
 | **BFF** | Next.js API Routes |
 | **API 网关** | FastAPI (Python) |
 | **编排引擎** | Python 3.12 + asyncio + Graph State Machine |
-| **进程间通信** | HTTP/SSE/WebSocket + gRPC (protobuf) |
+| **进程间通信** | HTTP/SSE/WebSocket (gRPC 仅有 proto 骨架, packages/proto/, 运行时未接线) |
 | **数据库（当前）** | SQLite + SQLiteStore |
 | **向量索引** | FAISS (faiss-cpu) |
 | **轻量 KG** | SQLite 两表（entities + relations） |
@@ -168,7 +175,7 @@ react / next.js / react-flow / zustand
 ### 3.2 Orchestrator 模块依赖图
 
 ```
-engine.py (FastAPI 入口, 184 行)
+engine.py (FastAPI 入口, 571 行)
     │
     ├── api/models.py (Pydantic 请求/响应模型)
     ├── api/routes/
@@ -253,7 +260,7 @@ engine.py (FastAPI 入口, 184 行)
 
 ## 4. Orchestrator 核心模块
 
-### 4.1 engine.py — FastAPI 应用入口（184 行）
+### 4.1 engine.py — FastAPI 应用入口（571 行）
 
 **文件**: `services/orchestrator/src/engine.py`
 
@@ -802,7 +809,7 @@ exposure:
 
 ### 11.1 Gateway（services/gateway/, ~1,000 行）
 
-**入口**: `main.py`（118 行）
+**入口**: `main.py`（112 行）
 
 **路由**:
 | 路由 | 标签 | 说明 |
@@ -829,10 +836,13 @@ exposure:
 
 | 文件 | 行数 | 说明 |
 |------|------|------|
-| `agents.py` | 44 | Agent CRUD |
-| `chat.py` | 493 | 对话 + SSE 执行流（核心） |
-| `memory.py` | 162 | 记忆 CRUD + layers 统计 |
-| `entities.py` | 60 | KG 实体查询 |
+| `agents.py` | 58 | Agent CRUD |
+| `chat.py` | 1031 | 对话 + SSE 执行流（核心） |
+| `memory.py` | 851 | 记忆 CRUD + layers 统计 |
+| `entities.py` | 84 | KG 实体查询 |
+| `orchestrate.py` | 231 | 多 Agent 编排 + SSE (POST /v1/orchestrate) |
+| `canvas.py` | 330 | 无尽画布 / replay (after_id) |
+| `pitfail.py` | 80 | PitFail 端点 |
 
 **chat.py 核心功能**:
 - `_build_execution_graph()`: 构建执行图
@@ -862,6 +872,12 @@ components/canvas/
 ├── FlowCanvas.tsx        # React Flow 主画布（154 行）
 ├── PropertyPanel.tsx     # 节点属性编辑面板（278 行）
 ├── ExecutePanel.tsx      # 执行状态面板（109 行）
+├── BranchManager.tsx     # Endless Canvas 分支管理
+├── Layer2Panel.tsx       # Layer2 子面板
+├── LODControl.tsx        # 细节层次控制
+├── ScoringOverlay.tsx    # 评分叠加层
+├── TabBar.tsx            # 标签栏
+├── TickCanvas.tsx        # 实时画布（WebSocket）
 ├── edges/
 │   └── DataEdge.tsx      # 数据边（连接线）
 └── nodes/
@@ -871,14 +887,20 @@ components/canvas/
 
 stores/
 ├── flowStore.ts          # 画布节点/边状态（142 行）
+├── canvasStore.ts        # Endless Canvas replay/层级状态
+├── layer2Store.ts        # Layer2 子面板状态
 ├── agentStore.ts         # Agent 列表状态（53 行）
 ├── memoryStore.ts         # 记忆状态（80 行）
-├── debugStore.ts         # SSE 事件/执行历史（90 行）
+├── debugStore.ts         # SSE 事件/执行历史 + runtime observation
 └── uiStore.ts            # UI 状态（15 行）
 
 lib/
-├── api.ts                 # API 客户端（327 行，JWT 刷新 + SSE）
-└── auth.ts               # 认证（119 行）
+├── api.ts                 # API 客户端（JWT 刷新 + SSE）
+├── auth.ts               # 认证（119 行）
+├── sse-dispatch.ts        # SSE 事件分发（dispatchSSEEvent 三入口）
+├── utils.ts              # 通用工具
+└── canvas/
+    └── wsClient.ts        # Endless Canvas WebSocket 客户端
 ```
 
 ### 12.3 Zustand Stores
@@ -899,7 +921,7 @@ interface FlowState {
 }
 ```
 
-### 12.4 API 客户端（api.ts, 327 行）
+### 12.4 API 客户端（api.ts, 440 行）
 
 | 功能 | 说明 |
 |------|------|
@@ -914,12 +936,13 @@ interface FlowState {
 ### 12.5 页面路由
 
 ```
-/              → 根页面（重定向 /canvas 或 /agents）
-/login        → 登录页
-/canvas       → React Flow 画布（主要工作区）
-/agents       → Agent 管理列表
-/flows        → Flow 列表（Phase 5.2 新增）
-/memory       → Memory 面板（全四层视图）
+/              → 单 agent 对话页（Home 组件，自动取 agents[0]，executeWithSSE→POST /v1/execute）
+/login         → 登录页
+/canvas        → React Flow 画布
+/canvas/live   → 实时画布页（WebSocket，TickCanvas/BranchManager/Layer2Panel）
+/agents        → Agent 管理列表
+/flows         → Flow 列表（Phase 5.2 新增）
+/memory        → 4-tab 面板（记忆 MemoryPanel / 通信 CommunicationPanel / 调试 DebugPanel / 编排 OrchestrationPanel，默认 memory tab）
 ```
 
 ---
@@ -1067,14 +1090,17 @@ interface FlowState {
 
 ```
 services/orchestrator/src/
-├── engine.py                    # FastAPI 入口（184 行）
+├── engine.py                    # FastAPI 入口（571 行）
 ├── api/
 │   ├── models.py               # Pydantic 模型（52 行）
 │   └── routes/
-│       ├── agents.py           # Agent CRUD（44 行）
-│       ├── chat.py             # SSE 对话流（493 行）
-│       ├── memory.py           # 记忆 API（162 行）
-│       └── entities.py         # KG 实体（60 行）
+│       ├── agents.py           # Agent CRUD（58 行）
+│       ├── chat.py             # SSE 对话流（1031 行）
+│       ├── memory.py           # 记忆 API（851 行）
+│       ├── entities.py         # KG 实体（84 行）
+│       ├── orchestrate.py      # 多 Agent 编排（231 行）
+│       ├── canvas.py           # 无尽画布 / replay（330 行）
+│       └── pitfail.py          # PitFail 端点（80 行）
 ├── services/
 │   ├── agent_manager.py        # Agent 生命周期（64 行）
 │   ├── llm_client.py           # LLM 客户端（57 行）
@@ -1140,7 +1166,7 @@ services/orchestrator/src/
     └── config.py               # 配置管理（177 行）
 
 services/gateway/src/
-├── main.py                    # FastAPI 入口（118 行）
+├── main.py                    # FastAPI 入口（112 行）
 ├── auth.py                    # JWT 认证（161 行）
 ├── config.py                  # 配置（29 行）
 ├── middleware.py              # 中间件（157 行）
@@ -1179,7 +1205,8 @@ apps/web/src/
 │       ├── CommunicationPanel.tsx
 │       ├── DebugPanel.tsx
 │       ├── ExecutionHistoryPanel.tsx
-│       └── MemoryPanel.tsx
+│       ├── MemoryPanel.tsx
+│       └── OrchestrationPanel.tsx
 ├── stores/
 │   ├── flowStore.ts           # 画布状态（142 行）
 │   ├── agentStore.ts          # Agent 状态（53 行）
@@ -1187,7 +1214,7 @@ apps/web/src/
 │   ├── debugStore.ts          # SSE 事件（90 行）
 │   └── uiStore.ts             # UI 状态（15 行）
 ├── lib/
-│   ├── api.ts                 # API 客户端（327 行）
+│   ├── api.ts                 # API 客户端（440 行）
 │   └── auth.ts                # 认证（119 行）
 └── types/
     ├── agent.ts

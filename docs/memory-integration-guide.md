@@ -18,7 +18,7 @@ bash services/orchestrator/scripts/container-run.sh 8001     # 换端口
 | **base URL** | `http://127.0.0.1:8000` |
 | **LLM** | glm-5-turbo(anthropic 端点,复用 claude code 额度,稳定) |
 | **data** | bind mount `services/orchestrator/data/` ↔ 容器 `/app/data`(`memories.db` / `kg.db` / `neural_field.db`) |
-| **gate** | 全默认**关** → 生产零回归(确定性管线);按需开 gate 启用记忆内核 |
+| **gate** | `container-run.sh` 默认全**开**(记忆内核全启用);裸代码 env(不经脚本)才默认关 → 适合 P0~P3 机械记忆管理 |
 
 ---
 
@@ -72,7 +72,7 @@ GET /v1/identity?agent_id=
 
 ## 记忆内核 5 gate（启用智能能力）
 
-正式容器默认全关(确定性管线 = P0~P3 已验证的机械记忆管理)。开 gate 启用记忆内核(⑤ 神经状态场需 TURN_END 触发,走 `/chat`/`/execute`):
+正式容器(`container-run.sh`)默认全**开** 6 gate(记忆内核全启用,见脚本 :39-44 的 `-e MEMORY_*_ENABLED=1`)。仅裸代码 env(不经 `container-run.sh`)才默认关(EVENT_BUS 裸默认 1,其余 `0`)→ P0~P3 机械记忆管理。(⑤ 神经状态场需 TURN_END 触发,走 `/chat`/`/execute`):
 
 | gate | 启用 | 灰度验证 |
 |---|---|---|
@@ -83,14 +83,14 @@ GET /v1/identity?agent_id=
 | `MEMORY_CURATOR_ENABLED=1` | ④ CuratorAgent(LLM 策展) | 触发✅(LLM 待 agent 数据) |
 | `MEMORY_NEURAL_FIELD_ENABLED=1` | ⑤ NeuralField(神经状态场漂移) | ✅ e2e(漂移收敛+快照+异常) |
 
-**开 gate 示例**(在 `container-run.sh` 或 `podman run` 加 `-e`):
+**关 gate 示例**(若要确定性管线/零回归,在 `container-run.sh` 删掉对应 `-e` 或 `podman run` 传 `=0`):
 ```bash
--e MEMORY_EVENT_BUS_ENABLED=1 \
--e MEMORY_INGESTOR_ENABLED=1 \
--e MEMORY_RETRIEVER_ENABLED=1 \
--e MEMORY_CONSOLIDATOR_ENABLED=1 \
--e MEMORY_CURATOR_ENABLED=1 \
--e MEMORY_NEURAL_FIELD_ENABLED=1
+-e MEMORY_EVENT_BUS_ENABLED=0   # 关总线=关其余所有 gate 的前置
+-e MEMORY_INGESTOR_ENABLED=0 \
+-e MEMORY_RETRIEVER_ENABLED=0 \
+-e MEMORY_CONSOLIDATOR_ENABLED=0 \
+-e MEMORY_CURATOR_ENABLED=0 \
+-e MEMORY_NEURAL_FIELD_ENABLED=0
 ```
 
 ---
@@ -163,14 +163,14 @@ print(r.json())
 | 2 | `origin=foreground` 记忆**永不被自动归档/迁移/合并**(P0) | 只能 recall 被动读,或 `/consolidate` 产新 agent 记忆 |
 | 3 | `/consolidate` **无 rate limit** | 高频调用累积 LLM 成本,调用方限流 |
 | 4 | 单 replica 假设 | 多 replica 需额外 SQLite 锁 / migrate 幂等 |
-| 5 | gate 默认关 → 记忆内核不启用 | 要 ①②③④⑤ 能力必须显式开 gate |
+| 5 | `container-run.sh` 默认全开 gate;裸代码 env 默认关 | 要确定性管线需显式关 gate(删脚本 `-e` 或传 `=0`) |
 | 6 | `agent_id` 要一致 | 写入/召回/身份用同一 agent_id,否则召回不到 |
 
 ## 故障排查
 
 | 现象 | 排查 |
 |---|---|
-| `sync_extract` 返回 `degraded:true` | LLM 超时/失败 → 降级 regex。配 glm-5-turbo(anthropic);Ingestor timeout 20s |
+| `sync_extract` 返回 `degraded:true` | LLM 超时/失败 → 降级 regex。配 glm-5-turbo(anthropic);Ingestor timeout 由 MEMORY_SIDELLM_TIMEOUT 控制(默认/容器 40s) |
 | `sync_extract` 返回 `identity_category:NONE` | 降级(regex 无标签)或 LLM 未配。查 `MEMORY_INGESTOR_ENABLED=1` |
 | `GET ?query=` 无 score 排序 | RETRIEVER gate 关 → fallback service.recall(无 score)。开 `MEMORY_RETRIEVER_ENABLED=1` |
 | `GET /identity` 四问空 | ① Ingestor 未打 identity_category 标签,或 agent_id 不匹配(写入/查询用同一 agent_id) |

@@ -67,38 +67,40 @@ VALUES (:id, :content, :scope, :memory_type, :importance, :metadata, :agent_id, 
 
 `MemoryService.store` 默认 `origin=FOREGROUND`;事件总线/精炼组件显式传 `origin=AGENT`。
 
-**代码引用**:`routes/memory.py:26-37`、`routes/chat.py:131-164/191-203/339-358/448-453`、`memory/service.py:118`、`memory/_crud.py:31`、`memory/sqlitestore.py:211`。
+**代码引用**:`routes/memory.py:34`、`routes/chat.py:151-181`(_trigger_kg_extraction)/`183`(_trigger_ingest)/`448`(tool MemoryItem)、`memory/service.py:118`、`memory/_crud.py:31`、`memory/sqlitestore.py:211`。
 
 ---
 
 ### 步骤 2 — 存储(Store Convergence)
 
-**作用**:所有写都落在 `data/memories.db`(WAL,synchronous=NORMAL,foreign_keys=ON)。15 列 schema,生产装配 `MemoryService(SQLiteStore())`,**无 PostgreSQL writer**(`pg_store=None`, `_state.py:33-34`),**无 FAISS**(`vector_store=None`, D-27 移除)。
+**作用**:所有写都落在 `data/memories.db`(WAL,synchronous=NORMAL,foreign_keys=ON)。15 列 schema,生产装配 `MemoryService(SQLiteStore())`,**无默认 PG writer**(`pg_store: Any = None` 安全默认,`_state.py:46`;仅当 `DATABASE_URL`/`PG_DATABASE_URL` 设置时由 `engine.py:219-229` 条件装配 `PostgresStore` 并在 startup hook 初始化),**无 FAISS**(`vector_store=None`, D-27 移除)。
 
 **操作**:DDL 见 `sqlitestore.py:64-118`(`CREATE TABLE IF NOT EXISTS memories` + `idx_memories_updated_at`)。增量迁移 `_migrate_schema`(`:120-149`)给旧库补 `origin`(P0)/ `state` + `last_state_transition`(P3)列,旧 `archived=1` 行回填 `state='archived'`。
 
 `_item_to_row`(`:166-185`)把 `metadata` 序列化为 JSON、`origin`/`state` 存为 enum `.value` 字符串、`updated_at` **每次写都强制刷新为 `now()`**(无 setter)——这是 db_watcher 水位线检测的基础。
 
-**代码引用**:`engine.py:60-61`(装配)、`_state.py:33-34`(pg_store=None)、`sqlitestore.py:64-185`。
+**代码引用**:`engine.py:96-102`(装配:KnowledgeGraph 在 96、`MemoryService(SQLiteStore())` 在 100-102)、`_state.py:46`(pg_store 默认 None)、`engine.py:219-229`(条件装配 PostgresStore)、`sqlitestore.py:64-185`。
 
 ---
 
 ### 步骤 3 — 召回(Recall)
 
-**作用**:为 LLM 上下文/外部查询取回相关 `MemoryItem`。3 个触发点(显式 API / 每轮注入 / 子 agent 隔离),全部汇聚到 `MemoryService.recall`(service.py:174-230)。
+**作用**:为 LLM 上下文/外部查询取回相关 `MemoryItem`。3 个触发点(显式 API / 每轮注入 / 子 agent 隔离)。
 
-**触发**:
-- `GET /memories` / `GET /memories/layers`(query="" 走全量)
-- `ContextCompiler.compile` Layer2 per-turn(`compiler.py:99-117`,`query=system_prompt[:200]`, `top_k=5`)
-- `ContextManager.isolate`(子 agent 复制父上下文)
+**触发与主路由**:
+- `GET /memories`(query≠"")— **当前生产主路由**:`routes/memory.py:162-181` 先走 `bus.emit(EventType.RECALL)` → **RetrieverAgent**(装配 `engine.py:342-349`,`MEMORY_RETRIEVER_ENABLED=1` 注册 `RetrieverHook→RECALL`)。RetrieverAgent 是确定性重排引擎(无 LLM),消费 `MemoryService.recall` 产出的候选(kw+KG unified),按 `match_score × lif_weight` 重排(红线 R8),返回 `[{item, score}]`;当 RECALL hook 未接线(feature gate 关,返 None)时回退 `service.recall(query)`(`memory.py:173`)。`query=""` 或 `GET /memories/layers` 直接走 `service.recall`(`memory.py:183`)。
+- `ContextCompiler.compile` Layer2 per-turn(`compiler.py:117`,`query=system_prompt[:200]`, `top_k=5`,经 `manager.py:41` `self._memory.recall`)— 仍直接走 `service.recall`。
+- `ContextManager.isolate`(子 agent 复制父上下文)— 仍走 `service.recall`。
 
-**操作**(运行时仅 2 条启用路径):
+即 `MemoryService.recall`(service.py:174-230)是 Keyword/KG/Unified 三条底层检索的汇聚点,同时是 RetrieverAgent 的候选层 + GET /memories 的 fallback;GET /memories(query≠"")的生产主路由是 RetrieverAgent 重排。
+
+**底层操作**(运行时仅 2 条启用路径):
 - **Keyword**:`InMemoryStore.search` 纯内存 dict 遍历过滤,**无 SQL**,按关键词子串匹配 + created_at 倒序。
 - **KG**:`SELECT * FROM entities WHERE name LIKE ? [AND type=?] LIMIT ?`(`knowledge_graph.py:857-882`),取 `source_memory_ids` 回 `store.get()` 拉原文。
 - **Unified**(配置 KG 时自动升级):Keyword ‖ KG 并发,加权 kw=0.4 / kg=0.6 合并排序。
 - **Semantic/向量**:**已废弃**(`service.py:78` `vector_store=None`,`_recall/__init__.py` 不导出 `SemanticRecall`,死代码)。
 
-**代码引用**:`service.py:174-230`、`_recall/keyword_recall.py:31-44`、`_recall/kg_recall.py:33-59`、`_recall/unified_recall.py:40-128`、`store.py:119-154`。
+**代码引用**:`routes/memory.py:162-181`(GET /memories 主路由)、`engine.py:342-349`(RetrieverAgent 装配 + RECALL hook)、`memory/sideline/retriever_agent.py`(match×lif 重排)、`memory/event_bus.py`(RECALL/RecallContext)、`service.py:174-230`、`_recall/{keyword,kg,unified}_recall.py`、`store.py:119-154`。
 
 ---
 
@@ -107,9 +109,9 @@ VALUES (:id, :content, :scope, :memory_type, :importance, :metadata, :agent_id, 
 **作用**:零 LLM 的"沉淀"链路,把低层级记忆逐级升华为高层级,并归档陈旧项。**全程过滤 `origin=AGENT`**,FOREGROUND 永不参与。
 
 **触发**(两个共享入口,per-agent `asyncio.Lock` 防竞态):
-- **60s 被动轮询**:`engine._watch_loop`(`engine.py:163-184`)`sleep(60)` → `db_watcher.has_external_changes`(MAX(updated_at) 水位线,`:76-90`)→ `run_once_all(trigger='poll')`。
-- **24h 主动清扫**:`engine._start_forgetting_sweep`(`engine.py:124-160`)`sleep(86400)` → 每 agent 同样三段。
-- **按需**:`POST /v1/memory/notify`(`memory.py:96-126`)→ `run_maintenance(trigger='notify')`,与 60s 共享锁。
+- **60s 被动轮询**:`engine._watch_loop`(`engine.py:467`,由 `:491 create_task` 调度)`await asyncio.sleep(interval)`(interval=`poll_interval`,默认 60 来自 `MEMORY_DB_WATCH_INTERVAL`,`engine.py:289/465/469`)→ `db_watcher.has_external_changes`(MAX(updated_at) 水位线,`:76-90`)→ `run_once_all(trigger='poll')`。
+- **24h 主动清扫**:`engine._start_forgetting_sweep`(`engine.py:420-456`)`sleep(86400)`(`engine.py:425`)→ 每 agent 同样三段(state_pruner→active_forgetting→memory_migrator)。
+- **按需**:`POST /v1/memory/notify`(`memory.py:660-708`)→ `run_maintenance(trigger='notify')`,与 60s 共享锁。
 
 **操作**(顺序固定,各自 try/except 独立守卫):
 
@@ -149,7 +151,7 @@ VALUES (:id, :content, :scope, :memory_type, :importance, :metadata, :agent_id, 
 
 **作用**:每轮对话异步抽取实体/关系,写入独立的 `data/kg.db`,作为召回的索引跳板。**原文不入 KG**。
 
-**触发**:chat.py `_trigger_kg_extraction`(`chat.py:62-79`)每完成一轮(`_node_llm` 145 / 流式 254 / 工具 360)调一次,`asyncio.create_task(asyncio.to_thread(kg.extract_and_ingest, ...))` fire-and-forget,全 try/except 兜底。
+**触发**:chat.py `_trigger_kg_extraction`(`chat.py:151`)每完成一轮调一次,`asyncio.create_task(asyncio.to_thread(kg.extract_and_ingest, ...))` fire-and-forget,全 try/except 兜底。
 
 **操作**:
 - 实体抽取:7 条 regex(CAPITALIZED_PHRASE / QUOTED_STRING / TECHNICAL_TERM / CAMEL_CASE / PASCAL_TECH / ALLCAPS_PASCAL / SNAKE_CASE),name 去重后截断 [:20]。`add_entity` 大小写不敏感查重,命中合并 properties/source_memory_ids,否则 `INSERT OR IGNORE`。
@@ -159,7 +161,7 @@ VALUES (:id, :content, :scope, :memory_type, :importance, :metadata, :agent_id, 
 
 **regex 局限**:纯规则无语义,中文/小写普通名词基本漏掉;关系谓词固定 7 种强依赖英文句式 `X uses Y`;无实体类型推断(type 靠 pattern 静态打标);无置信度回填(全 1.0)。
 
-**代码引用**:`knowledge_graph.py:96-257`(regex)、`:438-568`(add_entity/add_relation)、`:798-846`(BFS)、`:907-938`(extract_and_ingest)、`chat.py:62-79`、`engine.py:56-62`(装配)。
+**代码引用**:`knowledge_graph.py:106-257`(regex)、`:499-631`(add_entity/add_relation)、`:708-760`(BFS 递归 CTE)、`:968`(extract_and_ingest)、`chat.py:151`、`engine.py:96`(装配)。
 
 ---
 
@@ -305,7 +307,7 @@ ACTIVE ──age≥30d──► STALE ──(forget 快速路径)──► ARCHI
 
 | 通道 | 性质 | 作用 | 触发 |
 |------|------|------|------|
-| **A. MemoryEventBus**(内部 lifecycle bus) | 结构化生命周期 hook 总线 | 编排/执行——chat→hook→真实 memory_service/migrator 调用,有返回值传递(如 PRE_COMPRESS 的 summary_ids) | 6 个 EventType:`SESSION_START` / `TURN_START`(P2 保留) / `TURN_END`(3 调用点) / `PRE_COMPRESS` / `SESSION_END` / `DELEGATE`(P3/P4 保留)。chat.py 的 6 个 emit 点触发 |
+| **A. MemoryEventBus**(内部 lifecycle bus) | 结构化生命周期 hook 总线 | 编排/执行——chat→hook→真实 memory_service/migrator 调用,有返回值传递(如 PRE_COMPRESS 的 summary_ids) | 10 个 EventType:6 个基础生命周期事件 `SESSION_START` / `TURN_START`(P2 保留) / `TURN_END`(3 调用点) / `PRE_COMPRESS` / `SESSION_END` / `DELEGATE`(P3/P4 保留);另含 4 个 Step0 side-agent(LLM)事件 `INGEST`(IngestorAgent:raw text→KG,`chat.py:205` 触发) / `CONSOLIDATE`(ConsolidatorAgent:episodic→semantic merge) / `RECALL`(RetrieverAgent:match×lif 排序,`memory.py:168` 触发,返 None 时 fallback `service.recall`) / `CURATE`(CuratorAgent:offline QA)。side-agent hook 需显式 `register(hook, EventType.X)` 单事件,且受 `MEMORY_INGESTOR/CONSOLIDATOR/RETRIEVER/CURATOR_ENABLED` feature gate 控制 |
 | **B. SSE 广播**(`emit_memory_event`) | 推送给前端订阅者 | 观测/推送——只广播给 `/execute` event_stream 的 queue 订阅者,**无返回值,不触发任何记忆操作** | DefaultMemoryHook 在完成副作用后调 `_emit_sse` → put_nowait 到各 subscriber queue(maxsize=200)。事件名:prune/forget/migrate/compress |
 
 `DefaultMemoryHook` 同时跨越两层:在 A 里执行操作,在 B 里发通知。降级开关 `MEMORY_EVENT_BUS_ENABLED=0` 时 `hooks()` 仅留 SYSTEM、跳过 OBSERVER(等价 pre-P1)。
@@ -330,12 +332,12 @@ POST /execute
 | 模块 | 文件 |
 |------|------|
 | 写入收敛 | `memory/service.py:118-139`、`_crud.py:31-64`、`sqlitestore.py:211-234` |
-| 召回路由 | `memory/service.py:174-230`、`_recall/{keyword,kg,unified,shared}_recall.py` |
+| 召回路由 | GET /memories 主路由 `routes/memory.py:162-181`(emit RECALL→RetrieverAgent);装配 `engine.py:342-349`;重排 `memory/sideline/retriever_agent.py`;底层 `memory/service.py:174-230`、`_recall/{keyword,kg,unified,shared}_recall.py` |
 | 确定性精炼 | `state_pruner.py:70-131`、`forgetting.py:64-170`、`migrator.py:357-384`、`db_watcher.py:105-192` |
 | LLM 巩固 | `sideline/task_consolidator.py:61-152`、`sideline/backward_writer.py:118-315`、`compressor.py:153-359` |
-| KG | `knowledge_graph.py:96-938`、`kg_query_interface.py:24-50`、`chat.py:62-79` |
+| KG | `knowledge_graph.py:106-1029`、`kg_query_interface.py:24-50`、`chat.py:151` |
 | 事件总线 | `event_bus.py:35-133`、`hooks.py:28-141`、`default_hook.py:73-232` |
 | 状态机/P0 | `types.py:52-86/107-167`、`state_pruner.py:80`、`forgetting.py:82`、`migrator.py:363/378` |
 | 权限 | `permissions.py:33-41/215-285`、`_crud.py:90-139` |
-| 生产装配 | `engine.py:56-61`(KnowledgeGraph + MemoryService(SQLiteStore()))、`_state.py:33-34`(pg_store=None)、`engine.py:124-184`(24h sweep + 60s poll) |
-| 路由 | `routes/memory.py:26-163`、`routes/chat.py:131-467` |
+| 生产装配 | `engine.py:96-102`(KnowledgeGraph 在 96 + `MemoryService(SQLiteStore())` 在 100-102)、`_state.py:46`(pg_store 默认 None)+ `engine.py:219-229`(条件装配 PostgresStore)、`engine.py:420-491`(24h sweep 在 420-456 + 60s poll 在 467-491) |
+| 路由 | `routes/memory.py:34-163`、`routes/chat.py:151-540` |

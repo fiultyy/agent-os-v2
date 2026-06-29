@@ -35,12 +35,15 @@
      `resource-manager` 三条 `service_healthy`(**保留 `orchestrator: service_healthy`**)。
    - 给三个 service 块各加 `profiles: ["aux"]`(**service 块整体保留**,非删除)。
      默认 `docker compose up` **不启动** aux;postgres/web/gateway/orchestrator 不加 profile。
-2. **gateway 三路由 502 兜底**
-   - `services/gateway/src/routes/{prompts,conversations,resources}.py`:
+2. **gateway 两路由 502 兜底**
+   - `services/gateway/src/routes/{prompts,resources}.py`:
      每个端点的 `http_client` 调用经 `_aux_call` 包装,捕获
      `httpx.HTTPStatusError | httpx.ConnectError | httpx.RequestError`,
      任一失败返回 `502 {"detail":"upstream aux service not wired (archived)"}`。
    - **成功路径逻辑完全保留**(`raise_for_status` + `json()` 行为一致);仅加兜底。
+   - 注:`/conversations` 路由及其 `conversations.py` 已在 Phase 0(commit 69179a5
+     conversation-observer 彻底弃用)删除,故 aux 502 兜底仅余 pm/rm 两条;
+     `main.py` 的 `include_router` 亦无 `/conversations` 注册。
 3. **红线未触**:三 service 的 `src/` 与 Dockerfile、orchestrator 全部文件、
    前端 apps/web、gateway 的 `/v1` 转发与 `/health`、记忆模块——**均零改动**。
 
@@ -71,7 +74,7 @@ docker compose --profile aux up prompt-manager
 - **resource-manager(8004)**:需要多 provider 动态路由 / 模型别名解析 /
   按成本选模型——且 orchestrator 当前 `default_model` 硬编码已不够用。
 
-在上述真实需求出现前,三项维持归档;`gateway` 三路由的 502 即是其"未通电"的
+在上述真实需求出现前,两项维持归档;`gateway` 两路由的 502 即是其"未通电"的
 **正确表征**,不是缺陷。
 
 ## 五、与 mvp-acceptance.md defer 边界的呼应

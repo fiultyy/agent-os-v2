@@ -170,7 +170,7 @@ async submit(agent_id, write_fn):
 | 蝴蝶翼 | ✅ F1-F6/B1-B6/C1-C6 | 不动 |
 | 信任域 | ✅ permissions.py + 跨 scope 校验 | W2 memory_tool 写入走信任域 |
 | 五维评分 | ✅ 权重 0.25/0.15/0.25/0.15/0.20 | W2 写入触发打分 |
-| 语义召回 | ⚠️→✅ KEYWORD+KG 双路径 | SEMANTIC 已按方案 A 移除(2026-06-21) |
+| 语义召回 | ⚠️→✅ KEYWORD+KG 双路径 | SEMANTIC 已定按方案 A 移除(2026-06-21 用户拍板),物理删除待执行(P3)——枚举/semantic_recall.py/vector.py/embedding.py 仍在,生产零引用(死分支) |
 
 ### 4.1 贯穿约束:多 agent 并发接入
 agent-os-v2 是**多 agent 接入平台**(区别于 hermes 单 agent runtime),所有接入层按"多 agent 并发"设计:

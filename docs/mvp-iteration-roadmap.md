@@ -21,15 +21,15 @@
 4. **Agent CRUD 经 gateway 可用且持久化重启不丢** —— ⚠️ 非"一行装配":`_state.py:42` 注释 `pg_store removed — was never fully wired`。需**双向通电**:engine 启动期实例化 PostgresStore + `initialize()` + **启动 hook 从 PG 灌回 `_state.agents`**(审查 critical:无此灌回则重启验收必假阳性)+ `agents.py` 路由改读 pg — ✅ L2(`3d5532b`,PostgresStore + restore_agents_from_pg 双向,本地 engine import 冒烟 OK)
 5. **L3 工具链最小通电**:engine 实例化 ToolRegistry 并 register 已实现工具;⚠️ **修正 `chat.py:232-233` 默认 `tool_name=web_search`(必 not found)与 `tool_args={query:...}`(与 handler 签名 `http_get(url,...)` 不匹配)**;Guardrail.check_output 支持 dict 脱敏;system prompt 引导 LLM 输出 `tool_call:<name>`(否则正则永不命中) — ✅ L2(18 工具 register + 默认对齐 + Guardrail dict)+ defer FC(原生 tool_use 取代正则启发式)
 6. **Agent 间通信面板点亮**:`register_agent` 在 session 建立时调用(使 broadcast 收件人非空)+ `register_delivery_callback` 桥 AgentMessage 到 chat.py SSE + 前端 dispatch `agent_message` 进 debugStore — ✅ L2 通信桥(`register_delivery_callback`→SSE)+ L4 前端 dispatch(`b6026cc`)
-7. **可观测基线**:执行历史/通信面板有真实数据;gateway 转发矩阵回归测试(防 `/v1` 前缀漂移) — ✅ gateway 转发回归测试(6 passed)+ 前端实时通路就绪(端到端真实数据待 Phase 3 容器)
+7. **可观测基线**:执行历史/通信面板有真实数据;gateway 转发矩阵回归测试(防 `/v1` 前缀漂移) — ✅ gateway 转发回归测试(6 passed)+ 前端实时通路就绪(端到端真实数据待 Phase 3 容器)+ observer 双层已交付(`RuntimeObserverHook` OBSERVER hook + `_state.runtime_observations`(cap 200)+ SSE `runtime_observation` + `/debug/status` `runtime_anomalies`,前端 `sse-dispatch.ts`/`debugStore`(cap 200)/`DebugPanel`(10s 轮询))
 
 ### boundary_out(明确排除)
 
 | 项 | 处置 | 理由 |
 |---|---|---|
 | gRPC(100% 未接线) | defer | 无 MVP 消费场景,纯文档承诺 |
-| 高级编排抽象(Flow/DAG/Loop/Cron + ParallelNode/FanInNode/SubgraphNode) | defer | 生产单线性图够用;接通是"实现"非"接线" |
-| meta agent 三件套(ConditionalSpawner/MetaAgentNode/SandboxExecutor) | defer(标 NOT-WIRED 保留) | 需 `create_subagent` 真实生命周期,代码质量高有单测,删再造成本高 |
+| 高级编排抽象(Flow/DAG/Loop/Cron) | defer | 生产单线性图够用;接通是"实现"非"接线"。注:ParallelNode/FanInNode 已于 P3(`386aae2`)/v1/orchestrate 编排终点通电,移出 defer |
+| meta agent 三件套(ConditionalSpawner/MetaAgentNode/SandboxExecutor) | defer(标 NOT-WIRED 保留) | 需完整 meta 生命周期;注 `create_subagent` 本身已于 P3(`386aae2`)/v1/orchestrate 接通生产 spawn→run→teardown(`agent_manager.py:67`),仅 ConditionalSpawner/MetaAgentNode/SandboxExecutor 三件套仍 NOT-WIRED |
 | 信任域 ScopeManager / Checkpoint resume / CommunicationBus 持久化 | defer | MVP 单轮跑完即结束,不需要 |
 | 蝴蝶翼写侧 / PitFail / scoring-committee / CAContextCoding | defer(MVP 后第一优先通电) | 属记忆进化簇后续 |
 | control 拦截+推理层 / ContextManager.write-compress-isolate / LLMNode+ToolCallNode mock / canvas 死事件 / 前端 CommitteeVoteNode | **delete** | 纯死代码(Phase 2 清理) |
@@ -128,7 +128,7 @@
 - **merge_order**:L6 最后合并;协调 `context/__init__.py`(若记忆簇后续也动 context)
 - **validation**:`grep -r 'InterceptLayer|ReasoningLayer|CAContextCoding|PitfallContextBuilder|LLMNode|ToolCallNode' services/orchestrator/src/` 零命中(自身定义已删);`pytest -q` 无 ImportError;`cd apps/web && npm run build` 无报错
 
-### Phase 3 — MVP 验收 + 基线收敛【L1+L2+L3+L4+L6 合并主分支】· ✅ **部署验证通过**(2026-06-28);本地冒烟装配完整(engine import OK + 18 工具 + pitfail/memory/kg,orchestrator **692 passed / 14 failed**(实跑 HEAD c4a99dd;失败项=butterfly_wing 7 + memory_graph_endpoint + VectorStore 环境性 baseline,零新增回归;P0-P3 多 agent 编排 +9 测试使 passed 增) <!-- DOC-CHECK: tests=706 --> [锚点=collect 数(稳定可重现 `pytest --co`),非执行 passed 数(环境性 baseline 抖动);CI 回写见 `scripts/doc_check.py`],gateway 6 passed);**容器部署验证通过**(2026-06-28:`:verify` 镜像临时容器 8010,/health + /v1/agents[默认助手 restore] + /v1/pitfall/ + /v1/memories 全可达,PitfailRegistry wired,启动无 ImportError;生产 `:latest` 22h 容器未触碰,记忆数据零风险)
+### Phase 3 — MVP 验收 + 基线收敛【L1+L2+L3+L4+L6 合并主分支】· ✅ **部署验证通过**(2026-06-28);本地冒烟装配完整(engine import OK + 18 工具 + pitfail/memory/kg,orchestrator **collect 基线 729 tests**(`pytest --co`,HEAD 5fe1bee;含 1 可容忍 collection error = canvas e2e requests 噪声,doc_check.py 设计内 tolerant);实跑 **715 passed / 14 failed**(失败项均预存 = butterfly_wing 测试隔离 + test_phase7 ModuleNotFoundError,零新增回归) <!-- DOC-CHECK: tests=729 --> [锚点=collect 数(稳定可重现 `pytest --co`),非执行 passed 数(环境性 baseline 抖动);CI 回写见 `scripts/doc_check.py`],gateway 6 passed);**容器部署验证通过**(2026-06-28:`:verify` 镜像临时容器 8010,/health + /v1/agents[默认助手 restore] + /v1/pitfall/ + /v1/memories 全可达,PitfailRegistry wired,启动无 ImportError;生产 `:latest` 22h 容器未触碰,记忆数据零风险)
 
 **MVP 交付闸门** —— 端到端五步(可复现命令记入 `docs/mvp-acceptance.md`):
 
@@ -148,8 +148,8 @@
 | 里程碑 | 内容 | 前置 |
 |---|---|---|
 | **记忆进化通电**(第一优先) | ✅ PitFail `92be2cd`/merge `df225ca`:registry 实例化 + 工具失败 hook(match→increment复发 / record新)+ /v1/pitfall API(4 GET)+ _classify_tool_error,9 测试绿;蝴蝶翼写侧接线待(记忆簇后续,蝴蝶翼红线需先与记忆迭代分支协调) | — |
-| **LLM function-calling + 多轮 loop** | ✅ 完成(FC `c248894`/merge `5f9b22b` + 多轮 `8cdc48b`/merge `7a87b68`):chat tools 参数 + tool_use 解析(anthropic 原生 + openai 兼容)+ 正则降级兜底 + 18 工具 schema;多轮(tool→llm 循环 + tool_result 回注 + MAX_TOOL_ITERATIONS + 死循环 bugfix)。12 测试绿;实测 **692 passed / 14 failed**(butterfly_wing/memory_graph/VectorStore 环境性 baseline,零新增回归;多 agent 编排 P0-P3 后,2026-06-28) <!-- DOC-CHECK: tests=706 --> | done |
-| **多 Agent 编排** | 准备 ✅(`874da6a`,2026-06-28:修 BFS fan-in join-barrier 汇聚重复执行 bug + ParallelNode/FanIn/Subgraph 18 单测固化语义,pending-queue 去重兼容循环图);**通电待** meta create_subagent 生命周期(天级,从无到有 + 碰 agent_manager/chat.py)+ 真实多 agent 场景;信任域 ScopeManager / Checkpoint resume 随本簇统一规划 | 图引擎基线(Phase 1 _resolve_next + `874da6a` join-barrier)✅ |
+| **LLM function-calling + 多轮 loop** | ✅ 完成(FC `c248894`/merge `5f9b22b` + 多轮 `8cdc48b`/merge `7a87b68`):chat tools 参数 + tool_use 解析(anthropic 原生 + openai 兼容)+ 正则降级兜底 + 18 工具 schema;多轮(tool→llm 循环 + tool_result 回注 + MAX_TOOL_ITERATIONS + 死循环 bugfix)。12 测试绿;collect 基线 **729 tests**(`pytest --co`,HEAD 5fe1bee;实跑 715 passed / 14 failed,失败项均预存 baseline 零新增回归;多 agent 编排 P0-P3 后,2026-06-28) <!-- DOC-CHECK: tests=729 --> | done |
+| **多 Agent 编排** | ✅ **已通电**(`874da6a` 修 BFS fan-in join-barrier + 18 单测;`25e802e` P0 create_subagent/teardown_subagent 生命周期 + R1/R5 守卫;`78d6f5c` P1 MetaAgentNode run_agent_turn 剥离记忆;`386aae2` P3 `/v1/orchestrate` 集成终点,2026-06-28):POST `/v1/orchestrate`(engine.py:535 挂载)→multi_agent(ParallelNode: N×AgentWorkerNode 各 `create_subagent`(`agent_manager.py:67`)→`run_agent_turn`(真实 LLM)→`teardown_subagent`(`:133`)finally 必跑)→fan_in(FanInNode)→synthesizer(`run_agent_turn(orchestrator_id)` 综合);经 `_agent_manager_shim()`(`api/routes/orchestrate.py:59-73`)复用 agent_manager 实现,与 `/v1/execute`、`/v1/execute_parallel` 物理隔离(R2,自带 `_sse` helper,**不碰 chat.py**);产 SSE `agent_status`/`node_start`/`node_complete`/`execution_complete`;信任域 ScopeManager / Checkpoint resume 仍随本簇 defer | 图引擎基线(Phase 1 `_resolve_next` + `874da6a` join-barrier)✅ + P0-P3 编排集成✅ |
 | **辅助服务命运决策** | ✅ **归档**(`07f9921`,2026-06-28):compose 解耦 gateway depends_on + `profiles:[aux]` 隔离 + 三路由 502 兜底,代码全保留可逆;⚠️ `profiles` 仅 Compose v2 生效(本机 v1.29.2 静默忽略,但 depends_on 解耦已使主链路不被 aux 拖垮,核心收益达成);通电待真实需求(prompt 面板/会话回放落库/多 provider 动态路由);gRPC 无消费场景继续 defer | 视 MVP 反馈 |
 
 ---
@@ -158,7 +158,7 @@
 
 旧 `implementation-roadmap.md` 声称 98% 完成,以 D-* 模块标记掩盖接线未通:
 
-- **废弃/失实**:D-21(control 零调用,delete)· D-19(CAContextCoding 零实例化,delete)· D-16(meta 三件套完整但 create_subagent 断裂,标 NOT-WIRED defer)· "98%"总声明(改绑定可跑测试的 MVP 完成度)
+- **废弃/失实**:D-21(control 零调用,delete)· D-19(CAContextCoding 零实例化,delete)· D-16(meta 三件套完整;`create_subagent` 已于 P3 `386aae2` 接通,仅 ConditionalSpawner/MetaAgentNode/SandboxExecutor 断裂,标 NOT-WIRED defer)· "98%"总声明(改绑定可跑测试的 MVP 完成度)
 - **重排延后**:D-15 蝴蝶翼(写侧零调用,降 Phase 5)· D-20 PitFail(Verifier 零集成,降 Phase 5)· D-25 BackwardWriter(随 D-15/D-20)
 - **保留聚焦接线**:旧 D-* 全在加新功能,而 MVP 真实需求是"让已实现骨架通电"。Phase 0-1 把旧 roadmap 完全漏记的接线项(gateway /v1、工具 register、通信桥、PostgresStore、前端 WS)提到 P0/P1
 - **完成判据更正**:旧以"模块数",本规划以"端到端可跑通"(Phase 3 五步)
@@ -168,7 +168,7 @@
 ## 7. 风险 + 执行注意
 
 - **共享热点竞争**:`chat.py`/`engine.py`/`_state.py` 是头号冲突源 → L2 独占写权,串行合并,其他线禁碰
-- **文档漂移复发**:✅ **已落地**(2026-06-28,`dde05de`+`3abf3a3`):`scripts/doc_check.py`(collect `pytest --co` / islands NOT-WIRED 扫描 / verify 锚点对比)+ `.github/workflows/doc-check.yml` + docs `<!-- DOC-CHECK: tests=706 -->` 锚点;解 kg 审核 HIGH 根因(文档数字漂移),漂移 CI 红;`pyproject.toml [build-system]` 移位修(`3abf3a3`)解 CI 首跑必红
+- **文档漂移复发**:✅ **已落地**(2026-06-28,`dde05de`+`3abf3a3`):`scripts/doc_check.py`(collect `pytest --co` / islands NOT-WIRED 扫描 / verify 锚点对比)+ `.github/workflows/doc-check.yml` + docs `<!-- DOC-CHECK: tests=729 -->` 锚点;解 kg 审核 HIGH 根因(文档数字漂移),漂移 CI 红;`pyproject.toml [build-system]` 移位修(`3abf3a3`)解 CI 首跑必红
 - **审查遗留 medium/low**(执行时注意):L1 替换 18 处(非 17)· `can_parallel_with` 语义澄清(文件无重叠 ≠ 可独立合并)· 工具数量清单制(非硬编码 26)· PostgresStore.initialize() 建表与记忆 SQLite 双库并存评估
 - **执行编排**:Phase 1 的 L2/L3/L4 用 **tmux 多 session + 多 worktree 并行**(L2 独占 orchestrator,L3/L4 前端线),收敛节点按 §4 merge_order 合并
 

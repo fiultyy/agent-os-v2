@@ -12,16 +12,20 @@
 ```bash
 # Clone the repo
 git clone <repo-url>
-cd agent-os
+cd agent-os-v2
 
 # Install frontend dependencies
 pnpm install
 
-# Install Python service dependencies
+# Install Python service dependencies (core runtime: gateway + orchestrator)
 cd services/gateway && pip install -e "."
 cd ../orchestrator && pip install -e "."
-cd ../prompt-manager && pip install -e "."
-cd ../resource-manager && pip install -e "."
+
+# prompt-manager(8002) / resource-manager(8004) 为归档辅助服务
+# (docker-compose.yml profiles:["aux"])，默认 `docker compose up` 不启动，
+# gateway 通过 _aux_call 兜底 502。仅当显式启用 aux profile 时才需要安装：
+#   cd ../prompt-manager && pip install -e "."
+#   cd ../resource-manager && pip install -e "."
 ```
 
 ## Development
