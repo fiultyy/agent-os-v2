@@ -52,12 +52,6 @@ importers:
         specifier: ^5.8.0
         version: 5.9.3
 
-  packages/shared-types:
-    devDependencies:
-      typescript:
-        specifier: ^5.8.0
-        version: 5.9.3
-
 packages:
 
   '@alloc/quick-lru@5.2.0':
