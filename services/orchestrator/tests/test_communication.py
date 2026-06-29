@@ -103,3 +103,31 @@ async def test_engine_bridge_callback_emits_agent_message() -> None:
         assert "bridged" in sse
     finally:
         _state.unsubscribe_memory_events(q)
+
+
+@pytest.mark.asyncio
+async def test_delivery_callback_fires_on_broadcast() -> None:
+    """broadcast() fires delivery callbacks per recipient — was send-only.
+
+    Regression guard for the /execute + /orchestrate broadcast paths: without
+    this, agent_message SSE never reaches the front-end CommunicationPanel in
+    orchestration scenarios (each recipient must get its own callback so the
+    bridge emits one agent_message SSE per delivered copy).
+    """
+    bus = CommunicationBus()
+    bus.register_agent("alpha", "sess-1")
+    bus.register_agent("beta", "sess-1")
+    bus.register_agent("gamma", "sess-1")
+
+    received: list[tuple[str, str]] = []
+
+    async def _capture(message: AgentMessage, recipient_id: str) -> None:
+        received.append((recipient_id, message.content))
+
+    bus.register_delivery_callback(_capture)
+
+    delivered = await bus.broadcast(_msg("alpha", "broadcast-hi"), session_id="sess-1")
+
+    # beta + gamma receive (alpha is sender → skipped); each fires the callback.
+    assert sorted(received) == [("beta", "broadcast-hi"), ("gamma", "broadcast-hi")]
+    assert len(delivered) == len(received) == 2

@@ -238,6 +238,16 @@ class CommunicationBus:
             self._record_history(agent_id, copy)
             delivered_ids.append(copy.id)
 
+            # Fire delivery callbacks — mirrors send(). Without this the
+            # broadcast path (/execute, /orchestrate, POST /messages with no
+            # recipient_id) never bridges to agent_message SSE, leaving the
+            # front-end CommunicationPanel empty in orchestration scenarios.
+            for cb in self._delivery_callbacks:
+                try:
+                    await cb(copy, agent_id)
+                except Exception as exc:
+                    logger.warning("Delivery callback error: %s", exc)
+
         return delivered_ids
 
     # ── Topic-based pub/sub ───────────────────────────────────────
