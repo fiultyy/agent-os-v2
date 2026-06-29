@@ -56,3 +56,6 @@ services/orchestrator/data/*.db
 
 # Tools / MCP caches
 .serena/
+
+# Claude Code 本地配置(skill拷贝等,不进 git)
+.claude/
