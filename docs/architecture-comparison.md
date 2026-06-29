@@ -5,6 +5,8 @@
 
 ---
 
+> ⚠️ **历史文档**(2026-04-20 架构选型对比分析)。当前系统现状以 `docs/mvp-iteration-roadmap.md` + `agentos-mvp-roadmap` memory 为准;对比结论可能已不适用,仅供历史参考。
+
 ## 架构对比分析
 
 ### 关键差异
