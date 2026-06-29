@@ -78,6 +78,11 @@ interface DebugState {
   clearHistory: () => void;
 }
 
+/** Soft cap on debug event buffers — mirrors the backend ring-buffer sizes
+ *  (MAX_RUNTIME_OBSERVATIONS=200). Without this, long sessions accumulate
+ *  unbounded arrays (esp. observationEvents / messages / memoryEvents). */
+const MAX_DEBUG_EVENTS = 200;
+
 export const useDebugStore = create<DebugState>((set) => ({
   debugMode: false,
   executionEvents: [],
@@ -89,18 +94,18 @@ export const useDebugStore = create<DebugState>((set) => ({
   toggleDebugMode: () => set((s) => ({ debugMode: !s.debugMode })),
 
   addExecutionEvent: (event) =>
-    set((s) => ({ executionEvents: [...s.executionEvents, event] })),
+    set((s) => ({ executionEvents: [...s.executionEvents, event].slice(-MAX_DEBUG_EVENTS) })),
 
   addMessage: (msg) =>
-    set((s) => ({ messages: [...s.messages, msg] })),
+    set((s) => ({ messages: [...s.messages, msg].slice(-MAX_DEBUG_EVENTS) })),
 
   addMemoryEvent: (event) =>
     set((s) => ({
-      memoryEvents: [...s.memoryEvents, { ...event, timestamp: new Date().toISOString() }],
+      memoryEvents: [...s.memoryEvents, { ...event, timestamp: new Date().toISOString() }].slice(-MAX_DEBUG_EVENTS),
     })),
 
   addObservationEvent: (event) =>
-    set((s) => ({ observationEvents: [...s.observationEvents, event] })),
+    set((s) => ({ observationEvents: [...s.observationEvents, event].slice(-MAX_DEBUG_EVENTS) })),
 
   setReplayIndex: (idx) => set({ replayIndex: idx }),
 

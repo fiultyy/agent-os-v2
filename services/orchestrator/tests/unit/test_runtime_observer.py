@@ -142,5 +142,5 @@ class TestRuntimeObservationBuffer:
         _state.record_observation("error_spike", "a1", {"i": 1})
         _state.record_observation("error_spike", "a1", {"i": 2})
         recent = _state.recent_observations(10)
-        assert recent[0]["detail"]["i"] == 2  # newest first
-        assert recent[1]["detail"]["i"] == 1
+        assert recent[0]["i"] == 2  # newest first; detail flattened to top level
+        assert recent[1]["i"] == 1

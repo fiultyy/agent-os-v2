@@ -226,12 +226,16 @@ def record_observation(
     The buffer feeds ``GET /debug/status``; the live push feeds the front-end
     DebugPanel. Pure in-memory — must never write to memory_service / memories.
     """
+    # Flatten detail to the top level — mirrors emit_runtime_observation's
+    # payload shape so /debug/status (recent_observations) and the live SSE
+    # stream stay structurally identical for any consumer.
     entry: dict[str, Any] = {
         "kind": kind,
         "agent_id": agent_id,
-        "detail": detail or {},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+    if detail:
+        entry.update(detail)
     runtime_observations.append(entry)
     if len(runtime_observations) > MAX_RUNTIME_OBSERVATIONS:
         del runtime_observations[: len(runtime_observations) - MAX_RUNTIME_OBSERVATIONS]
