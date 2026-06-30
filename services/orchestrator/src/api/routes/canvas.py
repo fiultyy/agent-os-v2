@@ -178,8 +178,9 @@ async def canvas_websocket(
     tab = _tab_manager.create_tab(session_id=session_id)
     await _emitter.subscribe(session_id, ws)
 
-    # Replay history
-    await _emitter.replay(session_id, ws)
+    # Replay history(初始连接读 after_event_id query,支持断点续传 — 修复 B1 对前端重连无效)
+    after_event_id = ws.query_params.get("after_event_id")
+    await _emitter.replay(session_id, ws, after_event_id)
 
     logger.info("Canvas WS connected: session=%s tab=%s", session_id, tab.tab_id)
 

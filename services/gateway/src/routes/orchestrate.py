@@ -1,4 +1,9 @@
-"""Execute route — SSE proxy to orchestrator /execute."""
+"""Orchestrate route — SSE proxy to orchestrator /orchestrate.
+
+代理前端 POST /orchestrate → orchestrator:8001/v1/orchestrate,SSE 流式透传
+(multi_agent / fan_in / synthesizer / execution_complete 事件)。
+模板抄 routes/execute.py;timeout 300s(多 agent 编排比单轮 execute 久)。
+"""
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
@@ -9,23 +14,16 @@ router = APIRouter()
 
 
 @router.post("")
-async def execute(request: Request) -> StreamingResponse:
-    """Proxy execute request to orchestrator, streaming SSE events back."""
+async def orchestrate(request: Request) -> StreamingResponse:
+    """Proxy orchestrate request to orchestrator, streaming SSE events back."""
     body = await request.json()
-
-    # ── Field mapping: accept "message" as "input" ───────────
-    # Frontend/curl may send {"message": "..."} while the
-    # orchestrator expects {"input": "..."}.  Normalise here
-    # (BFF responsibility) so both field names work.
-    if "message" in body and "input" not in body:
-        body["input"] = body["message"]
 
     async def stream_events():
         async with http_client.stream(
             "POST",
-            f"{ORCHESTRATOR_API}/execute",
+            f"{ORCHESTRATOR_API}/orchestrate",
             json=body,
-            timeout=120.0,
+            timeout=300.0,
         ) as resp:
             resp.raise_for_status()
             async for line in resp.aiter_lines():

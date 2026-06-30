@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.auth import init_keys
 from src.config import http_client
 from src.middleware import require_auth, require_service_key
-from src.routes import agents, prompts, resources, memories, messages, debug, kg, chat, execute
+from src.routes import agents, prompts, resources, memories, messages, debug, kg, chat, execute, orchestrate
 from src.routes import auth as auth_routes
 
 app = FastAPI(title="Agent OS — API Gateway", version="0.1.0", redirect_slashes=True)
@@ -103,6 +103,12 @@ app.include_router(
     execute.router,
     prefix="/execute",
     tags=["execute"],
+    dependencies=[Depends(require_auth)],
+)
+app.include_router(
+    orchestrate.router,
+    prefix="/orchestrate",
+    tags=["orchestrate"],
     dependencies=[Depends(require_auth)],
 )
 
