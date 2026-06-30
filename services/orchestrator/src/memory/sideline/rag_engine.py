@@ -145,10 +145,10 @@ class RAGEngine:
 
         # 尝试使用真实 embedding 服务
         try:
-            from src.memory.embedding import SentenceTransformerProvider
+            from src.memory.embedding import get_default_provider
 
             if not hasattr(self, '_embedding_provider') or self._embedding_provider is None:
-                self._embedding_provider = SentenceTransformerProvider()
+                self._embedding_provider = get_default_provider()
 
             vec = self._embedding_provider.embed(query)  # (dim,)
             # FAISS search 期望 (1, dim) 形状

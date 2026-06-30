@@ -24,7 +24,7 @@ from typing import Any
 
 import numpy as np
 
-from src.memory.embedding import EmbeddingProvider, SentenceTransformerProvider
+from src.memory.embedding import EmbeddingProvider, get_default_provider
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +80,7 @@ class FAISSVectorStore(VectorStore):
         provider: EmbeddingProvider | None = None,
         persist_path: str = "data/memory.faiss",
     ) -> None:
-        self._provider = provider or SentenceTransformerProvider()
+        self._provider = provider or get_default_provider()
         # Resolve relative paths to absolute and ensure directory exists
         if persist_path:
             persist_path_obj = Path(persist_path)
