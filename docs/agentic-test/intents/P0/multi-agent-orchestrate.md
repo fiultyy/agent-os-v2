@@ -6,12 +6,12 @@ timeout_ms: 120000
 status: NOT-WIRED
 ---
 
-# 多 agent 编排(researcher+writer→综合)
+# 多 agent 编排(researcher+critic→综合)
 
 > NOT-WIRED: gateway 缺 /orchestrate 代理(main.py 无 router,routes/ 无 orchestrate.py),前端 POST /api/orchestrate → gateway:8000/orchestrate → 404。后端 orchestrator:8001/v1/orchestrate 通。待 gateway 加 routes/orchestrate.py 代理(POST /orchestrate → ORCHESTRATOR_API/orchestrate)+ main.py 注册 prefix=/orchestrate
 
 ## 目标
-验证 orchestrator 能调度 researcher+writer 子 agent 并行处理任务,fan-in 汇聚后由 synthesizer 综合成融合两视角的答案。
+验证 orchestrator 能调度 researcher+critic 子 agent 并行处理任务,fan-in 汇聚后由 synthesizer 综合成融合两视角的答案(注:当前 gateway 缺 /orchestrate 代理,前端 404,见 NOT-WIRED)。
 
 ## 前置
 - 已创建一个 orchestrator agent(作综合者),用于在下拉中选择
@@ -30,4 +30,3 @@ status: NOT-WIRED
 - 编排面板显示 `fan_in` 汇聚节点
 - 编排面板显示 `synthesizer` 综合输出(融合 researcher 事实视角与 critic 审视视角的答案)
 - 事件流中出现 `execution_complete.output` 事件,含综合答案文本
-- 编排完成后,查询 orchestrator 的记忆列表可见沉淀记忆(episodic/agent 类型)
