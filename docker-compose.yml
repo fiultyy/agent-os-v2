@@ -1,30 +1,15 @@
 services:
-  postgres:
-    image: postgres:16-alpine
-    ports:
-      - "5432:5432"
-    environment:
-      POSTGRES_USER: agentos
-      POSTGRES_PASSWORD: agentos_dev
-      POSTGRES_DB: agentos
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U agentos"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-
   web:
     build:
       context: .
       dockerfile: apps/web/Dockerfile
+      args:
+        # Next.js standalone rewrites 在 next build 时固化 env(runtime 无效),须 build 时注入容器名
+        # API_URL 不带 /v1:gateway 路由裸路径(main.py: /memories /agents /debug),带 /v1 会 404
+        - API_URL=http://gateway:8000
+        - ORCHESTRATOR_WS_URL=http://orchestrator:8001
     ports:
       - "3000:3000"
-    environment:
-      - NEXT_PUBLIC_API_URL=http://gateway:8000
-      - API_URL=http://gateway:8000
-      - ORCHESTRATOR_WS_URL=http://orchestrator:8001
     depends_on:
       gateway:
         condition: service_healthy
@@ -35,17 +20,17 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8000:8000"
-    volumes:
-      - ./services/gateway/src:/app/src
     environment:
       - ORCHESTRATOR_URL=http://orchestrator:8001
+      # aux 兜底 URL:aux profile 默认不启动,调用时 503(gateway _aux_call 降级),不阻塞启动
       - PROMPT_MANAGER_URL=http://prompt-manager:8002
       - RESOURCE_MANAGER_URL=http://resource-manager:8004
     depends_on:
       orchestrator:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      # CMD-SHELL:docker-compose v1 把 CMD 数组按空格分割致 -c 脚本截断;改单字符串 sh -c 执行
+      test: ["CMD-SHELL", "python -c 'import urllib.request;urllib.request.urlopen(\"http://localhost:8000/health\")' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -57,23 +42,19 @@ services:
     ports:
       - "8001:8001"
     volumes:
-      - ./services/orchestrator/src:/app/src
+      # sqlite 持久化:sqlitestore.py db_path="data/memories.db" + engine.py PITFALLS_DB=data/pitfalls.db(相对 /app)
+      - ./services/orchestrator/data:/app/data
     environment:
       - GATEWAY_URL=http://gateway:8000
-      - DATABASE_URL=postgresql+asyncpg://agentos:agentos_dev@postgres:5432/agentos
-      # 私人系统(全生命周期单人用):智谱 anthropic 协议 + glm-4.7(coding plan 额度在此通道)
-      # 注:glm-4.7 走 openai paas/v4 通道会 429(资源包不足);anthropic /api/anthropic 通道有 coding plan 额度
+      # 私人系统:智谱 anthropic 协议 + glm-4.7(coding plan 额度在 /api/anthropic 通道)
       - LLM_API_FORMAT=anthropic
       - ANTHROPIC_BASE_URL=https://open.bigmodel.cn/api/anthropic
       - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN}
       - LLM_ANTHROPIC_MODEL=glm-4.7
       - MEMORY_EVENT_BUS_ENABLED=1
       - MEMORY_RETRIEVER_ENABLED=1
-    depends_on:
-      postgres:
-        condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      test: ["CMD-SHELL", "python -c 'import urllib.request;urllib.request.urlopen(\"http://localhost:8001/health\")' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -88,7 +69,7 @@ services:
     volumes:
       - ./services/prompt-manager/src:/app/src
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
+      test: ["CMD-SHELL", "python -c 'import urllib.request;urllib.request.urlopen(\"http://localhost:8002/health\")' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -103,10 +84,7 @@ services:
     volumes:
       - ./services/resource-manager/src:/app/src
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8004/health')"]
+      test: ["CMD-SHELL", "python -c 'import urllib.request;urllib.request.urlopen(\"http://localhost:8004/health\")' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
-
-volumes:
-  pgdata:

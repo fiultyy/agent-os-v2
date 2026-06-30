@@ -12,6 +12,13 @@ COPY apps/web ./apps/web
 # Ensure public directory exists for COPY in runner stage
 RUN mkdir -p /app/apps/web/public
 WORKDIR /app/apps/web
+# Next.js production standalone rewrites 在 next build 时求值 process.env 并固化到产物
+# (runtime env 不再生效)。须在 build 前注入容器服务名,否则 rewrite 固化为默认
+# localhost:8000 → 容器内 ECONNREFUSED。API_URL 不带 /v1:gateway 路由裸路径。
+ARG API_URL=http://localhost:8000
+ARG ORCHESTRATOR_WS_URL=http://localhost:8000
+ENV API_URL=$API_URL
+ENV ORCHESTRATOR_WS_URL=$ORCHESTRATOR_WS_URL
 RUN pnpm build
 
 # Production image
