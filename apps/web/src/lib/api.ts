@@ -120,6 +120,7 @@ export async function createAgent(data: {
   name: string;
   description?: string;
   model?: string;
+  system_prompt?: string;
   tools?: string[];
 }): Promise<AgentItem> {
   const raw = await request<Record<string, unknown>>("/agents/", {
