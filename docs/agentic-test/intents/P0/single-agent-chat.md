@@ -15,7 +15,7 @@ timeout_ms: 120000
 
 ## 步骤
 1. (act) 打开对话根路由首页
-2. (act) 在 agent 选择器中选择一个 agent
+2. (observe) 页面挂载自动选中第一个 agent(页眉显示已选 agent 名)
 3. (observe) 确认消息输入框可用且发送按钮处于可点击状态
 4. (act) 在输入框中填写"用一句话介绍量子计算"
 5. (act) 点击发送
@@ -23,8 +23,8 @@ timeout_ms: 120000
 7. (extract) 抽取对话区中 agent 回答的最终完整输出文本,确认非空
 
 ## 权威信号
-- agent 选择器已选中至少一个 agent
-- 发送按钮在未选 agent 时禁用或无响应,选中后变为可点击
+- 页眉显示已选 agent 名(自动选中第一个 agent)
+- 输入为空时发送按钮禁用,有内容时可点击
 - 提交后对话区出现 agent 的回答消息区块
 - 回答文本随 SSE 增量流入并最终完整可见(非空)
-- 若回答中触发工具调用:对话区出现 tool_use → tool_result → 综合输出的完整序列(原生 function-calling,非正则解析)
+- 若回答中触发工具调用:对话区出现 tool_use → tool_result → 综合输出的完整序列(deferred: 前端 page.tsx 未渲染 tool 事件块,仅 node_complete/execution_complete)

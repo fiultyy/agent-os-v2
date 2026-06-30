@@ -18,7 +18,7 @@ timeout_ms: 60000
 1. (observe) 打开 /agents 页面,查看当前 agent 列表
 2. (extract) 抽取当前 agent 卡片数量
 3. (act) 找到要删除的 agent 卡片,hover 后点击删除按钮(垃圾桶图标)
-4. (act) 在确认对话框点击「确定」
+4. (act) 在浏览器原生 confirm 弹窗点击「确定」
 5. (observe) 查看被删 agent 是否从列表消失
 6. (extract) 再次抽取 agent 卡片数量,与删除前对比应减少 1
 7. (extract) 抽取 /api/agents 列表,确认不再包含被删 agent

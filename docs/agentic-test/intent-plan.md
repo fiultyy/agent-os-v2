@@ -93,6 +93,24 @@ docs/agentic-test/
 - **全部 16 个 intent 完成,已转 qa-agent-farm v0.2 标准格式**(fan-out workflow:frontmatter `name`/`target`(完整 URL)/`tags`/`timeout_ms` + 步骤 `act`/`observe`/`extract` 前缀 + 权威信号;对齐 Stagehand 运行时,否则 agentic test 跑不动)。v0.2 模板见 `qa-agent-farm/intents/_TEMPLATE.md`。
 - agentic test Phase 0/1(CLI `test-run` / MCP skill)待实施
 
+## 审核结果(2026-06-30,HEAD deec67c vs intent 写于 73c3d5a 06-28)
+
+16 intent 对齐当前实现审核(fan-out 3 Agent 读 intent + 对比 apps/web/src + services/*/src):
+
+| 符合性 | intent |
+|---|---|
+| ✅ 符合(7,未改) | agent-persist-restart / fc-tool-call / multi-turn-fc / canvas-layer2-submit / agent-communication / agent-list-empty / orchestrate-no-orchestrator |
+| ⚠️ 过时已改(6) | single-agent-chat(无选择器,自动选 agents[0])/ memory-recall(客户端 content 过滤,非后端 ?query= recall)/ delete-agent(native confirm 非 modal)/ canvas-live-ws(B1 对重连无效→全量重放)/ login(default_skip,AUTH_ENABLED 默认 false)/ pitfall-query(末尾斜杠 404,target :8001) |
+| ❌ NOT-WIRED(3,已标注 status) | create-agent(/agents UI 无创建表单,只一键按钮)/ multi-agent-orchestrate(gateway 缺 /orchestrate 代理)/ execution-history(无 history tab/Run 分组 UI,已重写对齐 DebugPanel) |
+
+## 实现 bug 清单(intent 改文案绕不过,待应用修复)
+
+1. **gateway 缺 /orchestrate 代理**(`services/gateway/src/main.py` 无 router,`routes/` 无 orchestrate.py)→ 前端 POST /api/orchestrate → gateway:8000/orchestrate → 404;后端 orchestrator:8001/v1/orchestrate 通。**修复**:gateway 加 `routes/orchestrate.py` 代理(POST /orchestrate → ORCHESTRATOR_API/orchestrate)+ main.py 注册 prefix=/orchestrate
+2. **canvas WS B1 修复对重连无效**(`services/orchestrator/src/api/routes/canvas.py:182` 初始连接 `replay(session_id, ws)` 不读 after_event_id query param)→ wsClient 重连全量重放(非断点续传)。B1 的 after_id 只在 replay **命令**路径生效(canvas.py:224-226),wsClient 重连走 query param 不发命令。**修复**:canvas.py:182 读 `after_event_id=ws.query_params.get("after_event_id")` 传入 replay
+3. **execution-history UI 不存在**(/memory 无 history tab,只有 debug;DebugPanel 扁平 timeline,无 Run 分组/条形图/错误计数/回放按钮)→ 需前端补 UI 或 intent 对齐 DebugPanel(本次 intent 已重写对齐)
+4. **create-agent UI 无创建表单**(/agents 只一键按钮 handleCreate 硬编码 name/model)→ 需前端补表单(name/model/system_prompt 输入)或 intent 描述一键实际(本次 intent 已描述实际 + 标 NOT-WIRED)
+5. **pitfall 末尾斜杠 404**(orchestrator `redirect_slashes=False`,GET /v1/pitfall → 404,需 /v1/pitfall/)→ intent 已加 / 绕过;根治可改 pitfall.py 路由或 redirect_slashes
+
 ## 与 agentic test 衔接(Phase 0/1)
 
 - Phase 0:`test-run http://localhost:3000 docs/agentic-test/intents/P0/create-agent.md` → Stagehand 读 intent → 真实页面执行 → 截图+trace

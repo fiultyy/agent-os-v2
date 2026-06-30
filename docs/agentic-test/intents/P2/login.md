@@ -3,9 +3,13 @@ name: login
 target: http://localhost:3000/login
 tags: [smoke, edge, auth]
 timeout_ms: 60000
+default_skip: true
+requires: [AUTH_ENABLED=true, AUTH_API_KEYS]
 ---
 
 # JWT 登录鉴权闭环
+
+> ⚠️ 默认部署(compose AUTH_ENABLED=false)/auth/token 恒 401(AUTH_API_KEYS 空集,任何 key 不匹配);需配 AUTH_ENABLED=true + AUTH_API_KEYS 才可跑。端点 + JWT 流程本身 OK(gateway/src/routes/auth.py:101-126)。
 
 ## 目标
 验证用户通过 API key 登录获取 JWT(access + refresh token),后续请求带 Bearer 认证。
@@ -26,5 +30,4 @@ timeout_ms: 60000
 - 登录成功后页面不再显示登录表单
 - 页面通过 API key 无效时显示错误提示(401 相关文案)可见
 - POST /auth/token 响应包含 access_token、refresh_token、token_type、expires_in 四个字段
-- 浏览器 localStorage 中存在 agent_os_access_token 键
-- 后续请求头携带 Authorization: Bearer 文案
+- 浏览器 localStorage 中存在 agent_os_access_token 键(可观测,因 AUTH_ENABLED=false 时中间件不校验,Authorization 头有无不可观测)
