@@ -18,11 +18,11 @@ status: NOT-WIRED
 - 后端 `/v1/orchestrate` 端点可用(anthropic 协议 + glm-4.7)
 
 ## 步骤
-1. (act) 打开 /memory 页面,切到「编排」tab(第 4 个 tab)
-2. (act) 在下拉中选择 orchestrator agent
-3. (act) 输入任务"一句话介绍光合作用"
+1. (act) 打开 /memory 页面,点击页面顶部 tab 栏中文字为「编排」的标签(tab 从左到右依次为「记忆」「通信」「调试」「编排」—— 点最右侧的「编排」标签,不要靠数第几个)
+2. (act) 选择第一个 orchestrator agent(radio 按钮,点第一个) || button[role="radio"] ::
+3. (act) 在编排任务输入框输入任务 || textarea[aria-label="编排任务输入"] :: 一句话介绍光合作用
 4. (act) 配置 sub_agents:默认为 `researcher`(研究员,提供事实)与 `critic`(评论员,审视),各填 role + system_prompt(默认非 writer)
-5. (act) 点击「触发编排」按钮
+5. (act) 点击触发编排按钮 || button[aria-label="触发编排"] ::
 6. (observe) 查看 SSE 实时事件流的输出
 
 ## 权威信号

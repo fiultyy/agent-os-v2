@@ -132,23 +132,33 @@ export function OrchestrationPanel() {
 
       {/* Config */}
       <div className="flex-1 space-y-4 overflow-y-auto p-4">
-        {/* Orchestrator agent 选择 */}
+        {/* Orchestrator agent 选择(radio 按钮组:stagehand click 友好 + a11y,替代 select 下拉) */}
         <div>
           <label className="mb-1 block text-xs font-medium text-gray-600">
             Orchestrator Agent
           </label>
-          <select
-            value={orchestratorId}
-            onChange={(e) => setOrchestratorId(e.target.value)}
-            className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-purple-400"
-          >
-            {agents.length === 0 && <option value="">(无可用 agent)</option>}
+          <div className="space-y-1.5">
+            {agents.length === 0 && <div className="text-xs text-gray-400">(无可用 agent)</div>}
             {agents.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.name} — {a.model}
-              </option>
+              <button
+                key={a.id}
+                type="button"
+                role="radio"
+                aria-checked={orchestratorId === a.id}
+                aria-label={`选择 orchestrator agent ${a.name}`}
+                onClick={() => setOrchestratorId(a.id)}
+                className={`flex w-full items-center gap-2 rounded-lg border px-3 py-2 text-left text-sm transition-colors ${orchestratorId === a.id ? "border-purple-500 bg-purple-50" : "border-gray-200 hover:border-purple-300"}`}
+              >
+                <span className={`flex h-4 w-4 items-center justify-center rounded-full border-2 ${orchestratorId === a.id ? "border-purple-500" : "border-gray-300"}`}>
+                  {orchestratorId === a.id && <span className="h-2 w-2 rounded-full bg-purple-500" />}
+                </span>
+                <span className="flex-1">
+                  <span className="block font-medium text-gray-800">{a.name}</span>
+                  <span className="block text-xs text-gray-500">{a.model}</span>
+                </span>
+              </button>
             ))}
-          </select>
+          </div>
         </div>
 
         {/* 编排输入 */}
@@ -216,6 +226,7 @@ export function OrchestrationPanel() {
         <button
           onClick={run}
           disabled={loading || !orchestratorId || !input.trim()}
+          aria-label="触发编排"
           className="flex w-full items-center justify-center gap-2 rounded-lg bg-purple-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-purple-700 disabled:opacity-40"
         >
           {loading ? (
