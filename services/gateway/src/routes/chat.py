@@ -10,7 +10,7 @@ from src.config import http_client
 router = APIRouter()
 
 
-@router.post("/")
+@router.post("")
 async def chat(request: Request) -> dict[str, Any]:
     """Proxy chat request to orchestrator."""
     body = await request.json()

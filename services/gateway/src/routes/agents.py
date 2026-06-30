@@ -11,7 +11,7 @@ from src.config import http_client
 router = APIRouter()
 
 
-@router.get("/")
+@router.get("")
 async def list_agents() -> list[dict[str, Any]]:
     """List all agents."""
     resp = await http_client.get(f"{ORCHESTRATOR_API}/agents")
@@ -19,7 +19,7 @@ async def list_agents() -> list[dict[str, Any]]:
     return resp.json()
 
 
-@router.post("/")
+@router.post("")
 async def create_agent(request: Request) -> dict[str, Any]:
     """Create a new agent."""
     body = await request.json()

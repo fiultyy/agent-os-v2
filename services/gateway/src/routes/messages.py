@@ -10,7 +10,7 @@ from src.config import http_client
 router = APIRouter()
 
 
-@router.get("/")
+@router.get("")
 async def list_messages(request: Request) -> list[dict[str, Any]]:
     """List messages with optional filters."""
     params = dict(request.query_params)
@@ -19,7 +19,7 @@ async def list_messages(request: Request) -> list[dict[str, Any]]:
     return resp.json()
 
 
-@router.post("/")
+@router.post("")
 async def send_message(request: Request) -> dict[str, Any]:
     """Send a message between agents."""
     body = await request.json()

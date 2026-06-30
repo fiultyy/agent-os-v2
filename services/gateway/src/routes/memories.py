@@ -10,7 +10,7 @@ from src.config import http_client
 router = APIRouter()
 
 
-@router.get("/")
+@router.get("")
 async def list_memories(request: Request) -> list[dict[str, Any]] | dict[str, Any]:
     """List memories with optional filters."""
     params = dict(request.query_params)
@@ -19,7 +19,7 @@ async def list_memories(request: Request) -> list[dict[str, Any]] | dict[str, An
     return resp.json()
 
 
-@router.post("/")
+@router.post("")
 async def store_memory(request: Request) -> dict[str, Any]:
     """Store a new memory."""
     body = await request.json()

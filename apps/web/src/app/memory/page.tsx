@@ -31,6 +31,7 @@ export default function MemoryPage() {
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
               title={tab.label}
+              aria-label={tab.label}
               className={`rounded-lg p-2.5 transition-colors ${
                 activeTab === tab.id
                   ? "bg-blue-100 text-blue-600"

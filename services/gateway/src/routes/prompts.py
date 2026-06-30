@@ -39,14 +39,14 @@ async def _aux_call(coro: Any) -> Any:
     return resp.json()
 
 
-@router.post("/")
+@router.post("")
 async def create_prompt(request: Request) -> dict[str, Any]:
     """Create a prompt template."""
     body = await request.json()
     return await _aux_call(http_client.post(f"{PROMPT_MANAGER_URL}/templates", json=body))
 
 
-@router.get("/")
+@router.get("")
 async def list_prompts() -> list[dict[str, Any]]:
     """List all prompt templates."""
     return await _aux_call(http_client.get(f"{PROMPT_MANAGER_URL}/templates"))
