@@ -160,6 +160,7 @@ export function OrchestrationPanel() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="输入编排任务,由 orchestrator 综合各 subagent 结果..."
+            aria-label="编排任务输入"
             rows={3}
             className="w-full resize-none rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-purple-400"
           />
@@ -202,6 +203,7 @@ export function OrchestrationPanel() {
                   value={sa.system_prompt ?? ""}
                   onChange={(e) => updateSubAgent(idx, { system_prompt: e.target.value })}
                   placeholder="system_prompt(可选)"
+                  aria-label="sub-agent system_prompt 输入"
                   rows={2}
                   className="mt-1.5 w-full resize-none rounded border border-gray-200 px-2 py-1 text-xs outline-none focus:border-purple-400"
                 />
