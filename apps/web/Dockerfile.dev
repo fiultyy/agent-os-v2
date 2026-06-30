@@ -1,0 +1,29 @@
+# Agent OS Web — DEV 镜像(支持 HMR)
+#
+# 与 production Dockerfile 的区别:
+#   - 单阶段(无 multi-stage / standalone):直接 `pnpm dev` 跑 next dev --turbopack
+#   - 保留 devDependencies(typescript / @types/* / tailwindcss / @tailwindcss/postcss)
+#     production Dockerfile `pnpm install --frozen-lockfile` 也装 devDeps,但后续 multi-stage
+#     runner 镜像只 COPY standalone 产物,没有 node_modules —— 无法跑 next dev。
+#   - next dev 的 rewrites() 在请求时求值 process.env(runtime 生效),不像 standalone 在
+#     next build 时固化。故 API_URL / ORCHESTRATOR_WS_URL 通过 compose env 注入即可,
+#     无需 build args。
+#
+# 仅被 docker-compose.override.yml 引用(production compose 仍用 apps/web/Dockerfile)。
+# node_modules 装进镜像:不挂载 host 的 node_modules(避免 pnpm symlink / 宿主 OS 不一致)。
+# 源码 apps/web 通过 compose volume bind mount 进来 → 改 host 文件触发 Turbopack HMR。
+
+FROM node:22-slim
+RUN corepack enable
+WORKDIR /app
+
+# 装依赖(锁文件优先,含 devDependencies)。先装依赖以利用 Docker layer cache。
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/web/package.json ./apps/web/package.json
+RUN pnpm install --frozen-lockfile
+
+WORKDIR /app/apps/web
+
+EXPOSE 3000
+# 由 docker-compose.override.yml 的 command 覆盖(pnpm dev / next dev --turbopack)
+CMD ["pnpm", "dev"]
