@@ -212,7 +212,11 @@ def _trigger_ingest(
 
 async def _node_start(state: GraphState) -> GraphState:
     """Initialize the execution pipeline."""
-    state.messages.append({"role": "system", "content": "Processing started"})
+    # 不向 state.messages 注入 "Processing started" system message:它是状态
+    # 标记,不是对话内容。注入后会污染 _node_llm 的 conversation history,被
+    # ContextCompiler 放在 static_count 之外 → _to_anthropic raise "system
+    # message beyond static prefix"(R2 contract 违反,阻断 /execute 主路径)。
+    # start 状态已由 state.current_node / state.output / log_execution_step 标记。
     state.context["original_input"] = state.input
     state.current_node = "start"
     state.output = "started"
@@ -501,9 +505,16 @@ async def _node_llm_synthesize(state: GraphState) -> GraphState:
     system_prompt = (agent.get("system_prompt") if agent else None) or "You are a helpful assistant."
 
     if _state.context_compiler is not None:
+        # R2 contract:Tool results 是 dynamic content,注入 user message tail,
+        # 不作独立 role=system 消息(否则 compiler 把它放在 static_count 之外
+        # → _to_anthropic raise "system message beyond static prefix",阻断
+        # /execute 末尾综合)。system_prompt 已含 "Synthesize..." 指令(layer 1)。
+        synth_user = (
+            f"{state.input}\n\nTool results:\n{tool_result_block}"
+            if tool_result_block else state.input
+        )
         conversation = list(state.messages) + [
-            {"role": "user", "content": state.input},
-            {"role": "system", "content": f"Tool results:\n{tool_result_block}"},
+            {"role": "user", "content": synth_user},
         ]
         compiled = await _state.context_compiler.compile(
             system_prompt=f"{system_prompt}\n\nSynthesize the tool results into a final answer for the user.",

@@ -88,8 +88,14 @@ async def run_agent_turn(
     # llm_client._to_anthropic (and ignored on the OpenAI channel's system slot
     # via the same conversion). We never reuse the parent agent's GraphState.
     messages: list[dict[str, Any]] = [{"role": "system", "content": effective_system}]
+    # 防御:input 为空时加占位 user message。否则 _to_anthropic 把 system 提取
+    # 到 top-level 后 convo 为空,智谱/Anthropic 通道拒绝空 messages
+    # (HTTP 400 code 1214 "messages 参数非法")。worker 正常路径经 turn_input
+    # 回退已保证非空,此处是纵深防御(其他 caller 传空 input 也不崩)。
     if input:
         messages.append({"role": "user", "content": input})
+    else:
+        messages.append({"role": "user", "content": "(no task input)"})
 
     # ── None-safe LLM call ───────────────────────────────────────────────────
     llm = _state.llm_client

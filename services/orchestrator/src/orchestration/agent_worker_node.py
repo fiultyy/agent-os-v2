@@ -155,14 +155,19 @@ class AgentWorkerNode(MetaAgentNode):
                 self._completion_event.set()
             return state
 
+        # truthy 检查(非 ``is not None``):前端 OrchestrationPanel 对未填写
+        # 的字段发空字符串 ``input:""`` / ``system_prompt:""`` —— 空串表示"未
+        # 设置",不能当 explicit 覆盖。否则 turn_input="" → run_agent_turn 收
+        # 到空 input → messages 只剩 system → _to_anthropic 提取 system 后
+        # convo 为空 → 智谱/Anthropic 拒绝空 messages(HTTP 400 code 1214)。
         turn_input = (
             self._explicit_input
-            if self._explicit_input is not None
+            if self._explicit_input
             else (state.input or self.config.get("input", "") or "")
         )
         system_prompt = (
             self._explicit_system_prompt
-            if self._explicit_system_prompt is not None
+            if self._explicit_system_prompt
             else self.config.get("system_prompt")
         )
         session_id = self._session_id or state.session_id
