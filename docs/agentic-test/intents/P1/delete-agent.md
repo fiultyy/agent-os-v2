@@ -20,10 +20,10 @@ timeout_ms: 60000
 3. (act) 点击要删除 agent 卡片上的删除按钮(垃圾桶图标,默认可见,点击直接删除无 confirm 弹窗)|| button[aria-label="删除 agent"] ::
 4. (observe) 查看被删 agent 是否从列表消失
 6. (extract) 再次抽取 agent 卡片数量,与删除前对比应减少 1
-7. (extract) 抽取 /api/agents 列表,确认不再包含被删 agent
+7. (api) GET /api/agents ||| 抽取 agent 列表,确认被删 id 不在
 
 ## 权威信号
-- 被删 agent 的卡片从 /agents 列表中消失
-- 删除后列表 agent 数量比删除前少 1
-- 删除操作未弹出「删除失败」错误提示
-- GET /api/agents 响应中不再出现被删 agent 的 id
+- [step 4] 被删 agent 的卡片从 /agents 列表中消失
+- [step 6] 删除后列表 agent 数量比删除前少 1
+- [step 4] 删除操作无可见错误提示(页面正常刷新,无 alert/错误文案)
+- [step 7] GET /api/agents 响应中不再出现被删 agent 的 id(api step 直 fetch)
