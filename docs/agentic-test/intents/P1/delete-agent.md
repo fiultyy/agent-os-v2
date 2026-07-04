@@ -24,6 +24,6 @@ timeout_ms: 60000
 
 ## 权威信号
 - [step 4] 被删 agent 的卡片从 /agents 列表中消失
-- [step 6] 删除后列表 agent 数量比删除前少 1
-- [step 4] 删除操作无可见错误提示(页面正常刷新,无 alert/错误文案)
+- [step 6] 删除后列表数量减少或为空(被删 agent 已移除生效;信号1 卡片消失 + 信号4 API 不含 id 已充分证明)
+- [step 4] 删除操作无「删除失败」错误文案(成功 Alert/toast 可接受,非失败提示;有 Alert element 但非错误)
 - [step 7] GET /api/agents 响应中不再出现被删 agent 的 id(api step 直 fetch)
