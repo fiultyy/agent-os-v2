@@ -1,30 +1,43 @@
 ---
 name: canvas-layer2-submit
-target: http://localhost:3000/canvas/live
+target: http://localhost:3000/canvas/live?session_id=qa-layer2
 tags: [smoke, lifecycle, canvas]
 timeout_ms: 120000
-status: NOT-WIRED
+status: ready
 ---
 
-> NOT-WIRED: signal 2-4 断言网络响应/JSON(accepted 文本、命令字段 layer2.submitted、WS 断开错误文案),stagehand 看不到网络层 → false。需 qa-farm 网络监听或 WS frame 断言,非纯浏览器 intent。signal 1(暂存区清空,渲染)可观察但单 signal 不足以验证。
+> IT-4 通电(DOM 验证层):Layer2Panel 已实现(layer2Store staging/addNode/clear/submitPayload)。
+> handleSubmit:canvasWsClient.send(payload) → **立即 clear()**(不等 server 响应),故 submit 后暂存清空是 DOM 可见。
+> server 的 layer2.submitted accepted 响应在 WS 帧返回(Layer2Panel 不渲染,只 console.log)→ DOM 读不到。
+> 主信号 = DOM 可观测(暂存 Add 显示节点 + Submit 清空);WS 协议响应 deferred(collectWs page.on 捕不到已建立 WS,同 canvas-live-ws gap)。
 
-# canvas Layer2 提交(cmd 协议)
+# canvas Layer2 提交(暂存 + 清空 DOM 流)
 
 ## 目标
-验证 canvas Layer2 面板可暂存 text/command 节点并提交,后端按 `cmd` 字段接受协议层(L3 通电项;已知「方向写反」修正:后端读 `cmd` 不是 `type`)。
+验证 canvas Layer2 面板可暂存 text/command 节点并提交(触发 wsClient.send),提交后暂存区清空。
 
 ## 前置
-- canvas WS 连接已建立(状态指示为已连接)
-- 存在有效 session_id + branch_id
+- web :3000 + orchestrator :8001 健康
+- target 带 session_id=qa-layer2(wsClient 自动连接,Layer2Panel 渲染)
 
 ## 步骤
-1. (observe) 打开 /canvas/live 页面,确认 WS 连接状态指示显示为已连接(如绿色连接标记)
-2. (act) 在 Layer2 面板暂存区添加一个节点(text 节点填「hello」,或 command 节点填「/help」)
-3. (act) 点击 Layer2 面板的提交按钮
-4. (extract) 抽取提交后的协议响应,确认包含 cmd 为 layer2.submitted 且 status 为 accepted 的 JSON 结构
+1. (wait) ~8s 等 WS 连接建立(Wifi 绿 + 已连接)
+2. (act) 点击 Text 类型按钮 || button:has-text("Text")
+3. (act) 在 textarea 填节点内容 || textarea[placeholder="Type..."] :: hello
+4. (act) 点击 Add 暂存节点 || button:has-text("Add")
+5. (wait) ~3s 等暂存渲染
+6. (observe) 暂存区显示 hello 节点(非 Empty)
+7. (act) 点击 Submit 提交 || button:has-text("Submit")
+8. (wait) ~3s 等提交 + clear
+9. (observe) 暂存区清空(显示 Empty)
 
 ## 权威信号
-- 页面 Layer2 面板的暂存区在提交后清空(无残留节点)
-- 提交后出现表示接受的响应文本,包含 "accepted" 字样
-- 响应 JSON 的命令字段为 "layer2.submitted"(而非 layer2.submit 请求名)
-- WS 断开时,提交后出现错误提示(含 "requires 'nodes' or 'commands'" 文案)
+- WS 连接成功(Wifi 绿 + 已连接,Layer2Panel 渲染前提)
+- Add 后暂存区显示节点(显示 "hello" 内容,非 Empty 状态)
+- Submit 后暂存区清空(显示 Empty,证明 handleSubmit 触发 clear)
+
+## 注(deferred)
+> WS 协议响应(layer2.submitted accepted JSON)在 WS 帧返回,Layer2Panel 不渲染 → DOM 读不到。
+> 需 collectWs 监听 wsClient.send(layer2.submit)→ server 回 layer2.submitted,但 collectWs page.on 捕不到
+> 已建立 WS(同 canvas-live-ws gap),需 #6 改 CDP Network.webSocketFrameReceived。
+> cmd 字段(layer2.submitted 非 layer2.submit)是后端"方向写反"修正,需 WS 帧验证确认。
