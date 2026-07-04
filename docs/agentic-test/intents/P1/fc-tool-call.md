@@ -3,7 +3,10 @@ name: fc-tool-call
 target: http://localhost:3000/
 tags: [smoke, lifecycle, api]
 timeout_ms: 120000
+status: NOT-WIRED
 ---
+
+> NOT-WIRED: signal 全断言 SSE 事件(node_start/node_complete/tool_result/tool_use),stagehand 浏览器只看渲染文本无 SSE 可见性 → 全 false。需 qa-farm 支持 SSE 监听断言或改 curl 直测 /v1/execute SSE 流,非纯浏览器 intent。
 
 # 对话中 LLM 调工具(function-calling 单轮)
 

@@ -3,7 +3,10 @@ name: pitfall-query
 target: http://localhost:8001/v1/pitfall/
 tags: [smoke, edge, api]
 timeout_ms: 60000
+status: NOT-WIRED
 ---
+
+> NOT-WIRED: signal 全断言 API 响应(GET /v1/pitfall/ /search /match 字段、recurrence_count、空列表、disabled),浏览器 stagehand 看不到网络层 → 全 false。纯 API 契约测试应 curl 直测,非浏览器 intent。
 
 # PitFail 踩坑查询
 

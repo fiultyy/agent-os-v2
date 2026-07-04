@@ -3,7 +3,10 @@ name: multi-turn-fc
 target: http://localhost:3000/
 tags: [smoke, lifecycle, api]
 timeout_ms: 120000
+status: NOT-WIRED
 ---
+
+> NOT-WIRED: signal 多断言 SSE 节点(node_start(llm)/node_start(llm_synthesize)/tool_result 回注/MAX_TOOL_ITERATIONS),stagehand 看不到 SSE → 全 false。需 qa-farm SSE 监听或 curl 直测,非纯浏览器 intent。
 
 # 多轮工具调用循环(tool→llm→synthesize)
 
