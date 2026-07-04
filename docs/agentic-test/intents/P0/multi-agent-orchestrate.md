@@ -27,7 +27,7 @@ status: ready
 6. (wait) 等待 execution_complete 事件(约 60-120s,fan-out → fan-in → synthesizer 综合)
 
 ## 权威信号
-- 编排面板显示 `multi_agent` 的 branches:researcher 与 critic 各自产生 output
-- 编排面板显示 `fan_in` 汇聚节点
-- 编排面板显示 `synthesizer` 综合输出(融合 researcher 事实视角与 critic 审视视角的答案)
-- 编排区最终显示完整综合答案文本(execution_complete 后 synthesizer 输出完整可见,DOM 层断言非 SSE 事件层)
+- [step 6] 编排面板显示 `multi_agent` 的 branches:researcher 与 critic 各自产生 output
+- [step 6] 编排面板显示 `fan_in` 阶段标签(文本可见,汇聚 researcher/critic 输出;非图结构要求)
+- [step 6] 编排面板显示 `synthesizer` 综合输出(融合 researcher 事实视角与 critic 审视视角的答案)
+- [step 6] 编排区最终显示完整综合答案文本(execution_complete 后 synthesizer 输出完整可见,DOM 层断言非 SSE 事件层)
