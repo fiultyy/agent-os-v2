@@ -3,7 +3,10 @@ name: agent-persist-restart
 target: http://localhost:3000/agents
 tags: [smoke, lifecycle, api]
 timeout_ms: 120000
+status: NOT-WIRED
 ---
+
+> NOT-WIRED: intent 把"重启 orchestrator 容器(podman restart)"当 browser act,但这是宿主机 infra 命令非浏览器 UI —— stagehand 在 DOM 找不到元素必然 "No action found"。需 qa-farm 支持 infra 步骤(host shell/exec)或分离为纯 API 测试(curl 创建 + podman restart + GET 验证持久化),非纯浏览器 intent。
 
 # 重启后 Agent 持久化验证
 

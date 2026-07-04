@@ -3,7 +3,10 @@ name: orchestrate-no-orchestrator
 target: http://localhost:3000/memory
 tags: [smoke, edge, api]
 timeout_ms: 60000
+status: NOT-WIRED
 ---
+
+> NOT-WIRED: 5 个信号全断言 HTTP 响应行为(404/400/422 状态码、错误体、不进 SSE 流),但浏览器 stagehand 只能观察 UI 外观,无网络层证据 → 全 false。纯 API 契约测试应 curl /v1/orchestrate 直测(缺 orchestrator_id → 404;sub_agents 空 → 400),非浏览器 intent。需 qa-farm API 直测模式。
 
 # 编排缺 orchestrator 报错(边界)
 
