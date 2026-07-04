@@ -30,4 +30,4 @@ status: ready
 - 编排面板显示 `multi_agent` 的 branches:researcher 与 critic 各自产生 output
 - 编排面板显示 `fan_in` 汇聚节点
 - 编排面板显示 `synthesizer` 综合输出(融合 researcher 事实视角与 critic 审视视角的答案)
-- 事件流中出现 `execution_complete.output` 事件,含综合答案文本
+- 编排区最终显示完整综合答案文本(execution_complete 后 synthesizer 输出完整可见,DOM 层断言非 SSE 事件层)
