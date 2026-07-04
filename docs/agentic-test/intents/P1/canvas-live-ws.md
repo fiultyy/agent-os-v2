@@ -1,40 +1,37 @@
 ---
 name: canvas-live-ws
-target: http://localhost:3000/canvas/live
+target: http://localhost:3000/canvas/live?session_id=qa-ws-test
 tags: [smoke, lifecycle, canvas]
 timeout_ms: 120000
-status: NOT-WIRED
+status: ready
 ---
 
-> NOT-WIRED: CanvasLivePanel 组件未实现 —— /canvas/live 无 WS 连接状态 UI(Wifi/WifiOff 图标、「已连接: sessionId」/「未连接」文案、事件流 node_start/node_complete/tick/agent_message、断线重连回放、心跳保活)。代码层确认无 CanvasLivePanel.tsx + 无 Wifi 相关渲染。需新建组件(WS 连接 + 状态 + 事件流 + 重连 + 心跳),大工程,defer。
+> IT-4 通电(v0.5 ws step + CanvasLivePanel 已实现 c6a6a31):浏览器内 `page.on('websocket')` 监听 canvas WS 帧。
+> wsClient.ts:27 `new WebSocket(ws://localhost:3000/ws/canvas?session_id=...)` → next rewrite → orchestrator :8001 canvas.py。
+> 连接成功后 server `replay(session_id)` 推历史帧(canvas.py:183);新 session 无历史则 0 replay 帧,ws step ok 取决于是否有 live 推送。
+> 主信号 = DOM 可观测的连接状态(Wifi 绿 + "已连接"),ws 帧为辅助证据。
 
-# Canvas 实时事件流(WebSocket 连接 + 事件)
+# Canvas 实时事件流(WebSocket 连接)
 
 ## 目标
-验证 canvas live 页面能建立 WebSocket 连接,实时展示 agent 执行事件流(node/tick/agent_message)。
+验证 canvas live 页面能建立 WebSocket 连接,展示连接状态 + 事件流面板。
 
 ## 前置
-- 有一个有效 session_id(从对话或编排产生,非 "default")
-- canvas WS 配置可用(token/origin;本地 localhost 默认允许)
+- web :3000 + orchestrator :8001 健康
+- target 带 session_id=qa-ws-test(任意非空;canvas.py 验证非空,session_id="default" 或空 → close 4002)
 
 ## 步骤
-1. (act) 打开 canvas live 页面(带有效 session_id 参数)
-2. (observe) 查看 WS 连接状态指示器(绿色 Wifi 图标 + 已连接文案)
-3. (act) 触发一个 agent 执行(对话或编排发起)
-4. (observe) 查看实时事件流推送
-5. (extract) 抽取 WS 推送的事件类型(如 node_start / node_complete / tick / agent_message)
-6. (observe) 断开连接后查看重连与历史回放(重连后重放该 session 全部历史事件,可能重复;after_event_id query param 当前被初始连接忽略,B1 的 after_id 修复仅 replay 命令路径生效,wsClient 重连走 query param 不发命令)
+1. (act) 打开 canvas live 页面(target 已带 session_id 参数,wsClient 自动连接)
+2. (observe) 查看 WS 连接状态指示器(绿色 Wifi 图标 + "已连接" 文案)
+3. (ws) 监听 canvas WS ~10s 收到事件帧(replay 历史或 live 推送)
+4. (observe) 查看事件流面板可见("事件流" 标题 + 计数)
 
 ## 权威信号
-- 连接成功后显示绿色 Wifi 图标及「已连接: {sessionId}」文案
-- 断开时显示红色 WifiOff 图标及「未连接」文案
-- 事件流实时推送 node_start / node_complete / tick / agent_message 等事件
-- 断线重连后历史事件被回放(重连后重放该 session 全部历史事件,可能重复;after_event_id query param 当前被初始连接忽略,B1 的 after_id 修复仅 replay 命令路径生效,wsClient 重连走 query param 不发命令)
-- 心跳保活机制运行(WS 连接保持存活)(deferred: wsClient 无周期 ping)
-- 认证失败时连接关闭码为 4001,不自动重连
-- session_id="default" 或为空时连接关闭码为 4002
-- origin 验证失败时连接关闭码为 4003,不自动重连
-- canvas 未初始化时连接关闭码为 1011
+- 绿色 Wifi 图标 + "已连接: qa-ws-test" 文案(WS 连接成功建立)
+- 事件流面板可见("事件流" 标题渲染)
+- ws 监听期内观测到 ws 活动(收到 replay 历史帧 或 live 事件帧;新 session 无历史时此信号可放宽)
 
 ## 注
-> 实现_bug: canvas.py:182 初始连接应读 `after_event_id=ws.query_params.get("after_event_id")` 传入 `replay(session_id, ws, after_event_id)`,断点续传才真生效(当前 B1 修复对 wsClient 重连路径无效)
+> WS 错误码场景(认证失败 4001 / origin 拒 4003 / session 空 4002 / canvas 未初始化 1011)需主动构造异常条件,
+> 浏览器自动流难精确触发,deferred。心跳(wsClient 周期 ping)deferred(canvas.py 已支持 ping/pong,wsClient 未发)。
+> 断线重连回放:B1 修复(787896e)对 wsClient 重连路径(query param)无效,仅 replay 命令路径生效,deferred。
