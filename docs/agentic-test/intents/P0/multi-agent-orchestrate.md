@@ -3,18 +3,18 @@ name: multi-agent-orchestrate
 target: http://localhost:3000/memory
 tags: [smoke, core]
 timeout_ms: 120000
-status: NOT-WIRED
+status: ready
 ---
 
 # 多 agent 编排(researcher+critic→综合)
 
-> NOT-WIRED: gateway 缺 /orchestrate 代理(main.py 无 router,routes/ 无 orchestrate.py),前端 POST /api/orchestrate → gateway:8000/orchestrate → 404。后端 orchestrator:8001/v1/orchestrate 通。待 gateway 加 routes/orchestrate.py 代理(POST /orchestrate → ORCHESTRATOR_API/orchestrate)+ main.py 注册 prefix=/orchestrate
+> gateway /orchestrate 代理已通(commit 6a41d17):前端 POST /api/orchestrate → gateway /orchestrate → orchestrator /v1/orchestrate SSE 透传。R2 contract 修复(0527b59)治编排子节点 1214(researcher/critic 正常 output)。
 
 ## 目标
-验证 orchestrator 能调度 researcher+critic 子 agent 并行处理任务,fan-in 汇聚后由 synthesizer 综合成融合两视角的答案(注:当前 gateway 缺 /orchestrate 代理,前端 404,见 NOT-WIRED)。
+验证 orchestrator 能调度 researcher+critic 子 agent 并行处理任务,fan-in 汇聚后由 synthesizer 综合成融合两视角的答案。
 
 ## 前置
-- 已创建一个 orchestrator agent(作综合者),用于在下拉中选择
+- 已创建一个 orchestrator agent(作综合者),用于在 radio 中选择
 - 后端 `/v1/orchestrate` 端点可用(anthropic 协议 + glm-4.7)
 
 ## 步骤
@@ -22,9 +22,9 @@ status: NOT-WIRED
 2. (observe) 确认编排 panel 已渲染(页面可见「Orchestrator Agent」标签 或 编排任务输入框,证明 tab 切对了;若看不到说明 act #0 没切 tab)
 3. (act) 选择第一个 orchestrator agent(radio 按钮,点第一个) || button[role="radio"] ::
 3. (act) 在编排任务输入框输入任务 || textarea[aria-label="编排任务输入"] :: 一句话介绍光合作用
-4. (act) 配置 sub_agents:默认为 `researcher`(研究员,提供事实)与 `critic`(评论员,审视),各填 role + system_prompt(默认非 writer)
+4. (observe) 确认 sub_agents 区默认有 `researcher` 与 `critic` 两个角色条目(前端 OrchestrationPanel 默认填充,无需手动配置)
 5. (act) 点击触发编排按钮 || button[aria-label="触发编排"] ::
-6. (observe) 查看 SSE 实时事件流的输出
+6. (wait) 等待 execution_complete 事件(约 60-120s,fan-out → fan-in → synthesizer 综合)
 
 ## 权威信号
 - 编排面板显示 `multi_agent` 的 branches:researcher 与 critic 各自产生 output
