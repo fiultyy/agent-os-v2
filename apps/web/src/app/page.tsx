@@ -183,11 +183,13 @@ export default function Home() {
               onKeyDown={handleKeyDown}
               placeholder="输入消息... (Enter 发送, Shift+Enter 换行)"
               rows={1}
+              aria-label="消息输入"
               className="flex-1 resize-none rounded-xl border border-gray-200 px-4 py-2.5 text-sm outline-none transition-colors focus:border-blue-400"
             />
             <button
               onClick={send}
               disabled={loading || !input.trim()}
+              aria-label="发送消息"
               className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600 text-white transition-colors hover:bg-blue-700 disabled:opacity-40"
             >
               <Send className="h-4 w-4" />
