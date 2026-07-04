@@ -334,12 +334,14 @@ export async function getMemories(
   agentId?: string,
   memoryType?: string,
   sessionId?: string,
-  limit: number = 100
+  limit: number = 100,
+  query?: string
 ): Promise<MemoryItem[]> {
   const params = new URLSearchParams();
   if (agentId) params.set("agent_id", agentId);
   if (memoryType) params.set("memory_type", memoryType);
   if (sessionId) params.set("session_id", sessionId);
+  if (query) params.set("query", query);
   params.set("limit", String(limit));
 
   const raw = await request<Record<string, unknown>[]>(`/memories/?${params}`);
