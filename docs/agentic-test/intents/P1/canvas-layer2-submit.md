@@ -30,9 +30,9 @@ status: ready
 6. (observe) 暂存区清空(显示 Empty)
 
 ## 权威信号
-- WS 连接成功(Wifi 绿 + 已连接,Layer2Panel 渲染前提)
-- Add 后暂存区显示节点(显示 "hello" 内容,非 Empty)
-- Submit 后暂存区清空(显示 Empty,证明 handleSubmit 触发 clear)
+- [step 1] WS 连接成功(Wifi 绿 + 已连接,Layer2Panel 渲染前提)
+- [step 4] Add 后暂存区显示节点(显示 "hello" 内容,非 Empty)
+- [step 6] Submit 后暂存区清空(显示 Empty,证明 handleSubmit 触发 clear)
 
 ## 注(deferred)
 > WS 协议响应(layer2.submitted accepted JSON)在 WS 帧返回,Layer2Panel 不渲染 → DOM 读不到。
