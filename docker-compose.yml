@@ -22,6 +22,8 @@ services:
       - "8000:8000"
     environment:
       - ORCHESTRATOR_URL=http://orchestrator:8001
+      # login 验证需临时切:AUTH_ENABLED=true + AUTH_API_KEYS=qa-test-key-1(默认 false 开发友好;
+      # true 会使 gateway 全路由需 Bearer token,破坏其他 intent 无认证访问)。login intent default_skip: true。
       # aux 兜底 URL:aux profile 默认不启动,调用时 503(gateway _aux_call 降级),不阻塞启动
       - PROMPT_MANAGER_URL=http://prompt-manager:8002
       - RESOURCE_MANAGER_URL=http://resource-manager:8004
