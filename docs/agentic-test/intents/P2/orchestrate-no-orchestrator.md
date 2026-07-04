@@ -8,8 +8,11 @@ status: ready
 
 > IT-4 通电(v0.5 api step):纯 API 契约测试,直 POST orchestrator :8001/v1/orchestrate 断言错误码。
 > runtime **懒起 runner**(不起 Chrome);默认不带认证(SERVICE_AUTH_KEY 未配 → 放行)。
-> 实测边界:缺 orchestrator_agent_id(存在但无对应 agent)→ 404 + `{"error":"Orchestrator agent not found","agent_id":"..."}`;
-> 缺必填字段(空 body)→ 422 + Pydantic detail(loc/msg/type)。
+> ⚠️ runtime api step POST body **不默认带 Content-Type**(runApiStep 只在 apiHeaders 显式设时带 headers),
+> FastAPI 不走 json parser → body 当 text → 422 model_attributes_type(假阳性)。intent 侧每个 POST 显式
+> `headers: {"Content-Type":"application/json"}` 绕过(待 #6 runtime 默认带 Content-Type 修复)。
+> 实测边界:缺 orchestrator_agent_id(存在但无对应 agent)→ 404 + `{"error":"Orchestrator agent not found"}`;
+> 缺必填字段(空 body)→ 422 + Pydantic detail。
 
 # 编排缺 orchestrator 报错(边界)
 
@@ -20,12 +23,12 @@ status: ready
 - orchestrator :8001 健康
 
 ## 步骤
-1. (api) POST /v1/orchestrate body: {"orchestrator_agent_id":"no-such-id","sub_agents":[{"role":"x"}],"input":"测试"} ||| 缺 orchestrator 报 404
-2. (api) POST /v1/orchestrate body: {} ||| 缺必填字段报 422(Pydantic 校验)
-3. (api) POST /v1/orchestrate body: {"orchestrator_agent_id":"no-such","sub_agents":[],"input":"x"} ||| 空 sub_agents 报错
+1. (api) POST /v1/orchestrate headers: {"Content-Type":"application/json"} body: {"orchestrator_agent_id":"no-such-id","sub_agents":[{"role":"x"}],"input":"测试"} ||| 缺 orchestrator 报 404
+2. (api) POST /v1/orchestrate headers: {"Content-Type":"application/json"} body: {} ||| 缺必填字段报 422(Pydantic 校验)
+3. (api) POST /v1/orchestrate headers: {"Content-Type":"application/json"} body: {"orchestrator_agent_id":"no-such","sub_agents":[],"input":"x"} ||| 空 sub_agents 报错
 
 ## 权威信号
-- orchestrator_agent_id 不存在时,响应为 404,错误体含 "Orchestrator agent not found" 及对应 agent_id
-- 缺必填字段(orchestrator_agent_id / sub_agents / input)时,响应为 422,返回 Pydantic 校验错误(detail 数组含 loc/msg/type)
-- 错误即时返回(JSON 错误体,Content-Type 为 application/json,非 text/event-stream)
+- orchestrator_agent_id 不存在(但格式合法)时,响应为 404,错误体含 "Orchestrator agent not found" 及对应 agent_id
+- 缺必填字段(空 body `{}`)时,响应为 422,返回 Pydantic 校验错误(detail 数组含 loc/msg/type)
+- 错误即时返回(JSON 错误体,非 text/event-stream 流式输出;注:evidence 不含响应头,只判 body 是 JSON 错误结构)
 - 服务不崩(三个请求都返回 HTTP 响应,非连接拒绝 / 5xx)
