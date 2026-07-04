@@ -29,7 +29,7 @@ status: ready
 ## 权威信号
 - `GET /v1/pitfall/` 返回 200 + JSON 数组(空列表或踩坑条目)
 - `GET /v1/pitfall/search?query=X` 返回 200 + JSON 数组(空或命中条目,LIKE 模糊匹配)
-- `GET /v1/pitfall/match?file_path=&error_type=` 返回 200 + JSON 数组(空或精确命中)
+- `GET /v1/pitfall/match?file_path=/tmp/x&error_type=ValueError` 返回 200 + JSON 数组(空或精确命中,参数非空走 match 路由)
 - `GET /v1/pitfall`(无末尾 /)返回 404(redirect_slashes=False,无 / 则 404)
 - `GET /v1/pitfall/no-such-file` 返回 200 + not found 错误体(match 路由把 no-such-file 当 file_path 参,找不到返 not found;非 404)
 - 无工具失败时主端点返回空列表 `[]`(非报错)
