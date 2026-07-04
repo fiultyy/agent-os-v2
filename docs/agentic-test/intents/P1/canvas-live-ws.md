@@ -3,7 +3,10 @@ name: canvas-live-ws
 target: http://localhost:3000/canvas/live
 tags: [smoke, lifecycle, canvas]
 timeout_ms: 120000
+status: NOT-WIRED
 ---
+
+> NOT-WIRED: CanvasLivePanel 组件未实现 —— /canvas/live 无 WS 连接状态 UI(Wifi/WifiOff 图标、「已连接: sessionId」/「未连接」文案、事件流 node_start/node_complete/tick/agent_message、断线重连回放、心跳保活)。代码层确认无 CanvasLivePanel.tsx + 无 Wifi 相关渲染。需新建组件(WS 连接 + 状态 + 事件流 + 重连 + 心跳),大工程,defer。
 
 # Canvas 实时事件流(WebSocket 连接 + 事件)
 

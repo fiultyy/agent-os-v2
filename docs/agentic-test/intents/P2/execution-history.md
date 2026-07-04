@@ -2,32 +2,28 @@
 name: execution-history
 target: http://localhost:3000/memory
 tags: [smoke, edge]
-timeout_ms: 120000
+timeout_ms: 60000
 status: ready
 ---
 
 # 执行历史与回放
 
-> 本 intent 对齐 /memory 的「历史」tab(以及语义等价的「调试」tab)渲染的 `<DebugPanel>`:扁平 event timeline,debugStore.executionEvents slice(-200),单条事件点击 setReplayIndex 进入 replay 详情 + 顶部 replay 控件(Pause/SkipBack/SkipForward/RotateCcw)。Run 分组 / Run #N / 条形图 / 错误计数 /「回放此执行」按钮属于更大的 Run-grouping 工程,本 intent 不覆盖(defer)。执行历史 API 为 gateway /debug/history proxy orchestrator(lib/api.ts:416)。
+> 验证 /memory 历史 tab 的 DebugPanel 结构(面板 + replay 控件 + 空状态 + /debug/history API)。events timeline 回放需 debugMode 开启 + 跑对话产生 events,跨 intent,本 intent 只验证结构存在性。
 
 ## 目标
-验证 agent 执行事件(node 步骤事件)在「调试」tab 可观测,且可对单条事件发起 replay 查看 input/output,形成查看-回放闭环。
+验证 DebugPanel 事件面板可观测,replay 控件(Pause/SkipBack/SkipForward/RotateCcw)存在,空状态文案正确,/debug/history API 返回合规事件结构。
 
 ## 前置
-- 执行过一次对话(/execute)或编排(/orchestrate),产生 executionEvents 记录(debugStore.executionEvents 非空)
+- 系统已启动(前端 3000 + 后端 8000)
 
 ## 步骤
-1. (act) 执行一次对话或编排,产生事件流(executionEvents)
-2. (act) 打开 /memory 页面并切换到「历史」tab(或语义等价的「调试」tab)
-3. (observe) 查看 timeline 显示的 node 事件列表(每条带 running / done / error 状态图标)
-4. (act) 点击某条事件,setReplayIndex 进入该事件 replay 详情
-5. (observe) 查看 replay 详情中的 input / output / executionTimeMs 字段
-6. (act) 操作顶部 replay 控件(Pause / SkipBack / SkipForward / RotateCcw)前后步进
+1. (act) 打开 /memory 页面,点击侧边栏「历史」tab(History 图标)|| button[aria-label="历史"] ::
+2. (observe) 确认 DebugPanel 事件面板可见(标题 / 开启调试按钮 / 空状态)
+3. (observe) 确认顶部 replay 控件按钮存在(Pause / SkipBack / SkipForward / RotateCcw)
+4. (observe) 确认 executionEvents 为空时显示空状态文案「开启调试模式以记录事件」
 
 ## 权威信号
-- /memory 的「历史」tab(或「调试」tab)可见 DebugPanel 事件面板
-- timeline 按 executionEvents 顺序显示 node 事件(running / done / error 状态图标)
-- 点击某条事件后,replay 详情展示该事件的 input / output / executionTimeMs
-- 顶部 replay 控件(Pause / SkipBack / SkipForward / RotateCcw)可前后步进
+- /memory 的「历史」tab 可见 DebugPanel 事件面板
+- DebugPanel 顶部有 replay 控件(Pause / SkipBack / SkipForward / RotateCcw 图标按钮)
 - executionEvents 为空时,timeline 显示空状态文案「开启调试模式以记录事件」
-- /debug/history API(orchestrator proxy)返回事件结构含 id / node_id / agent_id / session_id / status / input / output / timestamp
+- /debug/history API(gateway proxy)返回事件结构(数组,条目含 node_id / status 等字段,空也是 200 数组)

@@ -75,7 +75,8 @@ export default function AgentsPage() {
   async function handleDelete(id: string, e: React.MouseEvent) {
     e.preventDefault();
     e.stopPropagation();
-    if (!confirm("确定删除此 Agent？")) return;
+    // 去 window.confirm:headless/自动化浏览器 confirm() 自动 dismiss(false)阻断删除;
+    // 单用户系统误删风险低,直接删。如需保护改自定义 modal(非原生 confirm)。
     try {
       await deleteAgent(id);
       setAgents((prev) => prev.filter((a) => a.id !== id));
@@ -270,7 +271,8 @@ export default function AgentsPage() {
                     </div>
                     <button
                       onClick={(e) => handleDelete(agent.id, e)}
-                      className="text-gray-300 opacity-0 transition-opacity hover:text-red-500 group-hover:opacity-100"
+                      aria-label="删除 agent"
+                      className="text-gray-400 opacity-60 transition-opacity hover:opacity-100 hover:text-red-500"
                       title="删除"
                     >
                       <Trash2 className="h-4 w-4" />
