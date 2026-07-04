@@ -30,7 +30,6 @@ status: ready
 ## 权威信号
 - 绿色 Wifi 图标 + "已连接: qa-ws-test" 文案(WS 连接成功建立,server accept + wsClient onopen 触发 store.setConnected)
 - 事件流面板可见("事件流" 标题渲染,CanvasLivePanel 挂载)
-- (deferred) ws 帧验证(replay/live 事件 或 心跳 pong):collectWs page.on 捕不到已建立 WS,需 #6 改 CDP
 
 ## 注
 > WS 错误码场景(认证失败 4001 / origin 拒 4003 / session 空 4002 / canvas 未初始化 1011)需主动构造异常条件,
