@@ -23,7 +23,7 @@ timeout_ms: 60000
 7. (api) GET /api/agents ||| 抽取 agent 列表,确认被删 id 不在
 
 ## 权威信号
-- [step 4] 被删 agent 的卡片从 /agents 列表中消失
-- [step 6] 删除后列表数量减少或为空(被删 agent 已移除生效;信号1 卡片消失 + 信号4 API 不含 id 已充分证明)
-- [step 4] 删除操作无「删除失败」错误文案(成功 Alert/toast 可接受,非失败提示;有 Alert element 但非错误)
-- [step 7] GET /api/agents 响应中不再出现被删 agent 的 id(api step 直 fetch)
+- [step 7] GET /api/agents 响应中不再出现被删 agent 的 id(api step 直 fetch,被删 id 不在 = 删除生效的权威证据)
+- [step 6] 删除后列表数量减少(对比 step2 删除前 N vs step6 删除后 N-1;或参考信号1 API 被删 id 不在)
+- [step 4] 被删 agent 卡片从列表消失(对比 step2 删除前含被删 加 step4 删除后不含;step4 evidence "共 N 个 Agent" 比删除前少 1 即消失)
+- [step 4] 删除操作无「删除失败」错误文案(成功 Alert/toast 可接受,非失败提示)
