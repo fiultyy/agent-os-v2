@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useMemoryStore, type MemoryItem } from "@/stores/memoryStore";
 import { useAgentStore } from "@/stores/agentStore";
 import { getMemories, getAgents } from "@/lib/api";
@@ -61,14 +61,44 @@ export function MemoryPanel() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [sortBy, setSortBy] = useState<"time" | "importance">("time");
 
-  // Load memories on mount and when filters change
+  // Load memories on mount and when filters change.
+  // search is debounced (500ms) so each keystroke doesn't trigger a slow
+  // backend LLM recall; agentFilter / activeLayer fire immediately.
+  const searchRef = useRef(search);
   useEffect(() => {
+    // agentFilter / activeLayer changed → fire immediately
     setLoading(true);
-    getMemories(agentFilter || undefined, activeLayer || undefined, undefined, 200)
+    getMemories(
+      agentFilter || undefined,
+      activeLayer || undefined,
+      undefined,
+      200,
+      search || undefined
+    )
       .then((data) => setItems(data))
       .catch(() => setItems([]))
       .finally(() => setLoading(false));
-  }, [agentFilter, activeLayer, setItems, setLoading]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentFilter, activeLayer]);
+
+  useEffect(() => {
+    searchRef.current = search;
+    const t = setTimeout(() => {
+      setLoading(true);
+      getMemories(
+        agentFilter || undefined,
+        activeLayer || undefined,
+        undefined,
+        200,
+        searchRef.current || undefined
+      )
+        .then((data) => setItems(data))
+        .catch(() => setItems([]))
+        .finally(() => setLoading(false));
+    }, 500);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search]);
 
   // Filter and sort
   const filtered = items

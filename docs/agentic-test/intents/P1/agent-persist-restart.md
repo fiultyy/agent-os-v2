@@ -3,32 +3,30 @@ name: agent-persist-restart
 target: http://localhost:3000/agents
 tags: [smoke, lifecycle, api]
 timeout_ms: 120000
-status: NOT-WIRED
+status: ready
 ---
 
-> NOT-WIRED: intent 把"重启 orchestrator 容器(podman restart)"当 browser act,但这是宿主机 infra 命令非浏览器 UI —— stagehand 在 DOM 找不到元素必然 "No action found"。需 qa-farm 支持 infra 步骤(host shell/exec)或分离为纯 API 测试(curl 创建 + podman restart + GET 验证持久化),非纯浏览器 intent。
+> IT-4 决策:wait + api 模式。shell 不进 runtime(非浏览器 UI act,stagehand 在 DOM 找不到 podman restart 元素会失败)。测试者在宿主机手动执行 `podman restart agent-os-v2_orchestrator_1`;intent 用 wait 轮询 `:8001/health` 200 等服务回,再用 api GET `/api/agents` 断言持久化(自定义 agent 仍在 + 默认助手不重复创建)。
 
 # 重启后 Agent 持久化验证
 
 ## 目标
-验证重启 orchestrator 容器后自定义 agent 是否仍在(持久化双向:写 + 启动灌回),并确认无 DATABASE_URL 时的 in-memory 限制。
+验证重启 orchestrator 容器后自定义 agent 是否仍在(持久化双向:写 + 启动灌回),并确认默认助手不重复创建。
 
 ## 前置
-- 已创建一个自定义 agent(非默认助手),记下其 name 和 model
+- orchestrator 服务运行中(`:8001/health` 200)
 - 持久化依赖 `DATABASE_URL`(pg_store);单容器无此 env 时 agent 为 in-memory,重启后丢失
 
 ## 步骤
-1. (observe) 查看重启前 /agents 页面或 GET /api/agents,确认自定义 agent 存在
-2. (extract) 记下重启前自定义 agent 的 name 和 model
-3. (act) 重启 orchestrator 容器(如 `podman restart agent-os-orchestrator` 或重建)
-4. (observe) 查看重启完成后 orchestrator 服务已重新可用(打开 /agents 页面能加载)
-5. (extract) 重启后 GET /api/agents,抽取 agent 列表
-6. (observe) 查看重启后列表中自定义 agent 是否仍在(name 与 model 是否匹配重启前记录)
+1. (setup)创建一个自定义 agent(非默认助手),记下其 name 和 model
+2. (act)测试者在宿主机手动执行 `podman restart agent-os-v2_orchestrator_1`(intent 不执行 shell,由人工触发)
+3. (wait)轮询 `GET http://localhost:8001/health`,等待返回 200(orchestrator 服务已重新可用,最长 60s)
+4. (api)`GET http://localhost:3000/api/agents`(或 `:8001/api/agents`),抽取 agent 列表
+5. (assert)自定义 agent 仍在列表中,且 name 与 model 与重启前记录一致
+6. (assert)默认助手不重复创建:重启后列表 agent 数量与重启前一致(无双倍默认项)
 
 ## 权威信号
-- 重启前自定义 agent 在列表中可见(其 name 与 model 已记下)
-- 重启后 /agents 页面能正常加载(无服务不可用错误)
-- 配置了 DATABASE_URL(pg 持久)时:重启后列表中自定义 agent 完整恢复(name 与 model 与重启前一致)
-- 配置了 DATABASE_URL 时:默认助手不重复创建(重启后列表 agent 数量与重启前一致,无双倍默认项)
-- 无 DATABASE_URL(单容器 in-memory)时:重启后自定义 agent 丢失,列表只剩默认助手(已知限制,非 bug)
-- pg 连接失败时降级 in-memory 且服务仍能启动(列表为空或仅默认助手,无启动失败)
+- 重启前自定义 agent 已创建(name 与 model 已记下)
+- wait 命中 `:8001/health` 200(orchestrator 服务重新可用,无健康检查失败)
+- 重启后 GET `/api/agents` 中自定义 agent 完整恢复(name 与 model 与重启前一致)
+- 重启后列表 agent 数量与重启前一致(默认助手不重复创建,无双倍默认项)

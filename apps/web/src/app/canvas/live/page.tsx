@@ -6,6 +6,7 @@ import { TickCanvas } from "@/components/canvas/TickCanvas";
 import { BranchManager } from "@/components/canvas/BranchManager";
 import { Layer2Panel } from "@/components/canvas/Layer2Panel";
 import { ScoringOverlay } from "@/components/canvas/ScoringOverlay";
+import { CanvasLivePanel } from "@/components/canvas/CanvasLivePanel";
 import { useCanvasStore } from "@/stores/canvasStore";
 import { canvasWsClient } from "@/lib/canvas/wsClient";
 import { Wifi, WifiOff } from "lucide-react";
@@ -66,7 +67,7 @@ export default function CanvasLivePage() {
           连接
         </button>
       </div>
-      {/* 主内容区：BranchManager 侧边 + TickCanvas 主区 + Layer2Panel 右侧 */}
+      {/* 主内容区：BranchManager 侧边 + TickCanvas 主区 + 右侧面板 */}
       <div className="flex flex-1 overflow-hidden">
         <BranchManager />
         <div className="flex-1 relative">
@@ -74,6 +75,10 @@ export default function CanvasLivePage() {
           <ScoringOverlay />
         </div>
         <Layer2Panel />
+        {/* CanvasLivePanel：连接状态 + 事件流（最近 50 条） */}
+        <div className="w-96 shrink-0 border-l p-2">
+          <CanvasLivePanel />
+        </div>
       </div>
     </div>
   );
