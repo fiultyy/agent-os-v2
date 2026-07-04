@@ -6,7 +6,10 @@ timeout_ms: 120000
 status: NOT-WIRED
 ---
 
-> NOT-WIRED: signal 多断言 SSE 节点(node_start(llm)/node_start(llm_synthesize)/tool_result 回注/MAX_TOOL_ITERATIONS),stagehand 看不到 SSE → 全 false。需 qa-farm SSE 监听或 curl 直测,非纯浏览器 intent。
+> NOT-WIRED(IT-4 sse gap,同 fc-tool-call):collectSse Phase 0 只 CDP `Network.eventSourceMessageReceived`(只捕 EventSource API),
+> 前端 `executeWithSSE`(api.ts:171)用 fetch + ReadableStream reader 消费 SSE(非 EventSource)→ sse step 捕不到 → 超时 fail。
+> 需 qa-farm collectSse fallback(EventSource wrapper hook 或 Network.responseReceived + StreamResource 读 fetch streaming)。
+> 额外:default agent glm-4-flash 可能不支持多轮 function-calling,需配 glm-4.7 agent。等 sse fallback 通电。
 
 # 多轮工具调用循环(tool→llm→synthesize)
 

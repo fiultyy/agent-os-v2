@@ -6,7 +6,12 @@ timeout_ms: 120000
 status: NOT-WIRED
 ---
 
-> NOT-WIRED: signal 全断言 SSE 事件(node_start/node_complete/tool_result/tool_use),stagehand 浏览器只看渲染文本无 SSE 可见性 → 全 false。需 qa-farm 支持 SSE 监听断言或改 curl 直测 /v1/execute SSE 流,非纯浏览器 intent。
+> NOT-WIRED(IT-4 sse gap):collectSse Phase 0 只 CDP `Network.eventSourceMessageReceived`(只捕 EventSource API),
+> 但前端 `executeWithSSE`(api.ts:171)用 **fetch + ReadableStream reader** 消费 SSE(非 EventSource)→ sse step 捕不到 → 超时无事件 fail。
+> 需 qa-farm 实现 collectSse 注释提到的 fallback(page.evaluate 注入 EventSource wrapper hook)或改用
+> `Network.responseReceived` + StreamResource 读 fetch streaming body。实测确认(playwright-runner/index.ts collectSse 只 session.on eventSourceMessageReceived)。
+> 额外 gap:default agent glm-4-flash 可能不支持原生 tool_use(function-calling),需配 glm-4.7 agent。
+> 短期替代:api step POST /v1/execute 读 SSE body 全文(fetch resp.text 等流结束),但 agent_id 动态(api step 无变量传递)+ 等流结束卡 timeout;此路不通,等 sse fallback。
 
 # 对话中 LLM 调工具(function-calling 单轮)
 
