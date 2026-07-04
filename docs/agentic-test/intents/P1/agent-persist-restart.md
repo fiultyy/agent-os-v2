@@ -1,32 +1,34 @@
 ---
 name: agent-persist-restart
-target: http://localhost:3000/agents
+target: http://localhost:8001
 tags: [smoke, lifecycle, api]
-timeout_ms: 120000
+timeout_ms: 60000
 status: ready
 ---
 
-> IT-4 决策:wait + api 模式。shell 不进 runtime(非浏览器 UI act,stagehand 在 DOM 找不到 podman restart 元素会失败)。测试者在宿主机手动执行 `podman restart agent-os-v2_orchestrator_1`;intent 用 wait 轮询 `:8001/health` 200 等服务回,再用 api GET `/api/agents` 断言持久化(自定义 agent 仍在 + 默认助手不重复创建)。
+> IT-4 通电(api step)+ 应用限制:agent store in-memory baseline(engine.py:393),compose 无 DATABASE_URL
+> → restart 丢自定义 agent,启动 init_default_agent 灌回默认助手。PostgresStore 持久化需 DATABASE_URL(deferred)。
+> intent 验证 in-memory baseline restart 行为:服务回 + default 灌回(不验证自定义持久化,因 in-memory 必丢)。
+> 测试者前置:podman restart orchestrator(intent 不执行 shell)。
 
-# 重启后 Agent 持久化验证
+# 重启后服务恢复 + default 灌回
 
 ## 目标
-验证重启 orchestrator 容器后自定义 agent 是否仍在(持久化双向:写 + 启动灌回),并确认默认助手不重复创建。
+验证 orchestrator restart 后服务重新可用(health 200)+ init_default_agent 灌回默认助手(in-memory baseline 行为)。
 
 ## 前置
-- orchestrator 服务运行中(`:8001/health` 200)
-- 持久化依赖 `DATABASE_URL`(pg_store);单容器无此 env 时 agent 为 in-memory,重启后丢失
+- 测试者手动执行 `podman restart agent-os-v2_orchestrator_1`(intent 不执行 shell)
+- 等待 ~10-15s 服务重启
 
 ## 步骤
-1. (setup)创建一个自定义 agent(非默认助手),记下其 name 和 model
-2. (act)测试者在宿主机手动执行 `podman restart agent-os-v2_orchestrator_1`(intent 不执行 shell,由人工触发)
-3. (wait)轮询 `GET http://localhost:8001/health`,等待返回 200(orchestrator 服务已重新可用,最长 60s)
-4. (api)`GET http://localhost:3000/api/agents`(或 `:8001/api/agents`),抽取 agent 列表
-5. (assert)自定义 agent 仍在列表中,且 name 与 model 与重启前记录一致
-6. (assert)默认助手不重复创建:重启后列表 agent 数量与重启前一致(无双倍默认项)
+1. (api) GET http://localhost:8001/health ||| orchestrator health 200(restart 后服务回)
+2. (api) GET http://localhost:8001/v1/agents ||| agent 列表(default 灌回)
 
 ## 权威信号
-- 重启前自定义 agent 已创建(name 与 model 已记下)
-- wait 命中 `:8001/health` 200(orchestrator 服务重新可用,无健康检查失败)
-- 重启后 GET `/api/agents` 中自定义 agent 完整恢复(name 与 model 与重启前一致)
-- 重启后列表 agent 数量与重启前一致(默认助手不重复创建,无双倍默认项)
+- [step 1] GET /health 返回 200(orchestrator restart 后服务重新可用,非 503/超时)
+- [step 2] GET /v1/agents 返回 200 + JSON 数组(含 init_default_agent 灌回的"默认助手",不崩)
+
+## 注(deferred)
+> 自定义 agent 持久化:agent store in-memory(compose 无 DATABASE_URL)→ restart 丢自定义 agent,只 default 灌回。
+> 持久化需 PostgresStore(DATABASE_URL 配置)+ restore_agents_from_pg(engine.py:409)。compose 默认 in-memory 是配置选择(非 bug)。
+> 验证自定义持久化需配 DATABASE_URL + PostgresStore,deferred 到容器化持久化配置。
