@@ -20,8 +20,13 @@ export function Layer2Panel() {
   };
 
   const handleSubmit = () => {
-    if (!activeTab || staging.length === 0) return;
-    const payload = submitPayload(activeTab.session_id, activeTab.branch_id);
+    if (staging.length === 0) return;
+    // fallback:canvas/live 无 agent 执行时 activeTab 可能空(tabs=[]),
+    // 用 store session_id(wsClient 已连)+ 默认 branch 让 Layer2 提交通路可验证
+    const sessionId = activeTab?.session_id || useCanvasStore.getState().sessionId || "";
+    const branchId = activeTab?.branch_id || "main";
+    if (!sessionId) return;
+    const payload = submitPayload(sessionId, branchId);
     console.log("[Layer2] Submit:", payload);
     canvasWsClient.send(payload);
     clear();
