@@ -3,7 +3,10 @@ name: canvas-layer2-submit
 target: http://localhost:3000/canvas/live
 tags: [smoke, lifecycle, canvas]
 timeout_ms: 120000
+status: NOT-WIRED
 ---
+
+> NOT-WIRED: signal 2-4 断言网络响应/JSON(accepted 文本、命令字段 layer2.submitted、WS 断开错误文案),stagehand 看不到网络层 → false。需 qa-farm 网络监听或 WS frame 断言,非纯浏览器 intent。signal 1(暂存区清空,渲染)可观察但单 signal 不足以验证。
 
 # canvas Layer2 提交(cmd 协议)
 
