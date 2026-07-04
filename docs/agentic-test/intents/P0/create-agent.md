@@ -29,4 +29,4 @@ status: ready
 ## 权威信号
 - /agents 列表出现名称为 "测试助手" 的 Agent 卡片(用户填的 name,非默认 Agent N+1)
 - 该 Agent 卡片显示模型为 `glm-4-flash`(用户选的 model)
-- 提交后页面无错误提示
+- 提交后页面无「创建失败」错误文案(成功 Alert/toast 可接受,非失败提示;信号1 卡片出现即证明创建成功)
