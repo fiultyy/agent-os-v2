@@ -45,9 +45,9 @@ export function Layer2Panel() {
           </button>
         </div>
         <textarea value={inputText} onChange={e => setInputText(e.target.value)}
-          placeholder="Type..." rows={2}
+          placeholder="Type..." rows={2} aria-label="Layer2 节点内容"
           className="w-full px-2 py-1.5 text-xs border border-gray-200 rounded resize-none" />
-        <button onClick={handleAdd} disabled={!inputText.trim()}
+        <button onClick={handleAdd} disabled={!inputText.trim()} aria-label="暂存节点到 Layer2"
           className="w-full py-1 text-xs bg-blue-600 text-white rounded disabled:opacity-40">
           Add
         </button>
@@ -66,7 +66,7 @@ export function Layer2Panel() {
         )}
       </div>
       <div className="p-2 border-t">
-        <button onClick={handleSubmit} disabled={staging.length === 0}
+        <button onClick={handleSubmit} disabled={staging.length === 0} aria-label="提交 Layer2"
           className="w-full py-2 text-sm bg-green-600 text-white rounded font-medium disabled:opacity-40">
           Submit ({staging.length})
         </button>
