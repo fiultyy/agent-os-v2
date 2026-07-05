@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Header } from "@/components/layout/Header";
+import { DemoBanner } from "@/components/layout/DemoBanner";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { FlowCanvas } from "@/components/canvas/FlowCanvas";
 import { PropertyPanel } from "@/components/canvas/PropertyPanel";
@@ -47,6 +48,10 @@ export default function FlowsPage() {
   return (
     <div className="flex h-screen w-screen flex-col">
       <Header />
+      <DemoBanner title="设计画布(演示原型)">
+        拖拽节点暂不执行编排——仅 Agent 节点选中后可在底部执行栏单独运行一轮,
+        Tool / Prompt 节点仅展示、连线无执行语义。完整 Agent 管理请用顶部「Agents」。
+      </DemoBanner>
       <div className="flex flex-1 overflow-hidden">
         {/* Left: Component palette + Agent list for drag */}
         <aside className="flex h-full w-56 flex-col border-r bg-gray-50">
