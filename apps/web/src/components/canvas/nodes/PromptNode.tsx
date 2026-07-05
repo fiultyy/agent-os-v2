@@ -7,8 +7,9 @@ export function PromptNode({ data }: NodeProps) {
     : [];
 
   return (
-    <div className="min-w-[160px] rounded-lg border-2 border-purple-500 bg-white px-4 py-3 shadow-md">
+    <div className="relative min-w-[160px] rounded-lg border-2 border-purple-500 bg-white px-4 py-3 shadow-md">
       <Handle type="target" position={Position.Top} />
+      <span className="absolute right-2 top-2 rounded bg-amber-100 px-1 py-0.5 text-[9px] font-medium text-amber-700">演示</span>
       <div className="flex items-center gap-2">
         <FileText className="h-4 w-4 text-purple-600" />
         <span className="text-sm font-semibold">

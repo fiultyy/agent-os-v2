@@ -15,8 +15,9 @@ export function AgentNode({ data }: NodeProps) {
   };
 
   return (
-    <div className="min-w-[160px] rounded-lg border-2 border-blue-500 bg-white px-4 py-3 shadow-md">
+    <div className="relative min-w-[160px] rounded-lg border-2 border-blue-500 bg-white px-4 py-3 shadow-md">
       <Handle type="target" position={Position.Top} />
+      <span className="absolute right-2 top-2 rounded bg-green-100 px-1 py-0.5 text-[9px] font-medium text-green-700">可执行</span>
       <div className="flex items-center gap-2">
         <Bot className="h-4 w-4 text-blue-600" />
         <span className="text-sm font-semibold">{String(data.label ?? "Agent")}</span>
