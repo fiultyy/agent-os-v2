@@ -52,6 +52,12 @@ pg_store: Any = None
 # None 是安全默认(零回归 —— 与 pg_store 同模式)。
 pitfail_registry: Any = None
 
+# ── Conversation history (通电) ────────────────────────────────────
+# ConversationRegistry: SQLite-backed 对话历史。engine.py 模块级实例化(构造即
+# _init_db 建表,无需 async initialize),失败降级为 None。chat.py /execute 完成
+# 后 record_turn 落库;/v1/conversations API + call-site 均 ``is not None`` guard。
+conversation_registry: Any = None
+
 # ── Context & compression ──────────────────────────────────────────
 
 context_monitor: Any = None

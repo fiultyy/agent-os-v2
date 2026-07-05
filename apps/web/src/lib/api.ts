@@ -429,6 +429,72 @@ export async function getExecutionHistory(
   }));
 }
 
+// ── Conversation API ──────────────────────────────────────────
+
+export interface ConversationItem {
+  id: string;
+  agentId: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+}
+
+export interface ConversationMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  createdAt: string;
+}
+
+function mapConversation(raw: Record<string, unknown>): ConversationItem {
+  return {
+    id: String(raw.id ?? ""),
+    agentId: String(raw.agent_id ?? raw.agentId ?? ""),
+    title: String(raw.title ?? ""),
+    createdAt: String(raw.created_at ?? raw.createdAt ?? ""),
+    updatedAt: String(raw.updated_at ?? raw.updatedAt ?? ""),
+    messageCount: Number(raw.message_count ?? raw.messageCount ?? 0),
+  };
+}
+
+function mapConvMessage(raw: Record<string, unknown>): ConversationMessage {
+  return {
+    id: String(raw.id ?? ""),
+    role: (raw.role === "assistant" ? "assistant" : "user") as ConversationMessage["role"],
+    content: String(raw.content ?? ""),
+    createdAt: String(raw.created_at ?? raw.createdAt ?? ""),
+  };
+}
+
+/** 后端 None-guard 时返 {disabled,items};正常返数组。统一归一为 ConversationItem[]。 */
+export async function getConversations(
+  agentId?: string,
+  limit: number = 50
+): Promise<ConversationItem[]> {
+  const params = new URLSearchParams();
+  if (agentId) params.set("agent_id", agentId);
+  params.set("limit", String(limit));
+  const raw = await request<Record<string, unknown>[] | Record<string, unknown>>(
+    `/conversations/?${params}`
+  );
+  return Array.isArray(raw) ? raw.map(mapConversation) : [];
+}
+
+export async function getConversationMessages(
+  conversationId: string,
+  limit: number = 200
+): Promise<ConversationMessage[]> {
+  const raw = await request<Record<string, unknown>[] | Record<string, unknown>>(
+    `/conversations/${conversationId}/messages?limit=${limit}`
+  );
+  return Array.isArray(raw) ? raw.map(mapConvMessage) : [];
+}
+
+export async function deleteConversation(id: string): Promise<void> {
+  await request(`/conversations/${id}`, { method: "DELETE" });
+}
+
 // ── Knowledge Graph API ───────────────────────────────────────
 
 export async function searchEntities(query: string, limit: number = 20): Promise<Record<string, unknown>[]> {

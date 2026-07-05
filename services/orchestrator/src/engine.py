@@ -239,6 +239,16 @@ except Exception:
     logger.warning("PitfailRegistry init failed — degrading pitfail_registry to None", exc_info=True)
     _state.pitfail_registry = None
 
+# Conversation history(通电):对话历史持久化,参照 pitfail 模式。chat.py /execute
+# 完成后 record_turn 落库;/v1/conversations API + call-site 均 is-not-None guard。
+try:
+    from src.conversation import ConversationRegistry
+    _state.conversation_registry = ConversationRegistry(os.getenv("CONVERSATIONS_DB", "data/conversations.db"))
+    logger.info("ConversationRegistry wired (db=%s)", _state.conversation_registry.db_path)
+except Exception:
+    logger.warning("ConversationRegistry init failed — degrading conversation_registry to None", exc_info=True)
+    _state.conversation_registry = None
+
 # NOT-WIRED (deferred): ConditionalSpawner 装配块已移除 —— 生产路径
 # /v1/orchestrate 经 routes/orchestrate.py:_agent_manager_shim() +
 # _build_multi_agent_graph() 直接调 agent_manager 模块函数,完全绕过 spawner,
@@ -510,6 +520,7 @@ from src.api.routes.chat import router as chat_router, root_router_health
 from src.api.routes.entities import router as entities_router
 from src.api.routes.pitfail import router as pitfail_router
 from src.api.routes.orchestrate import router as orchestrate_router
+from src.api.routes.conversations import router as conversations_router
 from src.api.routes.canvas import router as canvas_router, init_canvas_routes
 from src.canvas.event_store import CanvasEventStore
 from src.canvas.emitter import SessionEventEmitter
@@ -533,6 +544,7 @@ app.include_router(chat_router, prefix="/v1")
 app.include_router(entities_router, prefix="/v1")
 app.include_router(pitfail_router, prefix="/v1")
 app.include_router(orchestrate_router, prefix="/v1")
+app.include_router(conversations_router, prefix="/v1")
 
 
 # ── CLI entry point ────────────────────────────────────────────────

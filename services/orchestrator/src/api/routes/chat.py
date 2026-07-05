@@ -871,6 +871,18 @@ async def execute(req: ExecuteRequest) -> StreamingResponse:
                     "session_id": final_state.session_id,
                     "memory_count": len(final_state.memory_refs),
                 }))
+                # 对话历史持久化:把这一轮 (user_input, assistant_response) 落库,
+                # 供 /v1/conversations 列表 + 历史回看。None-guard + try/except 不阻塞主路径。
+                if _state.conversation_registry is not None:
+                    try:
+                        _state.conversation_registry.record_turn(
+                            session_id=final_state.session_id,
+                            agent_id=req.agent_id,
+                            user_input=req.input,
+                            assistant_response=final_state.output or "",
+                        )
+                    except Exception:
+                        logger.warning("conversation record_turn failed", exc_info=True)
                 # P3: task-post online consolidation (fire-and-forget, non-blocking).
                 # Extracts key decisions/pitfalls and writes back via BackwardWriter.
                 if _state.task_consolidator is not None and final_state.messages:
