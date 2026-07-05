@@ -37,10 +37,28 @@ from src.memory.types import MemoryItem, MemoryOrigin
 from src.communication.message import AgentMessage, MessageType
 from src.services import _state
 from src.services.llm_client import LLMError
+from src.canvas.events import (
+    TickStartedEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+    TickCompletedEvent,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+# ── Canvas event emit helper(通电) ────────────────────────────────
+# fire-and-forget:emit tick/tool 事件到实时画布。None-guard(装配降级/单测未挂)
+# + try/except(emitter 内部异常)绝不 raise,主路径 /execute 零回归(对齐 pitfall 风格)。
+async def _canvas_emit(emitter, evt) -> None:
+    if emitter is None:
+        return
+    try:
+        await emitter.emit(evt)
+    except Exception:
+        logger.warning("canvas emit failed (%s)", getattr(evt, "event_type", "?"), exc_info=True)
 
 
 # ── SSE helpers ────────────────────────────────────────────────────
@@ -402,6 +420,16 @@ async def _node_tool(state: GraphState) -> GraphState:
     # so a mis-routed tool call no longer forces the error branch.
     tool_name = state.context.get("tool_call", "file_read")
     tool_args = state.context.get("tool_args", {"path": state.input})
+    _canvas_tick_id = state.metadata.get("canvas_tick_id", "")
+    _canvas_call_id = f"toolu_iter{state.tool_iteration}"
+    # canvas:工具调用开始(实时画布回放)。
+    await _canvas_emit(
+        _state.canvas_emitter,
+        ToolCallEvent.create(
+            state.session_id, "main", _canvas_tick_id, tool_name, dict(tool_args),
+            call_id=_canvas_call_id,
+        ),
+    )
 
     result = await _state.tool_executor.execute(tool_name, tool_args)
 
@@ -429,6 +457,15 @@ async def _node_tool(state: GraphState) -> GraphState:
     else:
         state.context["tool_result"] = str(result["output"])
 
+    # canvas:工具结果(实时画布回放)。失败时带 error 字段。
+    await _canvas_emit(
+        _state.canvas_emitter,
+        ToolResultEvent.create(
+            state.session_id, "main", _canvas_tick_id, _canvas_call_id,
+            result.get("output", "") if result["status"] == "success" else "",
+            error="" if result["status"] == "success" else state.context.get("tool_result", ""),
+        ),
+    )
     state.tool_results.append({"tool": tool_name, "result": state.context["tool_result"]})
 
     # Multi-turn loop: record the {tool_use, tool_result} pair so the next
@@ -815,6 +852,7 @@ async def execute(req: ExecuteRequest) -> StreamingResponse:
         input=req.input,
         agent_id=req.agent_id,
         session_id=session_id,
+        metadata={"canvas_tick_id": str(uuid.uuid4())},
     )
 
     event_queue: asyncio.Queue[str | None] = asyncio.Queue()
@@ -858,6 +896,13 @@ async def execute(req: ExecuteRequest) -> StreamingResponse:
         await _state.concurrency_controller.acquire_agent_slot(req.agent_id)
         agent["status"] = "running"
         yield _sse("agent_status", {"agent_id": req.agent_id, "status": "running"})
+        # canvas:tick 开始(实时画布回放)。tick_id 贯穿 graph → _node_tool 用同一 id 关联 tool 事件。
+        await _canvas_emit(
+            _state.canvas_emitter,
+            TickStartedEvent.create(
+                session_id, "main", initial_state.metadata.get("canvas_tick_id", ""), req.input
+            ),
+        )
 
         mem_event_q = _state.subscribe_memory_events()
 
@@ -883,6 +928,17 @@ async def execute(req: ExecuteRequest) -> StreamingResponse:
                         )
                     except Exception:
                         logger.warning("conversation record_turn failed", exc_info=True)
+                # canvas:tick 完成(实时画布回放)。tool_count = 该 tick 内工具调用数。
+                await _canvas_emit(
+                    _state.canvas_emitter,
+                    TickCompletedEvent.create(
+                        session_id, "main",
+                        final_state.metadata.get("canvas_tick_id", ""),
+                        "completed",
+                        final_state.output or "",
+                        tool_count=len(final_state.tool_results),
+                    ),
+                )
                 # P3: task-post online consolidation (fire-and-forget, non-blocking).
                 # Extracts key decisions/pitfalls and writes back via BackwardWriter.
                 if _state.task_consolidator is not None and final_state.messages:
@@ -897,6 +953,16 @@ async def execute(req: ExecuteRequest) -> StreamingResponse:
             except Exception as exc:
                 agent["status"] = "idle"
                 await event_queue.put(_sse("error", {"message": str(exc)}))
+                # canvas:tick 失败(实时画布回放)。
+                await _canvas_emit(
+                    _state.canvas_emitter,
+                    TickCompletedEvent.create(
+                        session_id, "main",
+                        initial_state.metadata.get("canvas_tick_id", ""),
+                        "failed",
+                        str(exc),
+                    ),
+                )
             finally:
                 await _state.concurrency_controller.release_agent_slot(req.agent_id)
                 _state.unsubscribe_memory_events(mem_event_q)

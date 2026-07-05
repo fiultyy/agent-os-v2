@@ -531,10 +531,15 @@ app.include_router(root_router_health)
 
 # Canvas routes (WebSocket + REST, /api/canvas prefix)
 # Wire up canvas dependencies at import time
-_canvas_store = CanvasEventStore()
+# db_path 显式传 volume 内路径:event_store._default_db_path() 用 parent.parent.parent.parent
+# 在容器内(/app/src/canvas → 4 层 = /)算到 /data(非 volume),host 看不到。显式传
+# data/canvas_events.db(相对 /app WORKDIR → /app/data = host volume),replay 历史才持久。
+_canvas_store = CanvasEventStore(os.getenv("CANVAS_EVENTS_DB", "data/canvas_events.db"))
 _canvas_tab_mgr = TabManager()
 _canvas_emitter = SessionEventEmitter(event_store=_canvas_store)
 init_canvas_routes(store=_canvas_store, emitter=_canvas_emitter, tab_manager=_canvas_tab_mgr)
+# 暴露 emitter 到 _state:chat.py /execute + _node_tool 经此 emit tick/tool 事件 → 实时画布。
+_state.canvas_emitter = _canvas_emitter
 app.include_router(canvas_router)
 
 # All API routes under /v1 prefix
