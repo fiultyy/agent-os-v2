@@ -16,6 +16,23 @@ export class CanvasWSClient {
   private static readonly NON_RECONNECTABLE_CODES = new Set([4001, 4003]);
 
   connect(sessionId: string, afterEventId?: string, token?: string): void {
+    // 切换 session:彻底断旧连接 + 清 store。canvasStore 是模块级单例(不随页面
+    // unmount 重置),旧 session 的 events/ticks 不清会把多个 session 混在一个页面;
+    // 旧 ws 不 close 会泄漏,且其 onclose 会 scheduleReconnect 重连旧 session(双重订阅)。
+    if (this.sessionId && this.sessionId !== sessionId) {
+      if (this.reconnectTimer) {
+        clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = null;
+      }
+      this.stopHeartbeat();
+      if (this.ws) {
+        this.ws.onclose = null; // 防 close → scheduleReconnect 重连旧 session
+        this.ws.close();
+        this.ws = null;
+      }
+      useCanvasStore.getState().clearEvents();
+      console.log("[CanvasWS] session 切换,清旧事件 + 断旧连接");
+    }
     this.sessionId = sessionId;
     this.token = token || "";
 

@@ -20,6 +20,9 @@ export default function CanvasLivePage() {
   // WS 连接管理：从 URL 参数或 store 读取 session_id；保证 sid 非空以闭环
   // BranchManager 的 session_id（之前 store.sessionId 常为 null → branch 创建恒空）。
   useEffect(() => {
+    // 进页面先清 store(canvasStore 是模块级单例,上一次 /canvas/live 的
+    // events/ticks/branches 残留 → 会把不同 session 混在一个页面)。
+    useCanvasStore.getState().clearEvents();
     const params = new URLSearchParams(window.location.search);
     const sid = params.get("session_id") || sessionId;
     if (sid) {
@@ -28,7 +31,6 @@ export default function CanvasLivePage() {
       setSessionId(sid);
       canvasWsClient.connect(sid);
     }
-    // 不在 unmount 时断连，保持后台运行
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
