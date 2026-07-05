@@ -1,7 +1,7 @@
 // P1-1: Tick Canvas — React Flow wrapper
 "use client";
-import { useMemo, useRef } from "react";
-import { ReactFlow, Background, Controls, MiniMap, type Node, type Edge } from "@xyflow/react";
+import { useMemo, useRef, useEffect } from "react";
+import { ReactFlow, Background, Controls, MiniMap, type Node, type Edge, type ReactFlowInstance } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { TickNode } from "./nodes/TickNode";
 import { ToolNode } from "./nodes/ToolNode";
@@ -201,6 +201,17 @@ export function TickCanvas() {
     return { nodes: ns, edges: es };
   }, [ticks, events, lod]);
 
+  // replay 事件到达后节点从 0→N,自动重新 fitView(mount 时 fitView 在 nodes 空,
+  // replay 来的 tick/tool 节点会落在视口外 —— 用户看到空白画布)。
+  const rfInstance = useRef<ReactFlowInstance | null>(null);
+  const prevNodeCount = useRef(0);
+  useEffect(() => {
+    if (nodes.length > 0 && nodes.length !== prevNodeCount.current) {
+      setTimeout(() => rfInstance.current?.fitView({ padding: 0.2 }), 50);
+    }
+    prevNodeCount.current = nodes.length;
+  }, [nodes.length]);
+
   // ── W-2: Controlled mode — no useNodesState/useEdgesState ──
   return (
     <div className="flex flex-col h-full">
@@ -211,6 +222,9 @@ export function TickCanvas() {
           nodes={nodes}
           edges={edges}
           nodeTypes={nodeTypes}
+          onInit={(inst) => {
+            rfInstance.current = inst;
+          }}
           fitView
           className="bg-slate-50"
         >
