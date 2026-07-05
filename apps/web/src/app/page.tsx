@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import Link from "next/link";
 import {
   Bot,
   Send,
@@ -9,6 +10,7 @@ import {
   Plus,
   Trash2,
   ChevronDown,
+  Activity,
 } from "lucide-react";
 import {
   executeWithSSE,
@@ -267,6 +269,16 @@ export default function Home() {
             <MessageSquare className="h-5 w-5 text-blue-600" />
             <span className="font-medium">对话</span>
             {agent && <span className="text-sm text-gray-400">— {agent.name}</span>}
+            {sessionId && (
+              <Link
+                href={`/canvas/live?session_id=${sessionId}`}
+                className="ml-auto flex items-center gap-1 rounded-lg border border-gray-200 px-2.5 py-1 text-xs text-gray-600 transition-colors hover:bg-gray-50 hover:text-gray-900"
+                title="在实时画布查看本对话的执行轨迹(tick / 工具调用)"
+              >
+                <Activity className="h-3.5 w-3.5" />
+                实时画布
+              </Link>
+            )}
           </header>
 
           <div className="flex-1 overflow-y-auto px-6 py-4">
