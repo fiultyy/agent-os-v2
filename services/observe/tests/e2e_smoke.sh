@@ -68,22 +68,43 @@ else
     exit 1
 fi
 
-# 6. Test REST replay (empty first, then after ingest)
-echo "[6/6] Testing event replay..."
+# 6. Test WS ingest → REST replay 端到端
+echo "[6/6] Testing WS ingest → REST replay end-to-end..."
 
-# Empty replay
-EVENTS_RESP=$(curl -s "http://localhost:8002/sessions/mock-test/test-session/events")
-if [[ "$EVENTS_RESP" == *"events"* ]]; then
-    echo "✓ REST replay endpoint OK"
+# 6.1 WS ingest: 发送完整 turn 序列 (4 events)
+echo "  [6.1] WS ingest: sending turn sequence..."
+WS_INGEST_RESULT=$(python3 tests/ws_ingest_test.py)
+WS_INGEST_STATUS=$(echo "$WS_INGEST_RESULT" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('status', 'error'))")
+if [[ "$WS_INGEST_STATUS" == "ok" ]]; then
+    echo "  ✓ WS ingest OK (4 events sent)"
 else
-    echo "✗ REST replay FAILED: $EVENTS_RESP"
+    echo "  ✗ WS ingest FAILED: $WS_INGEST_RESULT"
+    kill $OBSERVE_PID 2>/dev/null || true
+    exit 1
+fi
+
+# 6.2 REST replay: 验证返回 4 个事件，顺序正确
+echo "  [6.2] REST replay: verifying events..."
+SESSION_ID=$(echo "$WS_INGEST_RESULT" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('session_id', 'ws-e2e-probe'))")
+EVENTS_RESP=$(curl -s "http://localhost:8002/sessions/mock-test/$SESSION_ID/events")
+
+# 验证: 非空 + 4 个事件 + 顺序正确 (tick_started, tool_call, tool_result, tick_completed)
+EVENT_COUNT=$(echo "$EVENTS_RESP" | python3 -c "import sys, json; d=json.load(sys.stdin); print(len(d.get('events', [])))")
+FIRST_TYPE=$(echo "$EVENTS_RESP" | python3 -c "import sys, json; d=json.load(sys.stdin); ev=d.get('events', []); print(ev[0].get('event_type', '') if ev else '')")
+LAST_TYPE=$(echo "$EVENTS_RESP" | python3 -c "import sys, json; d=json.load(sys.stdin); ev=d.get('events', []); print(ev[-1].get('event_type', '') if len(ev) >= 4 else '')")
+
+if [[ "$EVENT_COUNT" == "4" ]] && [[ "$FIRST_TYPE" == "tick_started" ]] && [[ "$LAST_TYPE" == "tick_completed" ]]; then
+    echo "  ✓ REST replay OK (4 events, correct order: $FIRST_TYPE → ... → $LAST_TYPE)"
+else
+    echo "  ✗ REST replay FAILED: count=$EVENT_COUNT, first=$FIRST_TYPE, last=$LAST_TYPE"
+    echo "  Full response: $EVENTS_RESP"
     kill $OBSERVE_PID 2>/dev/null || true
     exit 1
 fi
 
 echo ""
 echo "=== All Tests Passed ✓ ==="
-echo "Note: Full WS ingest/replay test requires WebSocket client (deferred to T6 mock_e2e.sh)"
+echo "WS ingest → REST replay 端到端验证通过"
 
 # Cleanup
 kill $OBSERVE_PID 2>/dev/null || true
