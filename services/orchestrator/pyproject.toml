@@ -17,6 +17,7 @@ dependencies = [
     "alembic>=1.14",
     "greenlet>=3.0",
     "networkx>=3.3",
+    "websockets>=14.0",
 ]
 
 [project.optional-dependencies]

@@ -542,6 +542,17 @@ init_canvas_routes(store=_canvas_store, emitter=_canvas_emitter, tab_manager=_ca
 _state.canvas_emitter = _canvas_emitter
 app.include_router(canvas_router)
 
+# ── Observe client (T4 multi-harness-observe) ─────────────────────
+# 初始化 ObserveClient 并暴露到 _state。chat.py /execute + _node_tool 经此推泛化
+# turn 事件 → observe-service WS ingest。None-guard(observe-service 不可达时
+# client 内部静默 logger.warning,不 raise)。
+try:
+    from src.observe.client import ObserveClient
+    _state.observe_client = ObserveClient(harness_id="orchestrator-main")
+except Exception as e:
+    logger.warning("observe client initialization failed: %s", e)
+    _state.observe_client = None
+
 # All API routes under /v1 prefix
 app.include_router(agents_router, prefix="/v1")
 app.include_router(memory_router, prefix="/v1")

@@ -36,6 +36,12 @@ from src.memory.hooks import (
 from src.memory.types import MemoryItem, MemoryOrigin
 from src.communication.message import AgentMessage, MessageType
 from src.services import _state
+from src.canvas.events import (
+    TickStartedEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+    TickCompletedEvent,
+)
 from src.services.llm_client import LLMError
 from src.canvas.events import (
     TickStartedEvent,
@@ -422,7 +428,19 @@ async def _node_tool(state: GraphState) -> GraphState:
     tool_args = state.context.get("tool_args", {"path": state.input})
     _canvas_tick_id = state.metadata.get("canvas_tick_id", "")
     _canvas_call_id = f"toolu_iter{state.tool_iteration}"
-    # canvas:工具调用开始(实时画布回放)。
+    # observe:工具调用开始(泛化 schema 推 observe-service)。
+    if _state.observe_client is not None:
+        try:
+            await _state.observe_client.on_tool_call(
+                session_id=state.session_id,
+                tick_id=_canvas_tick_id,
+                tool_name=tool_name,
+                arguments=dict(tool_args),
+                call_id=_canvas_call_id,
+            )
+        except Exception:
+            logger.warning("observe on_tool_call failed", exc_info=True)
+    # canvas:工具调用开始(实时画布回放,保留兼容)。
     await _canvas_emit(
         _state.canvas_emitter,
         ToolCallEvent.create(
@@ -457,7 +475,19 @@ async def _node_tool(state: GraphState) -> GraphState:
     else:
         state.context["tool_result"] = str(result["output"])
 
-    # canvas:工具结果(实时画布回放)。失败时带 error 字段。
+    # observe:工具结果(泛化 schema 推 observe-service)。
+    if _state.observe_client is not None:
+        try:
+            await _state.observe_client.on_tool_result(
+                session_id=state.session_id,
+                tick_id=_canvas_tick_id,
+                call_id=_canvas_call_id,
+                result=result.get("output", "") if result["status"] == "success" else None,
+                error="" if result["status"] == "success" else state.context.get("tool_result", ""),
+            )
+        except Exception:
+            logger.warning("observe on_tool_result failed", exc_info=True)
+    # canvas:工具结果(实时画布回放,保留兼容)。失败时带 error 字段。
     await _canvas_emit(
         _state.canvas_emitter,
         ToolResultEvent.create(
@@ -896,11 +926,22 @@ async def execute(req: ExecuteRequest) -> StreamingResponse:
         await _state.concurrency_controller.acquire_agent_slot(req.agent_id)
         agent["status"] = "running"
         yield _sse("agent_status", {"agent_id": req.agent_id, "status": "running"})
-        # canvas:tick 开始(实时画布回放)。tick_id 贯穿 graph → _node_tool 用同一 id 关联 tool 事件。
+        _tick_id = initial_state.metadata.get("canvas_tick_id", "")
+        # observe:tick 开始(泛化 schema 推 observe-service)。
+        if _state.observe_client is not None:
+            try:
+                await _state.observe_client.on_tick_started(
+                    session_id=session_id,
+                    tick_id=_tick_id,
+                    request=req.input,
+                )
+            except Exception:
+                logger.warning("observe on_tick_started failed", exc_info=True)
+        # canvas:tick 开始(实时画布回放,保留兼容)。tick_id 贯穿 graph → _node_tool 用同一 id 关联 tool 事件。
         await _canvas_emit(
             _state.canvas_emitter,
             TickStartedEvent.create(
-                session_id, "main", initial_state.metadata.get("canvas_tick_id", ""), req.input
+                session_id, "main", _tick_id, req.input
             ),
         )
 
@@ -928,12 +969,25 @@ async def execute(req: ExecuteRequest) -> StreamingResponse:
                         )
                     except Exception:
                         logger.warning("conversation record_turn failed", exc_info=True)
-                # canvas:tick 完成(实时画布回放)。tool_count = 该 tick 内工具调用数。
+                _tick_id = final_state.metadata.get("canvas_tick_id", "")
+                # observe:tick 完成(泛化 schema 推 observe-service)。
+                if _state.observe_client is not None:
+                    try:
+                        await _state.observe_client.on_tick_completed(
+                            session_id=session_id,
+                            tick_id=_tick_id,
+                            status="success",
+                            response=final_state.output or "",
+                            tool_count=len(final_state.tool_results),
+                        )
+                    except Exception:
+                        logger.warning("observe on_tick_completed failed", exc_info=True)
+                # canvas:tick 完成(实时画布回放,保留兼容)。tool_count = 该 tick 内工具调用数。
                 await _canvas_emit(
                     _state.canvas_emitter,
                     TickCompletedEvent.create(
                         session_id, "main",
-                        final_state.metadata.get("canvas_tick_id", ""),
+                        _tick_id,
                         "completed",
                         final_state.output or "",
                         tool_count=len(final_state.tool_results),
@@ -953,12 +1007,24 @@ async def execute(req: ExecuteRequest) -> StreamingResponse:
             except Exception as exc:
                 agent["status"] = "idle"
                 await event_queue.put(_sse("error", {"message": str(exc)}))
-                # canvas:tick 失败(实时画布回放)。
+                _tick_id = initial_state.metadata.get("canvas_tick_id", "")
+                # observe:tick 失败(泛化 schema 推 observe-service)。
+                if _state.observe_client is not None:
+                    try:
+                        await _state.observe_client.on_tick_completed(
+                            session_id=session_id,
+                            tick_id=_tick_id,
+                            status="error",
+                            response=str(exc),
+                        )
+                    except Exception:
+                        logger.warning("observe on_tick_completed (error) failed", exc_info=True)
+                # canvas:tick 失败(实时画布回放,保留兼容)。
                 await _canvas_emit(
                     _state.canvas_emitter,
                     TickCompletedEvent.create(
                         session_id, "main",
-                        initial_state.metadata.get("canvas_tick_id", ""),
+                        _tick_id,
                         "failed",
                         str(exc),
                     ),

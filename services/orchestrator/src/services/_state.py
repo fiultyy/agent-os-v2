@@ -63,6 +63,12 @@ conversation_registry: Any = None
 # 工厂 emit tick/tool 事件 → WS 推实时画布。None-guard(装配失败不崩主路径)。
 canvas_emitter: Any = None
 
+# ── Observe client (T4 multi-harness-observe) ─────────────────────
+# ObserveClient 实例(engine.py 装配)。chat.py /execute + _node_tool 经此推泛化
+# turn 事件 → observe-service WS ingest。None-guard(observe-service 不可达不崩
+# 主路径,ADR-7 零回归红线)。
+observe_client: Any = None
+
 # ── Context & compression ──────────────────────────────────────────
 
 context_monitor: Any = None
