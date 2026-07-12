@@ -9,17 +9,27 @@ import json
 import sys
 import websockets
 import uuid
+from datetime import datetime, timezone, timedelta
 
 # 测试参数
 WS_URL = "ws://localhost:8002/ws/ingest"
 HARNESS_TYPE = "mock-test"
-SESSION_ID = "ws-e2e-probe"
-HARNESS_ID = "probe1"
+# 唯一 session_id: 每次运行隔离
+SESSION_ID = f"ws-e2e-{uuid.uuid4().hex[:8]}"
+HARNESS_ID = f"probe-{uuid.uuid4().hex[:6]}"
 
-# 生成 turn 序列的 4 个事件
+# 生成 turn 序列的 4 个事件（使用真实 timestamp 递增）
 def build_turn_sequence():
     tick_id = str(uuid.uuid4())
     call_id = str(uuid.uuid4())
+    # 真实时间递增，保证同 session 内严格有序
+    base_time = datetime.now(timezone.utc)
+    timestamps = [
+        base_time.isoformat(),
+        (base_time + timedelta(seconds=1)).isoformat(),
+        (base_time + timedelta(seconds=2)).isoformat(),
+        (base_time + timedelta(seconds=3)).isoformat(),
+    ]
 
     events = [
         # 1. tick_started
@@ -33,7 +43,7 @@ def build_turn_sequence():
                 "tick_id": tick_id,
                 "event_type": "tick_started",
                 "data": {"request": "e2e test turn"},
-                "timestamp": "2026-07-13T00:00:00.000Z"
+                "timestamp": timestamps[0]
             }
         },
         # 2. tool_call
@@ -51,7 +61,7 @@ def build_turn_sequence():
                     "tool_name": "Bash",
                     "arguments": {"command": "echo test"}
                 },
-                "timestamp": "2026-07-13T00:00:01.000Z"
+                "timestamp": timestamps[1]
             }
         },
         # 3. tool_result
@@ -69,7 +79,7 @@ def build_turn_sequence():
                     "result": "test",
                     "error": ""
                 },
-                "timestamp": "2026-07-13T00:00:02.000Z"
+                "timestamp": timestamps[2]
             }
         },
         # 4. tick_completed
@@ -86,9 +96,9 @@ def build_turn_sequence():
                     "status": "success",
                     "response": "e2e test complete",
                     "tool_count": 1,
-                    "duration_ms": 2000.0
+                    "duration_ms": 3000.0
                 },
-                "timestamp": "2026-07-13T00:00:03.000Z"
+                "timestamp": timestamps[3]
             }
         },
     ]
