@@ -19,6 +19,7 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/agents", label: "Agents" },
   { href: "/flows", label: "设计画布", demo: true },
   { href: "/canvas/live", label: "实时画布" },
+  { href: "/observe", label: "观测操作台" },
   { href: "/memory", label: "记忆调试" },
   { href: "/login", label: "登录" },
 ];
