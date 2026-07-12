@@ -276,7 +276,21 @@ class OpenClawGatewayClient:
         # Connect to OpenClaw gateway
         self.gateway_ws = await ws_client.connect(self.gateway_url)
 
-        # Send hello frame
+        # Read gateway auth token (env OPENCLAW_GATEWAY_TOKEN or ~/.openclaw/openclaw.json).
+        # openclaw --auth token mode requires hello.auth.token (frames.ts:65 HelloFrame.auth).
+        auth_token = None
+        try:
+            import os
+            auth_token = os.environ.get("OPENCLAW_GATEWAY_TOKEN")
+            if not auth_token:
+                cfg_path = os.path.expanduser("~/.openclaw/openclaw.json")
+                with open(cfg_path) as f:
+                    cfg = json.load(f)
+                auth_token = cfg.get("gateway", {}).get("auth", {}).get("token")
+        except Exception as e:
+            logger.warning(f"Could not read openclaw gateway token: {e}")
+
+        # Send hello frame (with auth.token for openclaw --auth token mode)
         hello_frame = {
             "minProtocol": PROTOCOL_VERSION,
             "maxProtocol": PROTOCOL_VERSION,
@@ -288,8 +302,13 @@ class OpenClawGatewayClient:
                 "mode": "client",
             },
         }
+        if auth_token:
+            hello_frame["auth"] = {"token": auth_token}
         await self.gateway_ws.send(json.dumps(hello_frame))
-        logger.info("Sent hello to OpenClaw gateway")
+        logger.info(
+            "Sent hello to OpenClaw gateway"
+            + (" (with auth token)" if auth_token else " (no token — gateway may challenge)")
+        )
 
         # Wait for hello-ok response
         hello_resp = await self.gateway_ws.recv()
