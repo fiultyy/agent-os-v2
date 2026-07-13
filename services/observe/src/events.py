@@ -23,7 +23,7 @@ class EventType(str, Enum):
     TICK_COMPLETED = "tick_completed"
     BRANCH_CREATED = "branch_created"  # Optional: agent-os-v2 specific
     BRANCH_MERGED = "branch_merged"    # Optional: agent-os-v2 specific
-    # TOKEN_DELTA = "token_delta"        # Defer P2
+    TOKEN_DELTA = "token_delta"
 
 
 # ── Base Event ───────────────────────────────────────────────────────
@@ -161,6 +161,28 @@ def tick_completed(
             "response": response[:500],
             "tool_count": tool_count,
             "duration_ms": duration_ms,
+        },
+    )
+
+
+def tick_delta(
+    harness_type: str,
+    harness_id: str,
+    session_id: str,
+    tick_id: str,
+    delta_text: str,
+    accumulated_text: str = "",
+) -> ObserveEvent:
+    """Create token_delta event (streaming token deltas)."""
+    return ObserveEvent(
+        harness_type=harness_type,
+        harness_id=harness_id,
+        session_id=session_id,
+        tick_id=tick_id,
+        event_type=EventType.TOKEN_DELTA,
+        data={
+            "delta_text": delta_text,
+            "accumulated_text": accumulated_text,
         },
     )
 

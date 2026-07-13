@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from events import (
     ObserveEvent,
     tick_completed,
+    tick_delta,
     tick_started,
     tool_call,
     tool_result,
@@ -90,7 +91,7 @@ def map_chat_event_to_observe(
     """Map OpenClaw ChatEvent to ObserveEvent.
 
     ChatEvent types:
-    - delta: {state: "delta", deltaText, message, usage} → defer (token_delta)
+    - delta: {state: "delta", deltaText, message, usage} → token_delta (tick_delta)
     - final: {state: "final", message, usage, stopReason} → tick_completed
     - aborted: {state: "aborted", message, stopReason} → tick_completed (status=error)
     - error: {state: "error", message, errorMessage, errorKind, usage, stopReason} → tick_completed (status=error)
@@ -162,10 +163,15 @@ def map_chat_event_to_observe(
             duration_ms=0.0,
         )
 
-    # Map chat delta → defer (token_delta not implemented in P2)
+    # Map chat delta → token_delta (streaming)
     elif state == "delta":
-        # Token streaming deferred in P2
-        return None
+        return tick_delta(
+            harness_type="openclaw",
+            harness_id=harness_id,
+            session_id=session_key,
+            tick_id=tick_id,
+            delta_text=chat_event.get("deltaText", ""),
+        )
 
     logger.warning(f"Unknown chat event state: {state}")
     return None
@@ -257,6 +263,10 @@ class OpenClawGatewayClient:
         # Connection storage (for send_message)
         self.gateway_ws = None
         self.observe_ws = None
+
+        # ponytail: unbounded set (one entry per run_id); clear on session reset if long-lived connection accumulates
+        self._ticks_seen: set = set()
+        self._last_prompt: str = ""
 
         # Event handlers
         self.on_observe_event: Optional[Callable[[ObserveEvent], None]] = None
@@ -395,6 +405,7 @@ class OpenClawGatewayClient:
 
                     # Map chat events
                     if event_name == "chat":
+                        await self._ensure_tick_started(payload)
                         observe_event = map_chat_event_to_observe(
                             payload,
                             self.harness_id,
@@ -421,6 +432,7 @@ class OpenClawGatewayClient:
 
                     # Map agent tool events
                     elif event_name == "agent":
+                        await self._ensure_tick_started(payload)
                         observe_event = map_agent_tool_event(
                             payload,
                             self.harness_id,
@@ -452,6 +464,37 @@ class OpenClawGatewayClient:
             await self.gateway_ws.close()
             await self.observe_ws.close()
             self.running = False
+
+    async def _ensure_tick_started(self, payload: Dict[str, Any]) -> None:
+        """Synthesize + send tick_started on first event for a given runId.
+
+        openclaw emits runId only in event payloads (not at sessions.send time),
+        so tick_started is back-filled on the first chat/agent event of each run.
+        tick_id = runId keeps it consistent with later tool/tick_completed/tick_delta.
+        """
+        run_id = payload.get("runId", "")
+        if not run_id or run_id in self._ticks_seen:
+            return
+        self._ticks_seen.add(run_id)
+
+        event = tick_started(
+            harness_type="openclaw",
+            harness_id=self.harness_id,
+            session_id=self.session_key,
+            tick_id=run_id,
+            request=self._last_prompt,
+        )
+        if self.on_observe_event:
+            if asyncio.iscoroutinefunction(self.on_observe_event):
+                await self.on_observe_event(event)
+            else:
+                self.on_observe_event(event)
+        try:
+            await self.observe_ws.send(
+                json.dumps({"type": "event", "payload": event.to_dict()})
+            )
+        except Exception as e:
+            logger.error(f"Failed to send tick_started to observe-service: {e}")
 
     async def _send_request(
         self,
@@ -494,6 +537,9 @@ class OpenClawGatewayClient:
             params["agentId"] = agent_id
         if thinking:
             params["thinking"] = thinking
+
+        # Record prompt for tick_started synthesis (runId arrives in events, not at send time)
+        self._last_prompt = message
 
         # Send request frame
         await self._send_request(

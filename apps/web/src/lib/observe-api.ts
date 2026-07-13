@@ -28,7 +28,8 @@ export type EventType =
   | "tool_result"
   | "tick_completed"
   | "branch_created"
-  | "branch_merged";
+  | "branch_merged"
+  | "token_delta";
 
 /**
  * Session 信息（对齐 observe-service session_store 实际字段）

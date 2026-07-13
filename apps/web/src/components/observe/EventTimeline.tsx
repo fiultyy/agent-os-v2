@@ -48,10 +48,35 @@ const EVENT_TYPE_CONFIG: Record<
     color: "text-indigo-500",
     label: "分支合并",
   },
+  token_delta: {
+    icon: <span className="text-[10px] font-bold leading-none">δ</span>,
+    color: "text-gray-400",
+    label: "Token",
+  },
+};
+
+const FALLBACK_CONFIG = {
+  icon: <span className="text-[10px]">?</span>,
+  color: "text-gray-400",
+  label: "未知事件",
 };
 
 function EventCard({ event, index }: { event: ObserveEvent; index: number }) {
-  const config = EVENT_TYPE_CONFIG[event.event_type as EventType];
+  // token_delta 高频(每 token 一条),紧凑单行,不走大卡片
+  if (event.event_type === "token_delta") {
+    const text = (event.data.delta_text as string) ?? "";
+    return (
+      <div className="px-3 py-0.5">
+        <div className="flex items-center gap-1.5 truncate font-mono text-[10px] italic text-gray-400">
+          <span className="font-bold leading-none">δ</span>
+          <span className="truncate">{text.slice(0, 120)}</span>
+          <span className="shrink-0 text-gray-300">#{index + 1}</span>
+        </div>
+      </div>
+    );
+  }
+
+  const config = EVENT_TYPE_CONFIG[event.event_type as EventType] ?? FALLBACK_CONFIG;
   const isTickComplete = event.event_type === "tick_completed";
   const status = isTickComplete && (event.data.status as string) === "error";
 
