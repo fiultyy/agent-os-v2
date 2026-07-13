@@ -562,6 +562,15 @@ app.include_router(pitfail_router, prefix="/v1")
 app.include_router(orchestrate_router, prefix="/v1")
 app.include_router(conversations_router, prefix="/v1")
 
+# ── Harness primitive API (ADR-4: orchestrator is the ONLY harness client) ──
+# Thin layer over {claw, claude-code}: sessions CRUD + turn + spawn + switch.
+# No /v1 prefix — primitive endpoints live at root (/h/..., /switch).
+# Event flow: harness → orchestrator (connect+map) → observe /ws/ingest.
+from src.harness import router as harness_router, switch_router as harness_switch_router
+app.include_router(harness_router)
+app.include_router(harness_switch_router)
+logger.info("harness primitive API mounted: /h/{type}/sessions*, /switch")
+
 
 # ── CLI entry point ────────────────────────────────────────────────
 

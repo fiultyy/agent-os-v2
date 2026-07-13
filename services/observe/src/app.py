@@ -1,12 +1,14 @@
 """Observe-Service: FastAPI main application.
 
+纯观测数据服务（ADR-2/ADR-4）：只收，不连任何 harness。
 独立进程，端口 8002：
-- WS ingest /ws/ingest
+- WS ingest /ws/ingest（收 orchestrator 推）
 - WS subscribe /ws/subscribe
 - REST query /sessions/{harness_type}/{session_id}/events
 - Session management /sessions
-- Interactive routing /send (stub)
 - Health /health
+
+驱动能力（send/trigger）已归 orchestrator（唯一 harness 客户端，ADR-4）。
 """
 
 from __future__ import annotations
@@ -76,12 +78,6 @@ class SessionCreate(BaseModel):
     harness_type: str
     session_id: str
     harness_id: str
-
-
-class SendMessage(BaseModel):
-    harness_type: str
-    session_id: str
-    message: str
 
 
 # ── Health ─────────────────────────────────────────────────────────
@@ -168,26 +164,6 @@ async def get_session_events(
         limit=limit,
     )
     return {"events": events}
-
-
-# ── Interactive Routing (Stub) ────────────────────────────────────────
-
-@app.post("/send")
-async def send_message(req: SendMessage):
-    """Route message to gateway (STUB - T2/T3 实现真实连接).
-
-    Contract:
-    - Frontend sends {harness_type, session_id, message}
-    - Observe-service routes to corresponding gateway
-    - Gateway delivers to harness (tmux / ACP / internal client)
-
-    Current behavior: Log only (T2/T3 接入时实现路由逻辑).
-    """
-    logger.info(f"STUB: Route message to {req.harness_type}/{req.session_id}: {req.message[:50]}...")
-    return {
-        "status": "stub",
-        "note": "Interactive routing implemented in T2/T3 (claude-code/openclaw gateways)"
-    }
 
 
 # ── WebSocket Endpoints ──────────────────────────────────────────────
