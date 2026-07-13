@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager
 from typing import Dict, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -57,6 +58,15 @@ app = FastAPI(
     description="Multi-harness turn observation service",
     version="1.0.0",
     lifespan=lifespan,
+)
+
+# CORS: 前端(web:3000)跨域调 observe-service(8002)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 

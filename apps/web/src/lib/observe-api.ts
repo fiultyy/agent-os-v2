@@ -19,6 +19,7 @@ export interface ObserveEvent {
   event_type: EventType;
   data: Record<string, unknown>;
   timestamp: string;
+  created_at?: string;
 }
 
 export type EventType =
@@ -30,21 +31,24 @@ export type EventType =
   | "branch_merged";
 
 /**
- * Session 信息（按 harness 分组）
+ * Session 信息（对齐 observe-service session_store 实际字段）
+ * 服务端返回:harness_type / session_id / harness_id / created_at / last_active
+ * 注意:无 last_event_at,无 event_count(前端按需可选)。
  */
 export interface SessionInfo {
   harness_type: HarnessType;
   session_id: string;
+  harness_id: string;
   created_at: string;
-  last_event_at: string;
-  event_count: number;
+  last_active: string;
+  event_count?: number;
 }
 
 /**
- * 分组 Session 列表响应
+ * 分组 Session 列表响应(GET /sessions/grouped 返回 {sessions_by_harness: {...}})
  */
 export interface GroupedSessions {
-  [harnessType: string]: SessionInfo[];
+  sessions_by_harness: Record<string, SessionInfo[]>;
 }
 
 const OBSERVE_BASE = process.env.NEXT_PUBLIC_OBSERVE_URL || "http://localhost:8002";
@@ -74,28 +78,36 @@ export const observeApi = {
 
   /**
    * 获取分组 session 列表
+   * GET /sessions/grouped 返回 {sessions_by_harness: {<harness>: [sessions]}}
    */
   async getGroupedSessions(): Promise<GroupedSessions> {
     const res = await fetch(`${OBSERVE_BASE}/sessions/grouped`);
     if (!res.ok) {
       throw new Error(`Failed to fetch sessions: ${res.status}`);
     }
-    return res.json();
+    const data = await res.json();
+    return {
+      sessions_by_harness: data?.sessions_by_harness ?? {},
+    };
   },
 
   /**
    * 获取指定 harness 的 session 列表
+   * GET /sessions?harness_type=<h> 返回 {sessions: [...]}
    */
   async getSessions(harnessType: HarnessType): Promise<SessionInfo[]> {
     const res = await fetch(`${OBSERVE_BASE}/sessions?harness_type=${harnessType}`);
     if (!res.ok) {
       throw new Error(`Failed to fetch sessions: ${res.status}`);
     }
-    return res.json();
+    const data = await res.json();
+    const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
+    return sessions as SessionInfo[];
   },
 
   /**
    * 获取历史事件（replay）
+   * GET /sessions/<h>/<sid>/events 返回 {events: [...]}
    */
   async getReplayEvents(
     harnessType: HarnessType,
@@ -112,7 +124,9 @@ export const observeApi = {
     if (!res.ok) {
       throw new Error(`Failed to fetch replay events: ${res.status}`);
     }
-    return res.json();
+    const data = await res.json();
+    const events = Array.isArray(data?.events) ? data.events : [];
+    return events as ObserveEvent[];
   },
 
   /**

@@ -116,12 +116,14 @@ export function SessionList({
                 </span>
                 <span className="flex items-center gap-0.5">
                   <Clock className="h-3 w-3" />
-                  {formatTime(session.last_event_at)}
+                  {formatTime(session.last_active ?? session.created_at)}
                 </span>
               </div>
             </div>
             <div className="mt-1 text-xs text-gray-500">
-              {session.event_count} 事件
+              {typeof session.event_count === "number"
+                ? `${session.event_count} 事件`
+                : session.harness_id}
             </div>
           </button>
         ))}
