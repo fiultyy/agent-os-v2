@@ -99,6 +99,8 @@ export function SessionList({
           <button
             key={session.session_id}
             onClick={() => onSelectSession(session.session_id)}
+            aria-label={`session ${session.session_id.slice(0, 8)}`}
+            aria-pressed={selectedSession === session.session_id}
             className={`w-full rounded-lg border p-2.5 text-left transition-colors ${
               selectedSession === session.session_id
                 ? "border-blue-500 bg-blue-50"
@@ -107,7 +109,7 @@ export function SessionList({
           >
             <div className="flex items-center justify-between">
               <div className="truncate font-mono text-xs">
-                {session.session_id.slice(0, 12)}
+                session {session.session_id.slice(0, 8)}
               </div>
               <div className="flex items-center gap-1 text-xs text-gray-500">
                 <span className="flex items-center gap-0.5">

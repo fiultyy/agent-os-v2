@@ -42,6 +42,8 @@ export function HarnessSelector({
           <button
             key={option.value}
             onClick={() => handleSelect(option.value)}
+            aria-label={`harness ${option.label}`}
+            aria-pressed={selectedHarness === option.value}
             className={`w-full rounded-lg border p-3 text-left transition-colors ${
               selectedHarness === option.value
                 ? "border-blue-500 bg-blue-50"

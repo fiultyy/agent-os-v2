@@ -257,12 +257,18 @@ export function OrchestrationPanel() {
 
         {/* 最终综合输出 */}
         {finalOutput && (
-          <div className="rounded-lg border border-purple-200 bg-purple-50 p-3">
+          <div
+            data-testid="orchestration-final-output"
+            className="rounded-lg border border-purple-200 bg-purple-50 p-3"
+          >
             <div className="mb-1.5 flex items-center gap-2 text-xs font-semibold text-purple-700">
               <Sparkles className="h-4 w-4" />
               综合输出(orchestrator)
             </div>
-            <pre className="whitespace-pre-wrap break-words rounded bg-white p-2 text-xs text-gray-800">
+            <pre
+              data-testid="orchestration-final-output-text"
+              className="whitespace-pre-wrap break-words rounded bg-white p-2 text-xs text-gray-800"
+            >
               {finalOutput}
             </pre>
           </div>
@@ -328,7 +334,11 @@ function NodeLogCard({ log }: { log: NodeLog }) {
     );
 
   return (
-    <div className="rounded-lg border bg-white p-3 text-xs shadow-sm">
+    <div
+      data-testid={`orchestration-node-${log.node}`}
+      data-node={log.node}
+      className="rounded-lg border bg-white p-3 text-xs shadow-sm"
+    >
       <div className="flex items-center gap-2">
         {icon}
         <span className="font-medium">{log.node}</span>
