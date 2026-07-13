@@ -45,8 +45,8 @@
 - 远程 SSH 接入
 
 ### P3+(远期,不阻塞当前)
-- Tauri 桌面壳(transport 换 IPC,TUI/前端代码复用)
-- memory REST 作为独立数据服务(不驱动编排,仅数据)
+- Tauri 桌面壳(**defer 评估**:ratatui TUI 已单 binary 4.1MB 终端原生跨平台,Tauri 壳三方案 — custom backend 重写终端渲染器 / pty+xterm.js(违 ADR-7 甩 web 栈)/ crossterm-pty(仍需渲染层回 xterm)— 均与 ADR-7/ADR-9(d) 冲突或低价值;若重引入需复议 ADR-9(d) transport 作废)
+- memory REST 作为独立数据服务(不驱动编排,仅数据)— **已满足**(/v1 REST 解耦 /h harness,ADR-1 实证)
 
 ---
 
@@ -229,8 +229,8 @@ demo 实证见 `apps/tui-rs/`(flow 横向轨道 + 分支自展开 + stack 纵向
 
 ## 9. 不在本迭代范围(defer)
 
-- **Tauri 桌面壳**(P3+,transport 抽象已留口,IPC 替 REST)
-- **memory REST 重构**(保留现状,仅独立数据服务,不驱动编排)
+- **Tauri 桌面壳**(P3+ **defer**:评估后 ratatui 终端原生单 binary(4.1MB)已足,Tauri 壳三方案均与 ADR-7 甩 web 栈 / ADR-9(d) transport 作废 冲突或低价值;若重引入需复议 ADR-9(d),消除"transport 留口"矛盾)
+- **memory REST 重构**(已满足:/v1 REST 解耦 /h harness,ADR-1 memory 独立数据服务实证;无需拆 service)
 - **现有重编排(agent graph/skills/DAG)重建**(P2+ 在 P0 原语上做 — agent graph 保留暂不用)
 - **token_delta 节流 / observe 容器化**(继承 multi-harness-observe defer)
 
