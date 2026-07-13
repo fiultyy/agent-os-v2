@@ -21,6 +21,8 @@ use serde::Deserialize;
 use std::{collections::HashMap, io, time::Duration};
 
 const OBSERVE: &str = "http://localhost:8002";
+const ORCH: &str = "http://localhost:8001";
+const CLAW_SESSION: &str = "agent:main:main";
 
 // ═══ observe 数据 ════════════════════════════════════════════════════
 
@@ -61,6 +63,14 @@ fn fetch_events(h: &str, sid: &str) -> Option<Vec<ObserveEvent>> {
         .into_json::<EventsResp>()
         .ok()
         .map(|e| e.events)
+}
+
+/// 触发一个 turn(POST /h/claw/sessions/{sid}/turn)。返回 server 回的 status 文本。
+fn trigger_turn(sid: &str, message: &str) -> Option<String> {
+    let resp = ureq::post(&format!("{}/h/claw/sessions/{}/turn", ORCH, sid))
+        .send_json(serde_json::json!({ "message": message }))
+        .ok()?;
+    resp.into_string().ok()
 }
 
 // ═══ mock turn(flow 演示)════════════════════════════════════════════
@@ -158,6 +168,7 @@ fn fmt_val(d: &HashMap<String, serde_json::Value>, k: &str) -> String {
 enum Mode {
     Flow,
     Stack,
+    Control,
 }
 
 struct App {
@@ -166,6 +177,10 @@ struct App {
     flat: Vec<Session>,
     cursor: usize,
     events: HashMap<String, Vec<ObserveEvent>>,
+    /// 上次触发 turn 的 server 回执(渲染到 control 栏)。
+    turn_status: Option<String>,
+    /// control 栏可编辑的 message(默认固定,可手动改)。
+    turn_msg: String,
 }
 impl App {
     fn new() -> Self {
@@ -175,6 +190,8 @@ impl App {
             flat: vec![],
             cursor: 0,
             events: HashMap::new(),
+            turn_status: None,
+            turn_msg: "what is 8+8?".to_string(),
         }
     }
     fn set_sessions(&mut self, sg: SessionsGrouped) {
@@ -212,6 +229,20 @@ impl App {
             self.fetch_current();
         }
     }
+    /// 拉 claw session 的 observe events(harness_type 在 observe 侧 = openclaw)。
+    fn fetch_claw_events(&mut self) {
+        if let Some(evs) = fetch_events("openclaw", CLAW_SESSION) {
+            self.events
+                .insert("openclaw/agent:main:main".to_string(), evs);
+        }
+    }
+    /// control 栏触发 turn:POST /h/claw/sessions/agent:main:main/turn,然后拉新 events。
+    fn do_turn(&mut self) {
+        let st = trigger_turn(CLAW_SESSION, &self.turn_msg);
+        self.turn_status = st;
+        // turn 异步,稍后刷新会看到新 tick_started/tick_completed。
+        self.fetch_claw_events();
+    }
 }
 
 // ═══ draw ═══════════════════════════════════════════════════════════
@@ -222,16 +253,20 @@ fn draw(f: &mut Frame, app: &App) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)])
         .split(area);
-    let mode_str = if app.mode == Mode::Flow { "FLOW ◐ 横向轨道" } else { "STACK ☰ 纵向堆叠" };
+    let mode_str = match app.mode {
+        Mode::Flow => "FLOW ◐ 横向轨道",
+        Mode::Stack => "STACK ☰ 纵向堆叠",
+        Mode::Control => "CONTROL ⌘ orchestrator",
+    };
     let title = Paragraph::new(format!(" v2 harness-bridge(ratatui)· {} · [tab 切换]", mode_str))
         .style(Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD));
     f.render_widget(title, chunks[0]);
-    if app.mode == Mode::Flow {
-        draw_flow(f, chunks[1], app);
-    } else {
-        draw_stack(f, chunks[1], app);
+    match app.mode {
+        Mode::Flow => draw_flow(f, chunks[1], app),
+        Mode::Stack => draw_stack(f, chunks[1], app),
+        Mode::Control => draw_control(f, chunks[1], app),
     }
-    let hint = Paragraph::new(" tab 切视图 · j/k 选 session · r 刷新 · q quit")
+    let hint = Paragraph::new(" tab 切视图 · c control · j/k 选 session · t trigger turn · r 刷新 · q quit")
         .style(Style::default().fg(Color::DarkGray));
     f.render_widget(hint, chunks[2]);
 }
@@ -239,50 +274,80 @@ fn draw(f: &mut Frame, app: &App) {
 fn draw_flow(f: &mut Frame, area: Rect, app: &App) {
     let mut lines: Vec<Line> = vec![
         Line::from(Span::styled(
-            " flow · 横向轨道流(turn 节点 → 时间轴,tool 分支自展开)".to_string(),
+            " flow · 横向轨道流(turn 节点 → 时间轴)".to_string(),
             Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
         )),
         Line::raw(""),
     ];
-    let t = demo();
-    lines.extend(flow_lines(&t, 0));
-    lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled(
-        " observe 真实 turn(openclaw agent:main:main)".to_string(),
-        Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::raw(""));
+    // 主:observe 真实 lane;observe 不可达时 mock demo 作 fallback。
     match app.events.get("openclaw/agent:main:main") {
-        Some(evs) => lines.push(observe_lane(evs)),
-        None => lines.push(Line::from(Span::raw("(切到该 session 拉 events)").style(Style::default().fg(Color::DarkGray)))),
+        Some(evs) => {
+            lines.push(Line::from(Span::styled(
+                format!(" observe 真实 turn · openclaw/{} · {} events", CLAW_SESSION, evs.len()),
+                Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::raw(""));
+            lines.extend(observe_lanes(evs));
+        }
+        None => {
+            lines.push(Line::from(Span::styled(
+                " (observe 不可达 · mock demo fallback)".to_string(),
+                Style::default().fg(Color::DarkGray),
+            )));
+            lines.push(Line::raw(""));
+            let t = demo();
+            lines.extend(flow_lines(&t, 0));
+        }
     }
     f.render_widget(Paragraph::new(lines), area);
 }
 
-fn observe_lane(evs: &[ObserveEvent]) -> Line<'static> {
-    let mut spans: Vec<Span> = vec![];
-    for (i, e) in evs.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::raw("───").style(Style::default().fg(Color::DarkGray)));
+/// 把 observe 真事件渲染成横向 flow lane:每个 tick 一行,
+/// `● request ── δdelta ── ✓ response`。按 tick_id 分组,同 tick 横向排开。
+fn observe_lanes(evs: &[ObserveEvent]) -> Vec<Line<'static>> {
+    // 按 tick_id 分组,保持首次出现顺序。
+    let mut order: Vec<String> = vec![];
+    let mut groups: std::collections::HashMap<String, Vec<&ObserveEvent>> = std::collections::HashMap::new();
+    for e in evs {
+        let key = if e.tick_id.is_empty() { format!("__noid_{}", order.len()) } else { e.tick_id.clone() };
+        if !groups.contains_key(&key) {
+            order.push(key.clone());
         }
-        let (sym, color, bold) = match e.event_type.as_str() {
-            "tick_started" => ("● START", Color::Green, true),
-            "tool_call" => ("⚒ TOOL", Color::Blue, false),
-            "tool_result" => ("◷ RESULT", Color::Cyan, false),
-            "token_delta" => ("δ", Color::DarkGray, false),
-            "tick_completed" => ("✓ DONE", Color::Magenta, true),
-            other => {
-                spans.push(Span::raw(other.to_string()));
-                continue;
-            }
-        };
-        let mut st = Style::default().fg(color);
-        if bold {
-            st = st.add_modifier(Modifier::BOLD);
-        }
-        spans.push(Span::styled(sym.to_string(), st));
+        groups.entry(key).or_default().push(e);
     }
-    Line::from(spans)
+    let mut out: Vec<Line> = vec![];
+    for k in &order {
+        let Some(grp) = groups.get(k) else { continue };
+        let mut spans: Vec<Span> = vec![];
+        for (i, e) in grp.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::raw("───").style(Style::default().fg(Color::DarkGray)));
+            }
+            let (sym, color, bold, body) = match e.event_type.as_str() {
+                "tick_started" => ("●", Color::Green, true, fmt_val(&e.data, "request")),
+                "tool_call" => ("⚒", Color::Blue, false, fmt_val(&e.data, "tool_name")),
+                "tool_result" => ("◷", Color::Cyan, false, fmt_val(&e.data, "result")),
+                "token_delta" => ("δ", Color::DarkGray, false, fmt_val(&e.data, "delta_text")),
+                "tick_completed" => ("✓", Color::Magenta, true, fmt_val(&e.data, "response")),
+                other => (other, Color::DarkGray, false, String::new()),
+            };
+            let mut st = Style::default().fg(color);
+            if bold {
+                st = st.add_modifier(Modifier::BOLD);
+            }
+            let label = if body.is_empty() { sym.to_string() } else { format!("{} {}", sym, trunc(&body, 20)) };
+            spans.push(Span::styled(label, st));
+        }
+        out.push(Line::from(spans));
+    }
+    out
+}
+
+#[allow(dead_code)]
+fn observe_lane(evs: &[ObserveEvent]) -> Line<'static> {
+    // 兼容旧调用;control 视图用 observe_lanes[0] 风格,这里保留单行聚合。
+    let lanes = observe_lanes(evs);
+    lanes.into_iter().next().unwrap_or_else(|| Line::raw("(no events)"))
 }
 
 fn draw_stack(f: &mut Frame, area: Rect, app: &App) {
@@ -341,22 +406,94 @@ fn stack_event_line(e: &ObserveEvent) -> Line<'static> {
     ])
 }
 
+// ═══ control 视图(orchestrator 原语控制)══════════════════════════════
+
+fn draw_control(f: &mut Frame, area: Rect, app: &App) {
+    // 上:控制栏(session + message + 上次 turn 回执),下:最近 turn 的 flow lane。
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(6), Constraint::Min(1)])
+        .split(area);
+
+    let status_disp = app.turn_status.clone().unwrap_or_else(|| "(未触发)".to_string());
+    let bar = vec![
+        Line::from(Span::styled(
+            " CONTROL · orchestrator 原语".to_string(),
+            Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::styled(" session   ", Style::default().fg(Color::DarkGray)),
+            Span::styled(CLAW_SESSION.to_string(), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(vec![
+            Span::styled(" message   ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("\"{}\"", app.turn_msg), Style::default().fg(Color::Cyan)),
+            Span::styled("  [t 触发 turn]", Style::default().fg(Color::Green)),
+        ]),
+        Line::from(vec![
+            Span::styled(" last turn ", Style::default().fg(Color::DarkGray)),
+            Span::styled(trunc(&status_disp, 80), Style::default().fg(Color::White)),
+        ]),
+        Line::raw(""),
+    ];
+    f.render_widget(Paragraph::new(bar), chunks[0]);
+
+    // 下:最近 turn 的真实 flow lane(openclaw 真事件)。
+    let mut lane_lines: Vec<Line> = vec![Line::from(Span::styled(
+        " flow lane · openclaw 真实 turn(tick_started → token_delta → tick_completed)"
+            .to_string(),
+        Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
+    ))];
+    lane_lines.push(Line::raw(""));
+    match app.events.get("openclaw/agent:main:main") {
+        Some(evs) => {
+            lane_lines.push(observe_lane(evs));
+            lane_lines.push(Line::raw(""));
+            lane_lines.push(Line::from(Span::styled(
+                format!(" ({} events)", evs.len()),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        None => lane_lines.push(Line::from(Span::raw("(observe 不可达,按 r 重试)").style(Style::default().fg(Color::DarkGray)))),
+    }
+    f.render_widget(Paragraph::new(lane_lines), chunks[1]);
+}
+
 // ═══ run / dump / main ══════════════════════════════════════════════
 
 fn run<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
+    let mut tick = 0u32;
     loop {
         terminal.draw(|f| draw(f, &app))?;
+        // flow/control 模式下周期性拉 claw events,让 lane 实时跟进 turn。
+        // ponytail: 固定 4 tick(~2s)轮询,observe 挂了静默跳过。
+        if app.mode == Mode::Flow || app.mode == Mode::Control {
+            tick = tick.wrapping_add(1);
+            if tick % 4 == 0 {
+                app.fetch_claw_events();
+            }
+        }
         if event::poll(Duration::from_millis(500))? {
             if let Event::Key(k) = event::read()? {
                 match k.code {
                     KeyCode::Char('q') => return Ok(()),
-                    KeyCode::Tab => app.mode = if app.mode == Mode::Flow { Mode::Stack } else { Mode::Flow },
+                    KeyCode::Tab => app.mode = match app.mode {
+                        Mode::Flow => Mode::Stack,
+                        Mode::Stack => Mode::Control,
+                        Mode::Control => Mode::Flow,
+                    },
+                    KeyCode::Char('1') => app.mode = Mode::Flow,
+                    KeyCode::Char('2') => app.mode = Mode::Stack,
+                    KeyCode::Char('3') => app.mode = Mode::Control,
+                    KeyCode::Char('c') => app.mode = Mode::Control,
                     KeyCode::Char('j') | KeyCode::Down => app.cursor_down(),
                     KeyCode::Char('k') | KeyCode::Up => app.cursor_up(),
+                    KeyCode::Char('t') => app.do_turn(),
                     KeyCode::Char('r') => {
                         if let Some(sg) = fetch_sessions() {
                             app.set_sessions(sg);
                         }
+                        app.fetch_claw_events();
                     }
                     _ => {}
                 }
@@ -384,15 +521,20 @@ fn run_dump() {
     if let Some(sg) = fetch_sessions() {
         app.set_sessions(sg);
     }
-    if let Some(evs) = fetch_events("openclaw", "agent:main:main") {
-        app.events.insert("openclaw/agent:main:main".to_string(), evs);
+    if let Some(evs) = fetch_events("openclaw", CLAW_SESSION) {
+        app.events
+            .insert("openclaw/agent:main:main".to_string(), evs);
     }
-    println!("═══ ratatui · FLOW 视图(横向轨道流 + mock 分支)═══");
+    println!("═══ ratatui · FLOW 视图(横向轨道流,observe 真数据 lane)═══");
     app.mode = Mode::Flow;
     terminal.draw(|f| draw(f, &app)).unwrap();
     print_buffer(&terminal);
     println!("\n═══ ratatui · STACK 视图(纵向堆叠,observe 真数据)═══");
     app.mode = Mode::Stack;
+    terminal.draw(|f| draw(f, &app)).unwrap();
+    print_buffer(&terminal);
+    println!("\n═══ ratatui · CONTROL 视图(orchestrator 原语 + flow lane)═══");
+    app.mode = Mode::Control;
     terminal.draw(|f| draw(f, &app)).unwrap();
     print_buffer(&terminal);
 }
