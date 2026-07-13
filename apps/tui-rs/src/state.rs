@@ -25,7 +25,7 @@
 
 use crate::kitty::TermCap;
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tui_popup::PopupState;
 
@@ -74,6 +74,90 @@ pub fn fetch_events(h: &str, sid: &str) -> Option<Vec<ObserveEvent>> {
         .into_json::<EventsResp>()
         .ok()
         .map(|e| e.events)
+}
+
+// ═══ flow engine(ADR-1 P2:turn 链/分支/DAG on trigger_turn)══════════
+// 镜像 services/orchestrator/src/harness/flow.py 的 FlowDef JSON DSL。
+// 调度在 orche 侧;TUI 只 create/run/poll 状态 + 渲染 DAG。
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct FlowCondition {
+    pub field: String, // response | status
+    pub op: String,    // contains | eq
+    pub value: String,
+}
+#[derive(Serialize, Deserialize, Clone)]
+pub struct FlowNode {
+    pub id: String,
+    pub harness: String, // claw | claude-code
+    #[serde(default)]
+    pub session_id: Option<String>,
+    pub message: String,
+}
+#[derive(Serialize, Deserialize, Clone)]
+pub struct FlowEdge {
+    pub from: String,
+    pub to: String,
+    #[serde(default)]
+    pub condition: Option<FlowCondition>,
+}
+/// FlowDef 既是 create POST body,也用于本地渲染 DAG 拓扑。
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct FlowDef {
+    pub nodes: Vec<FlowNode>,
+    #[serde(default)]
+    pub edges: Vec<FlowEdge>,
+}
+
+/// GET /h/flows/{id} 返回的单节点运行态。
+#[derive(Deserialize, Clone, Default)]
+pub struct FlowNodeState {
+    pub id: String,
+    pub status: String, // pending | running | completed | failed | skipped
+    #[serde(default)]
+    pub response: String,
+    #[serde(default, rename = "status_code")]
+    pub status_code: String,
+}
+/// GET /h/flows/{id} → flow 级 + 每 node 状态。
+#[derive(Deserialize, Clone, Default)]
+pub struct FlowStatus {
+    pub flow_id: String,
+    pub status: String, // pending | running | completed | failed
+    #[serde(default)]
+    pub nodes: HashMap<String, FlowNodeState>,
+}
+
+/// POST /h/flows 回执。
+#[derive(Deserialize)]
+struct CreateFlowResp {
+    flow_id: String,
+}
+
+/// 创建 flow(POST /h/flows)。返回 flow_id。
+pub fn create_flow(def: &FlowDef) -> Option<String> {
+    let body = serde_json::to_value(def).ok()?;
+    let v: serde_json::Value = ureq::post(&format!("{}/h/flows", ORCH))
+        .send_json(body)
+        .ok()?
+        .into_json()
+        .ok()?;
+    v.get("flow_id").and_then(|x| x.as_str()).map(|s| s.to_string())
+}
+/// 异步跑 flow(POST /h/flows/{id}/run)。服务端立即返回,observe 收 flow_* 事件。
+pub fn run_flow(flow_id: &str) -> Option<String> {
+    let resp = ureq::post(&format!("{}/h/flows/{}/run", ORCH, flow_id))
+        .send_string("")
+        .ok()?;
+    resp.into_string().ok()
+}
+/// 拉 flow 状态(GET /h/flows/{id})。orche 不可达返回 None。
+pub fn fetch_flow(flow_id: &str) -> Option<FlowStatus> {
+    ureq::get(&format!("{}/h/flows/{}", ORCH, flow_id))
+        .call()
+        .ok()?
+        .into_json::<FlowStatus>()
+        .ok()
 }
 
 /// 触发一个 turn(POST /h/{type}/sessions/{sid}/turn)。type∈{claw,claude-code}。
@@ -149,6 +233,53 @@ pub fn trunc(s: &str, n: usize) -> String {
     }
 }
 
+// ═══ flow presets(ADR-1 P2:turn 链/分支/DAG 演示拓扑)══════════════
+// 给 control mode 一键创建 + run。真实 harness 消息由 orche 触发 turn。
+
+pub enum FlowPreset {
+    Chain,   // A → B 单链(两 claw turn)
+    Branch,  // A → B if cond else C
+    Dag,     // A,C 并行 start → B(入度 2,合并)
+}
+
+/// 按预设构造一个 FlowDef。session_id=None 让 orche 自动建 session。
+pub fn preset_flow(p: FlowPreset, msg: &str) -> FlowDef {
+    fn n(id: &str, h: &str, m: &str) -> FlowNode {
+        FlowNode { id: id.to_string(), harness: h.to_string(), session_id: None, message: m.to_string() }
+    }
+    fn e(from: &str, to: &str) -> FlowEdge {
+        FlowEdge { from: from.to_string(), to: to.to_string(), condition: None }
+    }
+    match p {
+        FlowPreset::Chain => FlowDef {
+            nodes: vec![n("A", "claw", msg), n("B", "claw", "summarize the last reply in one line")],
+            edges: vec![e("A", "B")],
+        },
+        FlowPreset::Branch => FlowDef {
+            nodes: vec![n("A", "claw", msg), n("B", "claw", "reply: yes branch"), n("C", "claw", "reply: no branch")],
+            edges: vec![
+                FlowEdge { from: "A".into(), to: "B".into(),
+                    condition: Some(FlowCondition { field: "response".into(), op: "contains".into(), value: "1".into() }) },
+                FlowEdge { from: "A".into(), to: "C".into(), condition: None },
+            ],
+        },
+        FlowPreset::Dag => FlowDef {
+            nodes: vec![n("A", "claw", msg), n("C", "claw", "what is 2+2?"),
+                        n("B", "claw", "merge: combine both prior replies")],
+            // B 入度 2 → A,C 都完成才触发(DAG 合并节点)
+            edges: vec![e("A", "B"), e("C", "B")],
+        },
+    }
+}
+
+/// TUI 跟踪的 flow:create 时入表,Tick 周期 poll GET /h/flows/{id} 更新状态。
+#[derive(Clone)]
+pub struct TrackedFlow {
+    pub flow_id: String,
+    pub def: FlowDef,
+    pub status: Option<FlowStatus>,
+}
+
 // ═══ base panel(P1 三视图)══════════════════════════════════════════
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -160,7 +291,7 @@ pub enum Panel {
 impl Panel {
     pub fn label(self) -> &'static str {
         match self {
-            Panel::Flow => "FLOW ◐ 横向轨道",
+            Panel::Flow => "FLOW ◐ 编排 DAG",
             Panel::Stack => "STACK ☰ 纵向堆叠",
             Panel::Control => "CONTROL ⌘ orchestrator",
         }
@@ -232,6 +363,10 @@ pub struct App {
     pub term: TermCap,
     /// 上次 layout 的终端尺寸(Resize 时重算)。
     pub size: (u16, u16),
+    /// P2 flow:已 create 的 flow(id + def + 上次 poll 状态)。j/k 在 flow panel 内选。
+    pub flows: Vec<TrackedFlow>,
+    /// flow panel cursor(选哪个 tracked flow 看 DAG)。turn_msg 在 control mode 复用作 flow 首节点 message。
+    pub flow_cursor: usize,
 }
 
 impl App {
@@ -248,6 +383,8 @@ impl App {
             term,
             size: (0, 0),
             instances: HashMap::new(),
+            flows: vec![],
+            flow_cursor: 0,
         }
     }
 
@@ -346,6 +483,66 @@ impl App {
         self.fetch_current();
     }
 
+    // ── flow 操作(P2 编排:turn 链/分支/DAG)──────────────────────
+
+    /// 创建一个预设 flow 并入表(不 run)。返回 flow_id 或错误文案。
+    pub fn create_preset_flow(&mut self, p: FlowPreset) -> String {
+        let def = preset_flow(p, &self.turn_msg);
+        match create_flow(&def) {
+            Some(id) => {
+                self.flows.push(TrackedFlow { flow_id: id.clone(), def, status: fetch_flow(&id) });
+                self.flow_cursor = self.flows.len().saturating_sub(1);
+                self.turn_status = Some(format!("flow created: {}", id));
+                id
+            }
+            None => {
+                self.turn_status = Some("create flow 失败(orche :8001 不可达?)".to_string());
+                String::new()
+            }
+        }
+    }
+    /// run 当前 cursor 的 tracked flow(POST /h/flows/{id}/run)。
+    pub fn run_current_flow(&mut self) {
+        let Some(tf) = self.flows.get(self.flow_cursor).cloned() else {
+            self.turn_status = Some("(无 flow,先 f 创建)".to_string());
+            return;
+        };
+        let st = run_flow(&tf.flow_id);
+        self.turn_status = Some(st.unwrap_or_else(|| "run flow 失败".to_string()));
+        if let Some(s) = fetch_flow(&tf.flow_id) {
+            if let Some(t) = self.flows.get_mut(self.flow_cursor) {
+                t.status = Some(s);
+            }
+        }
+    }
+    /// Tick:刷新所有非终态 flow 的状态(running/pending → poll)。
+    /// ponytail: 终态(completed/failed)不再 poll 省请求。
+    pub fn refresh_flows(&mut self) {
+        for tf in self.flows.iter_mut() {
+            let terminal = tf.status.as_ref().map(|s| s.status == "completed" || s.status == "failed").unwrap_or(false);
+            if terminal {
+                continue;
+            }
+            if let Some(s) = fetch_flow(&tf.flow_id) {
+                tf.status = Some(s);
+            }
+        }
+    }
+    pub fn flow_cursor_down(&mut self) {
+        if self.flow_cursor + 1 < self.flows.len() {
+            self.flow_cursor += 1;
+        }
+    }
+    pub fn flow_cursor_up(&mut self) {
+        if self.flow_cursor > 0 {
+            self.flow_cursor -= 1;
+        }
+    }
+    /// 当前 tracked flow 的状态节点(给 render 查 node 状态)。
+    pub fn current_flow(&self) -> Option<&TrackedFlow> {
+        self.flows.get(self.flow_cursor)
+    }
+
     // ── 弹窗栈操作 ──────────────────────────────────────────────
 
     pub fn open_popup(&mut self, p: Popup) {
@@ -377,6 +574,7 @@ impl App {
             format!(" poll_interval={}ms", self.term.poll_interval.as_millis()),
             "".to_string(),
             " 键位:tab 切 base panel · e raw exec · s spawn 多实例 · p 弹窗 · ?/h help · q quit".to_string(),
+            " flow:f 链 / G 分支 / D DAG 创建 · R 运行 · j/k 切 flow(flow panel)".to_string(),
             " 弹窗:esc/enter 关闭 · 鼠标拖拽标题栏 · 右键 base panel 弹 context menu".to_string(),
         ];
         if !self.term.hint.is_empty() {
@@ -403,6 +601,10 @@ impl App {
                 // ponytail: 固定计数轮询 claw events,observe 挂了静默跳过(复用 P1 逻辑)。
                 if self.panel == Panel::Flow || self.panel == Panel::Control {
                     self.fetch_claw_events();
+                }
+                // P2 flow:周期 poll 非终态 flow 的 GET /h/flows/{id}(实时 node 状态)。
+                if !self.flows.is_empty() {
+                    self.refresh_flows();
                 }
             }
             AppEvent::Key(k) => {
@@ -509,11 +711,40 @@ impl App {
                 false
             }
             KeyCode::Char('j') | KeyCode::Down => {
-                self.cursor_down();
+                // P2 flow panel:j/k 切 flow cursor;其余 panel 走 session cursor。
+                if self.panel == Panel::Flow {
+                    self.flow_cursor_down();
+                } else {
+                    self.cursor_down();
+                }
                 false
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.cursor_up();
+                if self.panel == Panel::Flow {
+                    self.flow_cursor_up();
+                } else {
+                    self.cursor_up();
+                }
+                false
+            }
+            KeyCode::Char('f') => {
+                // P2 flow:create 预设链 flow(A→B)。
+                self.create_preset_flow(FlowPreset::Chain);
+                false
+            }
+            KeyCode::Char('G') => {
+                // P2 flow:create 预设分支 flow(A→B if cond else C)。
+                self.create_preset_flow(FlowPreset::Branch);
+                false
+            }
+            KeyCode::Char('D') => {
+                // P2 flow:create 预设 DAG(A,C 并行 → B 合并)。
+                self.create_preset_flow(FlowPreset::Dag);
+                false
+            }
+            KeyCode::Char('R') => {
+                // P2 flow:run 当前 cursor flow(POST /h/flows/{id}/run)。
+                self.run_current_flow();
                 false
             }
             KeyCode::Char('t') => {
@@ -564,5 +795,48 @@ impl App {
             .get(self.cursor)
             .map(|s| s.session_id.clone())
             .unwrap_or_else(|| "(无 session)".to_string())
+    }
+}
+
+// ═══ self-check:FlowStatus 反序列化(orche 契约)+ preset 拓扑 ═════════
+// 唯一非平凡逻辑:serde 字段映射 drift 即 break。preset 的入度/边数验证拓扑正确。
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flow_status_parses_orchestrator_payload() {
+        // 真实 GET /h/flows/{id} 返回的形状(含 error 字段,serde 忽略)。
+        let raw = r#"{"flow_id":"flow_abc","status":"running","nodes":{"A":{"id":"A","status":"completed","response":"16","status_code":"success","error":""},"B":{"id":"B","status":"pending","response":"","status_code":"","error":""}},"started_at":"t","finished_at":null}"#;
+        let s: FlowStatus = serde_json::from_str(raw).unwrap();
+        assert_eq!(s.flow_id, "flow_abc");
+        assert_eq!(s.status, "running");
+        assert_eq!(s.nodes.len(), 2);
+        assert_eq!(s.nodes["A"].status, "completed");
+        assert_eq!(s.nodes["A"].response, "16");
+        assert_eq!(s.nodes["B"].status, "pending");
+    }
+
+    #[test]
+    fn preset_dag_has_merge_node_with_indegree_2() {
+        let def = preset_flow(FlowPreset::Dag, "m");
+        // DAG:A,C start → B 合并(B 入度 2)。
+        assert_eq!(def.nodes.len(), 3);
+        let mut indeg: HashMap<&str, usize> = def.nodes.iter().map(|n| (n.id.as_str(), 0)).collect();
+        for e in &def.edges {
+            *indeg.get_mut(e.to.as_str()).unwrap() += 1;
+        }
+        assert_eq!(indeg["A"], 0);
+        assert_eq!(indeg["C"], 0);
+        assert_eq!(indeg["B"], 2, "B is the merge node (indegree 2)");
+    }
+
+    #[test]
+    fn preset_branch_has_one_conditional_edge() {
+        let def = preset_flow(FlowPreset::Branch, "m");
+        let conds: Vec<_> = def.edges.iter().filter(|e| e.condition.is_some()).collect();
+        assert_eq!(conds.len(), 1, "exactly one conditional edge (A→B if response contains 1)");
+        let uncond: Vec<_> = def.edges.iter().filter(|e| e.condition.is_none()).collect();
+        assert_eq!(uncond.len(), 1, "one unconditional edge (A→C else)");
     }
 }

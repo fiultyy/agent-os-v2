@@ -7,7 +7,7 @@
 //! 仅把外层 draw() 改成分层调度 + 弹窗栈叠加渲染。
 
 use crate::components;
-use crate::state::{fmt_val, trunc, App, ObserveEvent, Panel};
+use crate::state::{fmt_val, trunc, App, ObserveEvent, Panel, TrackedFlow};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -191,33 +191,201 @@ fn flat_tick_lanes(evs: &[&ObserveEvent]) -> Vec<Line<'static>> {
 pub fn draw_flow(f: &mut Frame, area: Rect, app: &App) {
     let mut lines: Vec<Line> = vec![
         Line::from(Span::styled(
-            " flow · 横向轨道流(turn 节点 → 时间轴)".to_string(),
+            " flow · 编排 DAG(turn 链 / 分支 / DAG on trigger_turn)".to_string(),
             Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
         )),
         Line::raw(""),
     ];
-    match app.events.get("openclaw/agent:main:main") {
-        Some(evs) => {
-            let n_inst = app.instance_count("openclaw", crate::state::CLAW_SESSION);
-            let inst_tag = if n_inst >= 2 { format!(" · {} 实例(多实例 lane)", n_inst) } else { String::new() };
-            lines.push(Line::from(Span::styled(
-                format!(" observe 真实 turn · openclaw/{} · {} events{}", crate::state::CLAW_SESSION, evs.len(), inst_tag),
-                Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
-            )));
-            lines.push(Line::raw(""));
-            lines.extend(observe_lanes(evs));
+
+    if app.flows.is_empty() {
+        // 无 flow:create prompt(control mode 预设 + DSL)。
+        lines.push(Line::from(Span::styled(
+            " (无 flow · 在 control/flow panel 按 f/g/D 创建预设 · R 运行)".to_string(),
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            " 预设: f 链 A→B  ·  G 分支 A→B if cond else C  ·  D DAG A,C→B(合并)".to_string(),
+            Style::default().fg(Color::Cyan),
+        )));
+        lines.push(Line::from(Span::styled(
+            " DSL(POST /h/flows):{nodes:[{id,harness,message}],edges:[{from,to,condition?}]}".to_string(),
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            " ── fallback:observe 真实 turn lane(openclaw 单 session)──".to_string(),
+            Style::default().fg(Color::DarkGray),
+        )));
+        match app.events.get("openclaw/agent:main:main") {
+            Some(evs) => lines.extend(observe_lanes(evs)),
+            None => {
+                let t = demo();
+                lines.extend(flow_lines(&t, 0));
+            }
         }
-        None => {
-            lines.push(Line::from(Span::styled(
-                " (observe 不可达 · mock demo fallback)".to_string(),
-                Style::default().fg(Color::DarkGray),
-            )));
-            lines.push(Line::raw(""));
-            let t = demo();
-            lines.extend(flow_lines(&t, 0));
-        }
+        f.render_widget(Paragraph::new(lines), area);
+        return;
+    }
+
+    // flow 选择条 + 当前 flow DAG。
+    let cur = app.flow_cursor;
+    lines.push(flow_selector_line(app));
+    lines.push(Line::raw(""));
+
+    if let Some(tf) = app.current_flow() {
+        lines.extend(flow_dag_lines(tf, cur));
     }
     f.render_widget(Paragraph::new(lines), area);
+}
+
+/// flow 选择条:[cur+1/N] flow_xxxx · status · nodes M/edges K。
+fn flow_selector_line(app: &App) -> Line<'static> {
+    let n = app.flows.len();
+    let cur = app.flow_cursor + 1;
+    let mut spans: Vec<Span> = vec![
+        Span::styled(format!(" [{}/{}] ", cur, n), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+    ];
+    if let Some(tf) = app.current_flow() {
+        let st = tf.status.as_ref().map(|s| s.status.as_str()).unwrap_or("unknown");
+        let st_color = match st {
+            "running" => Color::Green,
+            "completed" => Color::Magenta,
+            "failed" => Color::Red,
+            _ => Color::DarkGray,
+        };
+        spans.push(Span::styled(trunc(&tf.flow_id, 20), Style::default().fg(Color::Cyan)));
+        spans.push(Span::raw(" · "));
+        spans.push(Span::styled(st.to_string(), Style::default().fg(st_color).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(
+            format!(" · {} nodes · {} edges", tf.def.nodes.len(), tf.def.edges.len()),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    spans.push(Span::styled("  [j/k 切 flow · R run]", Style::default().fg(Color::DarkGray)));
+    Line::from(spans)
+}
+
+/// 把一个 TrackedFlow 渲染成 DAG 拓扑 + 每 node 状态。
+/// 分层:BFS 从入度 0 节点起,每层一行横向;边标 ── 或条件(field op value)。
+fn flow_dag_lines(tf: &TrackedFlow, _cur: usize) -> Vec<Line<'static>> {
+    let def = &tf.def;
+    let status = tf.status.as_ref();
+
+    // BFS 分层:level[node] = max(level[predecessor]) + 1。
+    let mut level: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    // 入度
+    let mut indeg: std::collections::HashMap<&str, usize> = def.nodes.iter().map(|n| (n.id.as_str(), 0)).collect();
+    for e in &def.edges {
+        *indeg.entry(e.to.as_str()).or_insert(0) += 1;
+    }
+    let mut queue: Vec<&str> = indeg.iter().filter(|(_, d)| **d == 0).map(|(k, _)| *k).collect();
+    queue.sort();
+    for &s in &queue {
+        level.insert(s, 0);
+    }
+    // ponytail: 简化拓扑排序——反复扫描直到稳定(DAG 无环,flow.py 已有超时兜底)。
+    loop {
+        let mut progressed = false;
+        for e in &def.edges {
+            if let Some(&lf) = level.get(e.from.as_str()) {
+                let entry = level.entry(e.to.as_str()).or_insert(0);
+                if lf + 1 > *entry {
+                    *entry = lf + 1;
+                    progressed = true;
+                }
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    // 任何未被赋值的节点(孤立)放 level 0。
+    for n in &def.nodes {
+        level.entry(n.id.as_str()).or_insert(0);
+    }
+    let max_level = level.values().copied().max().unwrap_or(0);
+
+    let mut out: Vec<Line> = vec![];
+    for lvl in 0..=max_level {
+        let mut layer_nodes: Vec<&crate::state::FlowNode> =
+            def.nodes.iter().filter(|n| level.get(n.id.as_str()).copied() == Some(lvl)).collect();
+        layer_nodes.sort_by_key(|n| n.id.as_str());
+        if layer_nodes.is_empty() {
+            continue;
+        }
+        // 每层一行横向 node box(─ 分隔);多 lane(DAG 并行)同一层并排。
+        let mut spans: Vec<Span> = vec![Span::styled(format!(" L{} ", lvl), Style::default().fg(Color::DarkGray))];
+        for (i, n) in layer_nodes.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::raw("   ").style(Style::default().fg(Color::DarkGray)));
+            }
+            spans.push(node_span(n, status));
+        }
+        out.push(Line::from(spans));
+
+        // 边层:从本层 node 出发的边,列出 to + 条件标。
+        for n in &layer_nodes {
+            let outs: Vec<&crate::state::FlowEdge> = def.edges.iter().filter(|e| e.from == n.id).collect();
+            if outs.is_empty() {
+                continue;
+            }
+            let mut edge_spans: Vec<Span> = vec![
+                Span::raw("     "),
+                Span::styled(format!("  {} ", trunc(&n.id, 8)), Style::default().fg(Color::DarkGray)),
+            ];
+            for (i, e) in outs.iter().enumerate() {
+                if i > 0 {
+                    edge_spans.push(Span::raw("   ").style(Style::default().fg(Color::DarkGray)));
+                }
+                let cond = e.condition.as_ref().map(|c| format!(" if {} {} \"{}\"", c.field, c.op, trunc(&c.value, 12))).unwrap_or_default();
+                edge_spans.push(Span::raw(format!("──▶{}{}", trunc(&e.to, 10), cond)).style(Style::default().fg(Color::Blue)));
+            }
+            out.push(Line::from(edge_spans));
+        }
+    }
+
+    // node 状态明细表(从 GET /h/flows/{id} 的 status.nodes)。
+    if let Some(st) = status {
+        out.push(Line::raw(""));
+        out.push(Line::from(Span::styled(
+            format!(" node 状态(flow={}):", st.status),
+            Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
+        )));
+        let mut ids: Vec<&String> = st.nodes.keys().collect();
+        ids.sort();
+        for id in ids {
+            let ns = &st.nodes[id];
+            let (g, gc) = node_status_glyph(&ns.status);
+            out.push(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(g, Style::default().fg(gc).add_modifier(Modifier::BOLD)),
+                Span::styled(format!(" {:<8}", trunc(id, 8)), Style::default().fg(Color::White)),
+                Span::styled(format!(" {:<10}", ns.status), Style::default().fg(gc)),
+                Span::styled(format!("  {}", trunc(&ns.response, 40)), Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+    }
+    out
+}
+
+/// node box:状态符号 + id + message 摘要。状态色来自 status.nodes(无 status = idle)。
+fn node_span(n: &crate::state::FlowNode, status: Option<&crate::state::FlowStatus>) -> Span<'static> {
+    let st_str = status.and_then(|s| s.nodes.get(&n.id)).map(|x| x.status.as_str()).unwrap_or("idle");
+    let (glyph, color) = node_status_glyph(st_str);
+    let label = format!("[{} {}] {}", glyph, trunc(&n.id, 6), trunc(&n.message, 18));
+    Span::styled(label, Style::default().fg(color).add_modifier(Modifier::BOLD))
+}
+
+/// node 状态 → (符号 owned, 色)。pending=idle,running,done,failed,skipped。
+fn node_status_glyph(status: &str) -> (String, Color) {
+    match status {
+        "running" => ("⠋".to_string(), Color::Green),
+        "completed" => ("✓".to_string(), Color::Magenta),
+        "failed" => ("✗".to_string(), Color::Red),
+        "skipped" => ("⊘".to_string(), Color::DarkGray),
+        _ => ("○".to_string(), Color::Yellow), // pending / idle
+    }
 }
 
 pub fn draw_stack(f: &mut Frame, area: Rect, app: &App) {
@@ -369,7 +537,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 
     let hint = Paragraph::new(format!(
-        " tab 切视图 · c control · j/k 选 session · t turn · s spawn 多实例 · e raw exec · p 弹窗 · ? help · 右键 menu · q quit{}",
+        " tab 切视图 · c control · j/k 选(flow panel 切 flow)· t turn · f/G/D 创建 flow · R 运行 flow · s spawn · p 弹窗 · ? help · q quit{}",
         if app.term.hint.is_empty() { String::new() } else { format!("  ⚠ {}", app.term.hint) },
     ))
     .style(Style::default().fg(Color::DarkGray));

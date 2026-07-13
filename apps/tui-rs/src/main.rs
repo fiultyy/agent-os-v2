@@ -80,6 +80,19 @@ fn main() -> io::Result<()> {
 
 // ═══ --dump:非交互分层渲染验证 ═════════════════════════════════════
 
+/// 构造一个演示 TrackedFlow(DAG:A,C 并行 start → B 合并)+ 模拟 node 状态。
+/// 用于 --dump 渲染真实 DAG 视图,不依赖 orche 在线。
+fn demo_tracked_flow() -> state::TrackedFlow {
+    use std::collections::HashMap;
+    let def = state::preset_flow(state::FlowPreset::Dag, "what is 8+8?");
+    let mut nodes: HashMap<String, state::FlowNodeState> = HashMap::new();
+    nodes.insert("A".into(), state::FlowNodeState { id: "A".into(), status: "completed".into(), response: "16".into(), status_code: "success".into() });
+    nodes.insert("C".into(), state::FlowNodeState { id: "C".into(), status: "completed".into(), response: "4".into(), status_code: "success".into() });
+    nodes.insert("B".into(), state::FlowNodeState { id: "B".into(), status: "running".into(), response: String::new(), status_code: String::new() });
+    let status = state::FlowStatus { flow_id: "flow_demo00000".into(), status: "running".into(), nodes };
+    state::TrackedFlow { flow_id: "flow_demo00000".to_string(), def, status: Some(status) }
+}
+
 fn run_dump() {
     use ratatui::backend::TestBackend;
 
@@ -107,6 +120,11 @@ fn run_dump() {
     if let Some(sg) = fetch_sessions() {
         app.set_sessions(sg);
     }
+
+    // P2 flow 演示:注入一个 tracked flow(DAG 拓扑 A,C→B 合并)+ 模拟 node 状态,
+    // 让 --dump 能渲染真实 DAG 视图(不依赖 orche 在线)。orche 在线时按 f/g/D 创建真 flow。
+    app.flows.push(demo_tracked_flow());
+
     if let Some(evs) = fetch_events("openclaw", state::CLAW_SESSION) {
         // 数实例 + 存事件(openclaw/agent:main:main 是多实例 demo session)。
         let n = evs.iter().filter(|e| !e.harness_id.is_empty())

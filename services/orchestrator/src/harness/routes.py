@@ -198,6 +198,55 @@ async def delete_session(
     return {"session_id": session_id, "status": "deleted"}
 
 
+# ── flow engine (P2: turn chains / branches / DAG on trigger_turn) ────
+# FlowDef JSON DSL → scheduler runs nodes over the existing turn primitive.
+# 挂在 /h/flows(*):与 session primitive 同 router(/h prefix)。
+
+from .flow import FlowDef, FlowScheduler, get_flow, _flows as _flow_registry
+
+# flow_id → {def, state, scheduler, task}
+# (_flow_registry in flow.py is the source of truth; this aliases for clarity)
+
+
+@router.post("/flows")
+async def create_flow(req: FlowDef) -> Dict[str, Any]:
+    """Create a flow from a FlowDef. Validates the graph, returns flow_id."""
+    req.validate_graph()
+    flow_id = f"flow_{uuid.uuid4().hex[:12]}"
+    scheduler = FlowScheduler(req, flow_id)
+    _flow_registry[flow_id] = {
+        "def": req, "state": scheduler.state, "scheduler": scheduler,
+        "task": None,
+    }
+    return {"flow_id": flow_id, "status": "created",
+            "nodes": [n.id for n in req.nodes],
+            "edges": [{"from": e.from_, "to": e.to} for e in req.edges]}
+
+
+@router.post("/flows/{flow_id}/run")
+async def run_flow(flow_id: str) -> Dict[str, Any]:
+    """Asynchronously execute a flow. Returns immediately; observe receives
+    flow_started/node_started/node_completed/flow_completed events."""
+    rec = get_flow(flow_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="flow not found")
+    scheduler: FlowScheduler = rec["scheduler"]
+    if rec.get("task") is not None and not rec["task"].done():
+        raise HTTPException(status_code=409, detail="flow already running")
+    task = scheduler.start_background()
+    rec["task"] = task
+    return {"flow_id": flow_id, "status": "running"}
+
+
+@router.get("/flows/{flow_id}")
+async def get_flow_status(flow_id: str) -> Dict[str, Any]:
+    """Flow + per-node status."""
+    rec = get_flow(flow_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="flow not found")
+    return rec["state"].to_dict()
+
+
 # ── switch (no prefix — mounted at app root as /switch) ───────────────
 # Exposed via a separate include so it sits at POST /switch, not /h/switch.
 
