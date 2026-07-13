@@ -142,14 +142,31 @@ export default function ObservePage() {
             <h3 className="font-semibold">
               {selectedHarness ? `${selectedHarness} - ${selectedSession?.slice(0, 8) || "未选择"}` : "未选择"}
             </h3>
-            <div className="flex items-center gap-1.5 text-xs">
+            <div
+              className="flex items-center gap-1.5 text-xs"
+              data-testid="ws-connection-indicator"
+              aria-label={
+                isConnected ? "WebSocket 已连接" : "WebSocket 断开"
+              }
+              title={
+                isConnected
+                  ? "实时连接已建立(绿色)"
+                  : "实时连接断开"
+              }
+            >
               <div
                 className={`h-2 w-2 rounded-full ${
                   isConnected ? "bg-green-500" : "bg-gray-300"
                 }`}
               />
-              <span className={isConnected ? "text-green-600" : "text-gray-400"}>
-                {isConnected ? "实时连接" : "离线"}
+              <span
+                className={
+                  isConnected
+                    ? "font-medium text-green-600"
+                    : "font-medium text-gray-400"
+                }
+              >
+                {isConnected ? "已连接" : "断开"}
               </span>
             </div>
           </div>
