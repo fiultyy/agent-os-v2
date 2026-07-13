@@ -2,7 +2,7 @@
 
 ACP (Agent Client Protocol) long connection + sessions.messages.subscribe.
 Events mapping: ChatEvent → ObserveEvent (tick_started, tool_call, tool_result, tick_completed).
-Interactive routing: observe /send → openclaw chat.send.
+Interactive routing: observe /send → openclaw sessions.send.
 Real session management: sessionKey ↔ (harness_type="openclaw", session_id).
 
 Protocol: GatewayFrame (RequestFrame/ResponseFrame/EventFrame) over WebSocket.
@@ -228,12 +228,17 @@ class OpenClawGatewayClient:
 
     Responsibilities:
     - Connect to gateway WS endpoint
-    - Send hello/connect frame with protocol version 4
+    - v4 handshake: receive connect.challenge → send connect(req) → recv res(hello-ok)
     - Subscribe to sessions.messages.subscribe for target session
     - Receive ChatEvent and agent tool events
     - Map to ObserveEvent schema
     - Push to observe-service WS ingest endpoint
     """
+
+    # GatewayClientId enum (openclaw packages/gateway-protocol/src/client-info.ts).
+    # client.id is a closed registry; observe bridge must use "gateway-client".
+    CLIENT_ID = "gateway-client"
+    CLIENT_MODE = "backend"
 
     def __init__(
         self,
@@ -277,7 +282,7 @@ class OpenClawGatewayClient:
         self.gateway_ws = await ws_client.connect(self.gateway_url)
 
         # Read gateway auth token (env OPENCLAW_GATEWAY_TOKEN or ~/.openclaw/openclaw.json).
-        # openclaw --auth token mode requires hello.auth.token (frames.ts:65 HelloFrame.auth).
+        # openclaw --auth token mode requires connect.params.auth.token.
         auth_token = None
         try:
             import os
@@ -290,36 +295,82 @@ class OpenClawGatewayClient:
         except Exception as e:
             logger.warning(f"Could not read openclaw gateway token: {e}")
 
-        # Send hello frame (with auth.token for openclaw --auth token mode)
-        hello_frame = {
-            "minProtocol": PROTOCOL_VERSION,
-            "maxProtocol": PROTOCOL_VERSION,
-            "client": {
-                "id": "observe-gateway",
-                "displayName": "Observe OpenClaw Gateway",
-                "version": "1.0.0",
-                "platform": "python",
-                "mode": "client",
-            },
-        }
-        if auth_token:
-            hello_frame["auth"] = {"token": auth_token}
-        await self.gateway_ws.send(json.dumps(hello_frame))
-        logger.info(
-            "Sent hello to OpenClaw gateway"
-            + (" (with auth token)" if auth_token else " (no token — gateway may challenge)")
-        )
+        # ── OpenClaw gateway v4 handshake: challenge → connect(req) → res(hello-ok) ──
+        # Server PROACTIVELY sends a connect.challenge event frame immediately after the
+        # WS upgrade (src/gateway/server/ws-connection.ts:387-392), regardless of auth mode.
+        # Client must reply with a RequestFrame {type:"req", method:"connect"} carrying
+        # auth.token (token mode) and optionally device.nonce echoing the challenge nonce.
+        # See packages/gateway-client/src/client.ts:1325-1405, packages/gateway-protocol/src/schema/frames.ts.
+        first_frame = json.loads(await asyncio.wait_for(self.gateway_ws.recv(), timeout=10))
 
-        # Wait for hello-ok response
-        hello_resp = await self.gateway_ws.recv()
-        hello_data = json.loads(hello_resp)
-        if hello_data.get("type") != "hello-ok":
-            logger.error(f"Unexpected hello response: {hello_data}")
+        # Real v4 gateway: first frame is the connect.challenge event.
+        if first_frame.get("type") == FRAME_EVENT and first_frame.get("event") == "connect.challenge":
+            challenge_nonce = first_frame.get("payload", {}).get("nonce")
+            logger.info(f"Received connect.challenge (nonce: {str(challenge_nonce)[:8]}...)")
+
+            # Build the connect request frame (ConnectParamsSchema, frames.ts:30-81).
+            connect_req_id = str(uuid.uuid4())
+            connect_params: Dict[str, Any] = {
+                "minProtocol": PROTOCOL_VERSION,
+                "maxProtocol": PROTOCOL_VERSION,
+                "client": {
+                    "id": self.CLIENT_ID,            # closed enum (client-info.ts GATEWAY_CLIENT_IDS)
+                    "displayName": "Observe OpenClaw Gateway",
+                    "version": "1.0.0",
+                    "platform": "python",
+                    "mode": self.CLIENT_MODE,        # GATEWAY_CLIENT_MODES
+                },
+                "role": "operator",
+                "scopes": ["operator.admin"],
+            }
+            # auth.token required for --auth token mode (src/gateway/auth.ts:562-569)
+            if auth_token:
+                connect_params["auth"] = {"token": auth_token}
+            # NOTE: the challenge nonce is only echoed via the device identity path
+            # (frames.ts ConnectParams.device = {id, publicKey, signature, signedAt, nonce}
+            # — all required). For token auth we intentionally do NOT send a device block:
+            # server grants operator.admin via auth.token alone, and a partial device
+            # object triggers INVALID_REQUEST. (message-handler.ts:1148-1155 nonce check
+            # only applies when device identity is present.)
+
+            await self.gateway_ws.send(
+                serialize_request_frame(connect_req_id, "connect", connect_params)
+            )
+            logger.info(
+                "Sent connect req to OpenClaw gateway"
+                + (" (with auth token)" if auth_token else " (no token)")
+            )
+
+            # Wait for the connect response: ResponseFrame {type:"res"} whose payload is HelloOk.
+            # NOTE: hello-ok lives at payload.type, NOT top-level type (ResponseFrameSchema).
+            hello_resp = json.loads(await asyncio.wait_for(self.gateway_ws.recv(), timeout=15))
+            if hello_resp.get("type") != FRAME_RES or not hello_resp.get("ok"):
+                err = hello_resp.get("error", {}) if hello_resp.get("type") == FRAME_RES else {}
+                logger.error(
+                    f"OpenClaw connect rejected: {err.get('code', '')} - {err.get('message', '')} "
+                    f"(raw: {hello_resp})"
+                )
+                await self.gateway_ws.close()
+                await self.observe_ws.close()
+                return
+            hello_ok = hello_resp.get("payload", {})
+            logger.info(
+                f"Connected to OpenClaw gateway (protocol {hello_ok.get('protocol')}, "
+                f"role {hello_ok.get('auth', {}).get('role')})"
+            )
+
+        # Legacy/stub server (e.g. tests/mock_openclaw_gateway.py) sends a top-level
+        # hello-ok directly with no challenge. Accept it for back-compat.
+        elif first_frame.get("type") == "hello-ok":
+            logger.info(
+                f"Connected to OpenClaw gateway [legacy] (protocol {first_frame.get('protocol')})"
+            )
+
+        else:
+            logger.error(f"Expected connect.challenge or hello-ok, got: {first_frame}")
             await self.gateway_ws.close()
             await self.observe_ws.close()
             return
-
-        logger.info(f"Connected to gateway (protocol {hello_data.get('protocol')})")
 
         # Subscribe to session messages
         if self.session_key:
@@ -424,20 +475,17 @@ class OpenClawGatewayClient:
         """Send a message to OpenClaw (interactive routing).
 
         Called by observe-service /send endpoint to drive OpenClaw turns.
-        Uses chat.send RPC method with GatewayFrame request.
-
-        Args:
-            message: User message to send to OpenClaw
-            agent_id: Optional agent ID (uses session default if omitted)
-            thinking: Optional thinking level setting
+        Uses the gateway RPC method `sessions.send` (SessionsSendParamsSchema:
+        {key, agentId?, message, thinking?, idempotencyKey?}). This is the
+        agent-turn send path; `send`/`chat.send` are channel/legacy methods.
         """
         if not self.gateway_ws or not self.running:
             logger.error("Cannot send message: gateway not connected")
             return
 
-        # Build chat.send params (ChatSendParams)
+        # Build sessions.send params (SessionsSendParamsSchema).
         params = {
-            "sessionKey": self.session_key,
+            "key": self.session_key,
             "message": message,
             "idempotencyKey": f"send_{uuid.uuid4().hex}",
         }
@@ -451,7 +499,7 @@ class OpenClawGatewayClient:
         # Send request frame
         await self._send_request(
             self.gateway_ws,
-            "chat.send",
+            "sessions.send",
             params,
         )
 
