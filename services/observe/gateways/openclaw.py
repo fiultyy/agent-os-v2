@@ -266,17 +266,16 @@ class OpenClawGatewayClient:
         logger.info(f"Connecting to OpenClaw gateway: {self.gateway_url}")
         logger.info(f"Connecting to observe ingest: {self.observe_ingest_url}")
 
-        # Connect to observe-service ingest
-        self.observe_ws = await ws_client.connect(self.observe_ingest_url)
-        await self.observe_ws.send(
-            json.dumps({
-                "type": "register",
-                "harness_type": "openclaw",
-                "session_id": self.session_key,
-                "harness_id": self.harness_id,
-            })
+        # Connect to observe-service ingest (ws_ingest 从 query params 注册 session)
+        from urllib.parse import quote
+        ingest_url = (
+            f"{self.observe_ingest_url}"
+            f"?harness_type=openclaw"
+            f"&session_id={quote(self.session_key, safe='')}"
+            f"&harness_id={quote(self.harness_id, safe='')}"
         )
-        logger.info("Registered to observe-service")
+        self.observe_ws = await ws_client.connect(ingest_url)
+        logger.info(f"Registered to observe-service (session={self.session_key})")
 
         # Connect to OpenClaw gateway
         self.gateway_ws = await ws_client.connect(self.gateway_url)
@@ -513,20 +512,25 @@ class OpenClawGatewayClient:
 # ── Main Entry (for testing) ───────────────────────────────────────────
 
 async def main():
-    """Test entry point for OpenClaw gateway client."""
-    client = OpenClawGatewayClient(
-        session_key="agent:test:test-session",
-    )
+    """Test entry: real agent:main:main + send turn + verify observe events."""
+    client = OpenClawGatewayClient(session_key="agent:main:main")
 
+    events = []
     async def handle_event(event: ObserveEvent):
         logger.info(f"Observe event: {event.event_type.value} - {event.tick_id}")
-
+        events.append(event.event_type.value)
     client.on_observe_event = handle_event
 
     try:
-        await client.connect()
+        connect_task = asyncio.create_task(client.connect())  # background(connect 内 while loop)
+        await asyncio.sleep(3)  # 等 connect + auth + subscribe
+        await client.send_message("what is 8+8?")
+        await asyncio.sleep(30)  # 等 turn 完成
+        client.stop()
+        await asyncio.sleep(1)
+        logger.info(f"All observe events: {events}")
+        logger.info("E2E_PASS" if "tick_completed" in events else "E2E_FAIL")
     except KeyboardInterrupt:
-        logger.info("Interrupted")
         client.stop()
 
 
