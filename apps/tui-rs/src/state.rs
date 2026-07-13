@@ -49,8 +49,10 @@ pub struct SessionsGrouped {
 #[derive(Deserialize, Clone)]
 pub struct ObserveEvent {
     pub event_type: String,
-    #[allow(dead_code)]
     pub tick_id: String,
+    /// 驱动该事件的实例标识(claude-code 多 PTY --resume / claw 多 gateway)。
+    /// ADR-5:同 (harness_type, session_id) 可被多个 harness_id 驱动 = 多实例。
+    pub harness_id: String,
     pub data: HashMap<String, serde_json::Value>,
 }
 #[derive(Deserialize)]
@@ -74,12 +76,50 @@ pub fn fetch_events(h: &str, sid: &str) -> Option<Vec<ObserveEvent>> {
         .map(|e| e.events)
 }
 
-/// 触发一个 turn(POST /h/claw/sessions/{sid}/turn)。返回 server 回的 status 文本。
-pub fn trigger_turn(sid: &str, message: &str) -> Option<String> {
-    let resp = ureq::post(&format!("{}/h/claw/sessions/{}/turn", ORCH, sid))
+/// 触发一个 turn(POST /h/{type}/sessions/{sid}/turn)。type∈{claw,claude-code}。
+/// 返回 server 回的 status 文本。
+pub fn trigger_turn(ht: &str, sid: &str, message: &str) -> Option<String> {
+    let resp = ureq::post(&format!("{}/h/{}/sessions/{}/turn", ORCH, ht, sid))
         .send_json(serde_json::json!({ "message": message }))
         .ok()?;
     resp.into_string().ok()
+}
+
+/// 创建 session(POST /h/{type}/sessions)。claw 用 claw 格式 agent:<a>:<c>;
+/// claude-code 服务端生成 hex sid。返回 (session_id, type)。
+pub fn create_session(ht: &str, agent_id: Option<&str>) -> Option<String> {
+    let body = serde_json::json!({ "agent_id": agent_id.unwrap_or("") });
+    let resp = ureq::post(&format!("{}/h/{}/sessions", ORCH, ht))
+        .send_json(body)
+        .ok()?;
+    let v: serde_json::Value = resp.into_json().ok()?;
+    v.get("session_id").and_then(|x| x.as_str()).map(|s| s.to_string())
+}
+
+/// 多实例 spawn(POST /h/{type}/sessions/{sid}/spawn)。
+/// claude-code:同 sid 多 PTY --resume(ADR-5 无锁);claw 服务端拒绝(改用 create)。
+pub fn spawn_instance(ht: &str, sid: &str) -> Option<String> {
+    let resp = ureq::post(&format!("{}/h/{}/sessions/{}/spawn", ORCH, ht, sid))
+        .send_string("")
+        .ok()?;
+    resp.into_string().ok()
+}
+
+/// 拉取一个 session 的事件并返回去重后的实例(harness_id)数。
+/// ADR-5 多实例信号:同 (harness_type, session_id) 多 harness_id。
+/// ponytail: limit=200 够数实例;observe 不可达返回 0。
+pub fn count_instances(h: &str, sid: &str) -> usize {
+    fetch_events(h, sid)
+        .map(|evs| {
+            let mut set: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            for e in &evs {
+                if !e.harness_id.is_empty() {
+                    set.insert(e.harness_id.as_str());
+                }
+            }
+            set.len()
+        })
+        .unwrap_or(0)
 }
 
 pub fn fmt_val(d: &HashMap<String, serde_json::Value>, k: &str) -> String {
@@ -87,6 +127,16 @@ pub fn fmt_val(d: &HashMap<String, serde_json::Value>, k: &str) -> String {
         Some(serde_json::Value::String(s)) => s.clone(),
         Some(other) => other.to_string(),
         None => String::new(),
+    }
+}
+
+/// observe harness_type → orche 原语 type。
+/// observe 继承 multi-harness-observe 用 "openclaw",orche P0 原语用 "claw"(同一后端)。
+/// claude-code 两边一致。其余原样透传。
+pub fn norm_ht(h: &str) -> String {
+    match h {
+        "openclaw" => "claw".to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -169,6 +219,9 @@ pub struct App {
     pub flat: Vec<Session>,
     pub cursor: usize,
     pub events: HashMap<String, Vec<ObserveEvent>>,
+    /// 每 session 的实例数(去重 harness_id)。"harness_type/session_id" → N。
+    /// N≥2 = 多实例(ADR-5:同 sid 多 harness_id 驱动)。
+    pub instances: HashMap<String, usize>,
     /// 上次触发 turn 的 server 回执。
     pub turn_status: Option<String>,
     /// control 栏可编辑 message。
@@ -194,6 +247,7 @@ impl App {
             popups: vec![],
             term,
             size: (0, 0),
+            instances: HashMap::new(),
         }
     }
 
@@ -211,14 +265,31 @@ impl App {
             self.cursor = 0;
         }
         self.fetch_current();
+        self.count_all_instances();
     }
     pub fn fetch_current(&mut self) {
         if let Some(s) = self.flat.get(self.cursor) {
+            let key = format!("{}/{}", s.harness_type, s.session_id);
             if let Some(evs) = fetch_events(&s.harness_type, &s.session_id) {
-                self.events
-                    .insert(format!("{}/{}", s.harness_type, s.session_id), evs);
+                let n = evs.iter().filter(|e| !e.harness_id.is_empty())
+                    .map(|e| e.harness_id.as_str()).collect::<std::collections::HashSet<_>>().len();
+                self.instances.insert(key.clone(), n);
+                self.events.insert(key, evs);
             }
         }
+    }
+    /// 扫描所有 session 数实例数(用于 session 树 ×N 标记)。
+    /// ponytail: set_sessions 时一次性拉,后续 fetch_current 增量刷新当前 session。
+    pub fn count_all_instances(&mut self) {
+        for s in &self.flat {
+            let key = format!("{}/{}", s.harness_type, s.session_id);
+            let n = count_instances(&s.harness_type, &s.session_id);
+            self.instances.insert(key, n);
+        }
+    }
+    /// 当前 session 的实例数(0 = 无事件/observe 不可达)。
+    pub fn instance_count(&self, h: &str, sid: &str) -> usize {
+        self.instances.get(&format!("{}/{}", h, sid)).copied().unwrap_or(0)
     }
     pub fn cursor_down(&mut self) {
         if self.cursor + 1 < self.flat.len() {
@@ -239,9 +310,40 @@ impl App {
         }
     }
     pub fn do_turn(&mut self) {
-        let st = trigger_turn(CLAW_SESSION, &self.turn_msg);
+        // 触发当前 cursor session 的 turn(不再硬编码 claw;claude-code session 也能 turn)。
+        // observe harness_type=openclaw ↔ orche 原语 claw(同一后端,命名差)。
+        let (ht, sid) = self.flat.get(self.cursor)
+            .map(|s| (norm_ht(&s.harness_type), s.session_id.clone()))
+            .unwrap_or_else(|| ("claw".to_string(), CLAW_SESSION.to_string()));
+        let st = trigger_turn(&ht, &sid, &self.turn_msg);
         self.turn_status = st;
-        self.fetch_claw_events();
+        self.fetch_current();
+        if ht == "claw" {
+            self.fetch_claw_events();
+        }
+    }
+
+    /// spawn 多实例(s 键)。claude-code:POST /spawn 同 sid 多 PTY;
+    /// claw/orche 拒绝 spawn,改 create 一个新 session。
+    pub fn do_spawn(&mut self) {
+        let Some(s) = self.flat.get(self.cursor).cloned() else {
+            self.turn_status = Some("(无 session,无法 spawn)".to_string());
+            return;
+        };
+        let ht = norm_ht(&s.harness_type);
+        let sid = &s.session_id;
+        if ht == "claude-code" {
+            let st = spawn_instance(&ht, sid);
+            self.turn_status = Some(st.unwrap_or_else(|| "spawn claude-code 多实例失败".to_string()));
+        } else {
+            // claw/openclaw:多 session = create(同 agent 或新 agent)。
+            let agent = if sid.contains(':') { Some(sid.as_str()) } else { None };
+            let st = create_session("claw", agent)
+                .map(|new| format!("created claw session: {}", new))
+                .unwrap_or_else(|| "create claw session 失败".to_string());
+            self.turn_status = Some(st);
+        }
+        self.fetch_current();
     }
 
     // ── 弹窗栈操作 ──────────────────────────────────────────────
@@ -274,7 +376,7 @@ impl App {
             format!(" Kitty 检测:protocol={} image_ok={}", self.term.protocol.label(), self.term.image_ok),
             format!(" poll_interval={}ms", self.term.poll_interval.as_millis()),
             "".to_string(),
-            " 键位:tab 切 base panel · e raw exec · p 弹窗 · ?/h help · q quit".to_string(),
+            " 键位:tab 切 base panel · e raw exec · s spawn 多实例 · p 弹窗 · ?/h help · q quit".to_string(),
             " 弹窗:esc/enter 关闭 · 鼠标拖拽标题栏 · 右键 base panel 弹 context menu".to_string(),
         ];
         if !self.term.hint.is_empty() {
@@ -416,6 +518,11 @@ impl App {
             }
             KeyCode::Char('t') => {
                 self.do_turn();
+                false
+            }
+            KeyCode::Char('s') => {
+                // 多实例:claude-code spawn 同 sid 多 PTY;claw create 新 session。
+                self.do_spawn();
                 false
             }
             KeyCode::Char('r') => {

@@ -88,9 +88,87 @@ fn flow_lines(t: &FTurn, depth: usize) -> Vec<Line<'static>> {
     lines
 }
 
-// ═══ observe 真数据 lane(P1 保留)══════════════════════════════════
+// ═══ observe 真数据 lane(P1 保留 + P2 多实例)═══════════════════════
 
+/// 把单个事件渲染成 (符号, 色, 加粗, 正文)。符号用 owned String 避开 event_type 生命周期。
+fn event_glyph(e: &ObserveEvent) -> (String, Color, bool, String) {
+    match e.event_type.as_str() {
+        "tick_started" => ("●".to_string(), Color::Green, true, fmt_val(&e.data, "request")),
+        "tool_call" => ("⚒".to_string(), Color::Blue, false, fmt_val(&e.data, "tool_name")),
+        "tool_result" => ("◷".to_string(), Color::Cyan, false, fmt_val(&e.data, "result")),
+        "token_delta" => ("δ".to_string(), Color::DarkGray, false, fmt_val(&e.data, "delta_text")),
+        "tick_completed" => ("✓".to_string(), Color::Magenta, true, fmt_val(&e.data, "response")),
+        other => (other.to_string(), Color::DarkGray, false, String::new()),
+    }
+}
+
+/// 一组同 tick_id 的事件 → 一行横向 span(turn 节点 ─── 节点)。owned('static)。
+fn tick_line(grp: &[&ObserveEvent]) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = vec![];
+    for (i, e) in grp.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("───").style(Style::default().fg(Color::DarkGray)));
+        }
+        let (sym, color, bold, body) = event_glyph(e);
+        let mut st = Style::default().fg(color);
+        if bold {
+            st = st.add_modifier(Modifier::BOLD);
+        }
+        let label = if body.is_empty() { sym } else { format!("{} {}", sym, trunc(&body, 20)) };
+        spans.push(Span::styled(label, st));
+    }
+    Line::from(spans)
+}
+
+/// 多实例 lane:先按 harness_id(实例)分组,每实例一 lane 纵向叠。
+/// 同实例内再按 tick_id 分组(横向节点)。ADR-5:同 sid 多 harness_id = 多实例。
+/// 单实例时退化为 P1 的纯 tick lane(无前缀)。
 pub fn observe_lanes(evs: &[ObserveEvent]) -> Vec<Line<'static>> {
+    // 1. 按 harness_id 分实例(保持首次出现顺序)。
+    let mut inst_order: Vec<String> = vec![];
+    let mut by_inst: std::collections::HashMap<String, Vec<&ObserveEvent>> = std::collections::HashMap::new();
+    for e in evs {
+        let key = if e.harness_id.is_empty() { "__nohid__".to_string() } else { e.harness_id.clone() };
+        if !by_inst.contains_key(&key) {
+            inst_order.push(key.clone());
+        }
+        by_inst.entry(key).or_default().push(e);
+    }
+    let multi = inst_order.len() > 1;
+    // ponytail: 单实例直接走扁平 tick lane(与 P1 一致),多实例才叠 lane。
+    if !multi {
+        let refs: Vec<&ObserveEvent> = evs.iter().collect();
+        return flat_tick_lanes(&refs);
+    }
+    // 2. 多实例:每实例一 lane,带实例标签前缀。
+    let mut out: Vec<Line> = vec![];
+    for (idx, hid) in inst_order.iter().enumerate() {
+        let Some(inst_evs) = by_inst.get(hid) else { continue };
+        let tag = trunc(&hid.replace("openclaw_", "oc_").replace("claude_", "cl_"), 18);
+        let mut head_spans: Vec<Span> = vec![
+            Span::styled(format!("[{}] {} ", idx + 1, tag), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw("» ").style(Style::default().fg(Color::DarkGray)),
+        ];
+        // 该实例内按 tick_id 分组,横向串。
+        let lanes = flat_tick_lanes(inst_evs);
+        if let Some(first) = lanes.first() {
+            head_spans.extend(first.spans.iter().cloned());
+            out.push(Line::from(head_spans));
+            for rest in lanes.iter().skip(1) {
+                let mut cont = vec![Span::raw("      "), Span::raw("» ").style(Style::default().fg(Color::DarkGray))];
+                cont.extend(rest.spans.iter().cloned());
+                out.push(Line::from(cont));
+            }
+        } else {
+            out.push(Line::from(head_spans));
+        }
+    }
+    out
+}
+
+/// 扁平 tick lane(P1 行为):按 tick_id 分组,每组一行横向节点串。
+/// 接 &[&ObserveEvent] 以同时服务顶层(全量)与多实例子集(借用)。
+fn flat_tick_lanes(evs: &[&ObserveEvent]) -> Vec<Line<'static>> {
     let mut order: Vec<String> = vec![];
     let mut groups: std::collections::HashMap<String, Vec<&ObserveEvent>> = std::collections::HashMap::new();
     for e in evs {
@@ -103,36 +181,9 @@ pub fn observe_lanes(evs: &[ObserveEvent]) -> Vec<Line<'static>> {
     let mut out: Vec<Line> = vec![];
     for k in &order {
         let Some(grp) = groups.get(k) else { continue };
-        let mut spans: Vec<Span> = vec![];
-        for (i, e) in grp.iter().enumerate() {
-            if i > 0 {
-                spans.push(Span::raw("───").style(Style::default().fg(Color::DarkGray)));
-            }
-            let (sym, color, bold, body) = match e.event_type.as_str() {
-                "tick_started" => ("●", Color::Green, true, fmt_val(&e.data, "request")),
-                "tool_call" => ("⚒", Color::Blue, false, fmt_val(&e.data, "tool_name")),
-                "tool_result" => ("◷", Color::Cyan, false, fmt_val(&e.data, "result")),
-                "token_delta" => ("δ", Color::DarkGray, false, fmt_val(&e.data, "delta_text")),
-                "tick_completed" => ("✓", Color::Magenta, true, fmt_val(&e.data, "response")),
-                other => (other, Color::DarkGray, false, String::new()),
-            };
-            let mut st = Style::default().fg(color);
-            if bold {
-                st = st.add_modifier(Modifier::BOLD);
-            }
-            let label = if body.is_empty() { sym.to_string() } else { format!("{} {}", sym, trunc(&body, 20)) };
-            spans.push(Span::styled(label, st));
-        }
-        out.push(Line::from(spans));
+        out.push(tick_line(&grp));
     }
     out
-}
-
-pub fn observe_lane(evs: &[ObserveEvent]) -> Line<'static> {
-    observe_lanes(evs)
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| Line::raw("(no events)"))
 }
 
 // ═══ base panels(P1 draw_* 保留)══════════════════════════════════
@@ -147,8 +198,10 @@ pub fn draw_flow(f: &mut Frame, area: Rect, app: &App) {
     ];
     match app.events.get("openclaw/agent:main:main") {
         Some(evs) => {
+            let n_inst = app.instance_count("openclaw", crate::state::CLAW_SESSION);
+            let inst_tag = if n_inst >= 2 { format!(" · {} 实例(多实例 lane)", n_inst) } else { String::new() };
             lines.push(Line::from(Span::styled(
-                format!(" observe 真实 turn · openclaw/{} · {} events", crate::state::CLAW_SESSION, evs.len()),
+                format!(" observe 真实 turn · openclaw/{} · {} events{}", crate::state::CLAW_SESSION, evs.len(), inst_tag),
                 Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
             )));
             lines.push(Line::raw(""));
@@ -182,12 +235,21 @@ pub fn draw_stack(f: &mut Frame, area: Rect, app: &App) {
         if let Some(ss) = app.sessions.sessions_by_harness.get(hs) {
             for s in ss {
                 let label = trunc(&s.session_id, 22);
+                // 多实例标记:同 sid 多 harness_id(ADR-5)。N≥2 标 ×N。
+                let n = app.instance_count(&s.harness_type, &s.session_id);
+                let multi_tag = if n >= 2 { format!(" ×{}", n) } else { String::new() };
                 let (prefix, st) = if ci == app.cursor {
                     ("▸ ", Style::default().fg(Color::White).bg(Color::Blue).add_modifier(Modifier::BOLD))
                 } else {
                     ("  ", Style::default().fg(Color::White))
                 };
-                items.push(ListItem::new(format!("   {}{}", prefix, label)).style(st));
+                let multi_color = if n >= 2 { Color::Yellow } else { Color::DarkGray };
+                // ListItem 接 Line(多 span):sid + ×N 标记同行的两段样式。
+                let line = ratatui::text::Line::from(vec![
+                    Span::styled(format!("   {}{}", prefix, label), st),
+                    Span::styled(multi_tag, Style::default().fg(multi_color).add_modifier(Modifier::BOLD)),
+                ]);
+                items.push(ListItem::new(line));
                 ci += 1;
             }
         }
@@ -253,16 +315,24 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(bar), chunks[0]);
 
     let mut lane_lines: Vec<Line> = vec![Line::from(Span::styled(
-        " flow lane · openclaw 真实 turn(tick_started → token_delta → tick_completed)".to_string(),
+        " flow lane · openclaw 真实 turn(多实例 lane · tick_started → token_delta → tick_completed)".to_string(),
         Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
     ))];
     lane_lines.push(Line::raw(""));
     match app.events.get("openclaw/agent:main:main") {
         Some(evs) => {
-            lane_lines.push(observe_lane(evs));
+            let n_inst = app.instance_count("openclaw", crate::state::CLAW_SESSION);
+            if n_inst >= 2 {
+                lane_lines.push(Line::from(Span::styled(
+                    format!(" ⤴ 多实例:openclaw/{} 由 {} 个 harness_id 驱动(各一 lane)", crate::state::CLAW_SESSION, n_inst),
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                )));
+                lane_lines.push(Line::raw(""));
+            }
+            lane_lines.extend(observe_lanes(evs));
             lane_lines.push(Line::raw(""));
             lane_lines.push(Line::from(Span::styled(
-                format!(" ({} events)", evs.len()),
+                format!(" ({} events, {} 实例)", evs.len(), n_inst.max(1)),
                 Style::default().fg(Color::DarkGray),
             )));
         }
@@ -299,7 +369,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 
     let hint = Paragraph::new(format!(
-        " tab 切视图 · c control · j/k 选 session · t turn · e raw exec · p 弹窗 · ? help · 右键 menu · q quit{}",
+        " tab 切视图 · c control · j/k 选 session · t turn · s spawn 多实例 · e raw exec · p 弹窗 · ? help · 右键 menu · q quit{}",
         if app.term.hint.is_empty() { String::new() } else { format!("  ⚠ {}", app.term.hint) },
     ))
     .style(Style::default().fg(Color::DarkGray));

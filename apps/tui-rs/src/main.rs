@@ -108,9 +108,32 @@ fn run_dump() {
         app.set_sessions(sg);
     }
     if let Some(evs) = fetch_events("openclaw", state::CLAW_SESSION) {
+        // 数实例 + 存事件(openclaw/agent:main:main 是多实例 demo session)。
+        let n = evs.iter().filter(|e| !e.harness_id.is_empty())
+            .map(|e| e.harness_id.as_str()).collect::<std::collections::HashSet<_>>().len();
+        app.instances.insert("openclaw/agent:main:main".to_string(), n);
         app.events
             .insert("openclaw/agent:main:main".to_string(), evs);
     }
+
+    // 多实例摘要(ADR-5 实证):哪些 session 是多实例(×N)。
+    println!("═══ 多实例摘要(ADR-5:同 sid 多 harness_id)═══");
+    let mut multi: Vec<(String, usize)> = app.instances.iter()
+        .filter(|(_, n)| **n >= 2)
+        .map(|(k, n)| (k.clone(), *n)).collect();
+    multi.sort_by(|a, b| b.1.cmp(&a.1));
+    if multi.is_empty() {
+        println!(" (无多实例 session · ×N 标记不会出现)");
+    } else {
+        for (k, n) in multi.iter().take(10) {
+            println!("  ×{}  {}", n, k);
+        }
+        if multi.len() > 10 {
+            println!("  … +{} more", multi.len() - 10);
+        }
+    }
+    println!(" 共 {} session,{} 多实例", app.flat.len(), multi.len());
+    println!();
 
     let w = 132u16;
     let h = 38u16;

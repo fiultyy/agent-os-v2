@@ -111,12 +111,17 @@ async def create_session(
         # (统一,前端查 observe 同 key;uuid hex claw 不认 → subscribe/send 到不存在 session → 0 events)
         agent = req.agent_id or "main"
         session_id = agent if ":" in agent else f"agent:{agent}:main"
-        client = await _create_claw(session_id, req.agent_id)
     else:
         session_id = str(uuid.uuid4().hex[:12])
-        client = await _create_claude(session_id, req.cwd)
 
-    _sessions[_key(harness_type, session_id)] = {
+    # ADR-4:同 session_id 复用 client,防重复订阅(多 OpenClawClient 连同 claw session 抢事件)
+    key = _key(harness_type, session_id)
+    if key in _sessions:
+        return {"session_id": session_id, "type": harness_type, "status": "exists"}
+
+    client = await (_create_claw(session_id, req.agent_id) if harness_type == "claw"
+                    else _create_claude(session_id, req.cwd))
+    _sessions[key] = {
         "client": client,
         "session_id": session_id,
         "harness_type": harness_type,
