@@ -28,18 +28,20 @@
 - 多 session / 多实例并行(无锁,harness 自处理并发)
 - **e2e**:curl `trigger_turn` → orchestrator 发 harness turn → 映射推 observe → observe 收完整事件序列
 
-### P1 — ratatui TUI + 控制(rebuild)
+### P1 — ratatui TUI + 控制(rebuild;基线简版三视图,分层重构 defer P2)
 - 前端 rebuild:ratatui(Rust)TUI — flow 横向轨道 / stack 纵向 / popup 鼠标拖拽 三 demo 实证选型
 - 布局化画布(session/实例树 + flow 横向轨道流 + stack),非 react-flow 节点图(TUI 做不出拖拽节点图)
 - 控制栏:session 创建 / 切换 / 触发 turn / spawn(接 orchestrator P0 原语 REST)
 - TUI 接 observe 实时(WS subscribe)+ 历史(REST replay)
 - 单 binary 跨平台(cargo build --release → v2-tui,零依赖任意终端跑)+ 本地优先(TUI + orchestrator/observe 同机)
+- **基线简版**:扁平三视图(flow/stack/popup),分层重构(Kitty 多窗口/事件/状态/渲染四层 + 组件生态 + 降级)**defer P2**(ADR-10)
 
-### P2 — raw exec + 多实例深耕 + 编排原语升级
+### P2 — raw exec + 多实例深耕 + 编排原语升级 + TUI 分层重构
 - raw 终端:TUI exec 子进程(选 session → 全屏 spawn `claude --resume`/claw TUI,ctrl+d 回),完全甩 web 终端栈(xterm.js/ws/node-pty/ttyd/tmux 全免)
 - 多实例并行深耕(claude code 同 session 多实例 / claw 同 agent 多 session)
 - 持久化 = harness resume(`claude --resume <sid>` / claw session key 重连),PTY 死 → 重 spawn --resume 接回
 - 复杂编排原语(turn 链 / 分支 / DAG)在 P0 原语上重建
+- **TUI 分层重构**(ADR-10):P1 扁平三视图 → 4 层架构(Kitty Layout 原生多窗口 / 事件层 / 状态层 / 渲染层)+ 组件集成(tui-popup 可拖拽 / ratatui-interact 模态 / ratatui-image icat / rat-event)+ Kitty 多窗口接入(ctrl+shift+enter 原生 split/stack/tab)+ 弹窗栈/z-index/鼠标路由 + 降级检测(非 Kitty 关图/降刷/单窗口 tab)
 - 远程 SSH 接入
 
 ### P3+(远期,不阻塞当前)
@@ -128,17 +130,63 @@ observe 职责单一:**只收**(ingest → persist → broadcast → replay)。*
 
 ---
 
-## 6. 前端(ratatui TUI,Rust,rebuild)
+## 6. 前端(ratatui TUI + Kitty 终端,Rust,rebuild;分层架构)
 
-**推翻现有前端**(canvas.live / /observe web 不成熟),用 **ratatui**(Rust)TUI rebuild。
+**推翻现有前端**(canvas.live / /observe web 不成熟),用 **ratatui**(Rust)TUI + **Kitty** 终端 rebuild。
 
-**选型理由**(Bubble Tea vs ratatui 三 demo 实证对比后选 ratatui):
+**选型理由**(Bubble Tea vs ratatui 三 demo 实证对比后选 ratatui;终端选 Kitty):
 - 弹窗 overlay:ratatui `Clear + Block` 原生 widget(BT 需手搓背景覆盖)
 - 鼠标 `Down/Drag/Up`:crossterm 语义直接(BT 间接)
-- 性能:Rust 无 GC + immediate diff > Go BT
+- 性能:Rust 无 GC + immediate diff > Go BT;**5ms 冷启动 / 0.1ms 每帧 draw**
 - 分发:单 binary 跨平台零依赖
+- **Kitty 终端**:GPU 渲染(OpenGL 平滑滚动/低延迟)+ **原生多窗口 layout**(ctrl+shift+enter split/stack/tab,Kitty 自管,非应用层模拟)+ `icat` 图形协议(observe 截图/thumbnail 终端内原生显示)
+- **排除 Web/Electron**:关注加载/切换性能 — Web 冷启动慢、Electron 内存高、浏览器栈冗余
 
 demo 实证见 `apps/tui-rs/`(flow 横向轨道 + 分支自展开 + stack 纵向 + popup 鼠标拖拽,cargo build 通过 + dump 验证);BT 版 `apps/tui/` 保留作对比 reference,非主线。
+
+**分层架构**(P2 分层重构,P1 基线为扁平三视图过渡;详见 ADR-10):
+
+```
+┌─ Kitty Layout 层(终端原生多窗口)──────────────────────────────────┐
+│  ctrl+shift+enter split/stack/tab — Kitty 自管窗口栈,TUI 不模拟      │
+│  (非 Kitty 降级:单窗口 + 内部 tab)                                 │
+└────────────────────────────────────────────────────────────────────┘
+        │ 事件 / Resize
+┌───────▼───────────────────────────────────────────────────────────┐
+│ 事件层(crossterm event poll)                                       │
+│  KeyEvent → focused panel                                          │
+│  MouseEvent(Down/Drag/Up/Scroll)→ 点击/拖拽/滚轮                  │
+│  Resize → 重算 layout    事件路由:弹窗栈顶 modal 优先消费          │
+└───────┬───────────────────────────────────────────────────────────┘
+        │
+┌───────▼───────────────────────────────────────────────────────────┐
+│ 状态层(App State,自有 event loop)                                 │
+│  Panel 管理(open/focus/z-index 栈)                                │
+│  弹窗栈:modal 栈顶消费所有事件,下层 panel 冻结                    │
+│  数据 model(session/turn/event 缓存)                              │
+└───────┬───────────────────────────────────────────────────────────┘
+        │
+┌───────▼───────────────────────────────────────────────────────────┐
+│ 渲染层(ratatui immediate-mode)                                    │
+│  Clear 弹窗遮罩  z-order:base panels → overlays → modal popup     │
+│  弹窗 Rect 任意坐标:centered / absolute / offset                  │
+│  ratatui-image:Kitty icat 图片渲染(降级占位)                      │
+└────────────────────────────────────────────────────────────────────┘
+        ▲ 组件层(4 crate):tui-popup(可拖拽)/ ratatui-interact(右键/模态 PopupDialog)
+                            ratatui-image(icat/降级)/ rat-event(Dialog 事件优先级)
+```
+
+**弹窗鼠标方案**(按复杂度递进,详见 ADR-10):
+- **普通弹窗**:`Clear + Rect + area.contains` 手动点击检测
+- **可拖拽弹窗**:tui-popup(mouse_down/drag/up)
+- **模态弹窗**:ratatui-interact `PopupDialog` + rat-event `Dialog` qualifier 拦截(栈顶消费所有事件,下层冻结)
+- **右键菜单**:ContextMenu
+- **z-index**:绘制顺序决定(后画在上),弹窗栈维护栈序
+
+**降级策略**:
+- 检测终端能力(`$TERM` / `KITTY_WINDOW_ID` / Kitty graphics protocol query)
+- 非 Kitty/Alacritty:关图片渲染(ratatui-image 占位)+ 降刷新率 + 提示切换终端
+- 非原生多窗口终端:单窗口 + 内部 tab(应用层 tab 替 Kitty layout)
 
 **TUI 组件**(布局化画布,非 react-flow 节点图 — TUI 做不出拖拽节点图):
 - **session/实例树**:左栏,harness 分组,active 高亮,实例数(×N)
@@ -148,9 +196,9 @@ demo 实证见 `apps/tui-rs/`(flow 横向轨道 + 分支自展开 + stack 纵向
 - **raw 终端**:TUI exec 子进程(选 session → 全屏 spawn `claude --resume`/claw TUI,ctrl+d 回),完全甩 web 终端栈(xterm.js/ws/node-pty/ttyd/tmux 全免)
 - **控制栏**:创建/切换 session、trigger_turn、spawn(接 orchestrator P0 原语 REST)
 
-**位置**:`apps/tui-rs/`(Rust + ratatui + crossterm)。
+**位置**:`apps/tui-rs/`(Rust + ratatui + crossterm)。P1 基线已实施(ratatui v0.28 + crossterm,flow/stack/control 三视图 + popup 鼠标拖拽 demo `src/bin/popup.rs`;main.rs 接 orche `/h/claw|claude-code/sessions/turn` + observe `/sessions/openclaw/.../events`)。
 
-**形态**:**单 binary 跨平台**(cargo build --release → v2-tui,零依赖任意终端跑)+ **本地优先**(TUI + orchestrator/observe 同机 REST/WS)+ 远程 SSH(P2+)。
+**形态**:**单 binary 跨平台**(cargo build --release → v2-tui,零依赖任意终端跑;Kitty 基线,非 Kitty 降级)+ **本地优先**(TUI + orchestrator/observe 同机 REST/WS)+ 远程 SSH(P2+)。
 
 ---
 
@@ -173,7 +221,7 @@ demo 实证见 `apps/tui-rs/`(flow 横向轨道 + 分支自展开 + stack 纵向
 |------|------|
 | **P0** | curl `trigger_turn` → orchestrator 发 harness turn → 映射推 observe → observe 收完整事件序列(tick_started→...→tick_completed)+ 多 session 隔离 + spawn 多实例 + switch active。连真 claw(:18789)+ claude code PTY。不依赖前端 |
 | **P1** | ratatui TUI 渲染 flow/stack/popup(三 demo 验证)+ 接 orchestrator 控制栏触发 + session 切换 + 接 observe 实时/历史 |
-| **P2** | raw exec 子进程(全屏 spawn,ctrl+d 回)+ 多实例并行深耕 + 编排原语(turn 链 / 分支)+ claude --resume / claw 重连行为实测 |
+| **P2** | raw exec 子进程(全屏 spawn,ctrl+d 回)+ 多实例并行深耕 + 编排原语(turn 链 / 分支)+ claude --resume / claw 重连行为实测 + TUI 分层重构(4 层架构 + Kitty 多窗口 + 组件 + 降级检测) |
 | **qa-test** | 新 intent 覆盖:thin-orchestration / raw-terminal / multi-instance / session-switch |
 | **对抗验证**(longline-ultracode) | 每阶段 workflow fan-out 实施 + skeptic 审查 + 主 session 真端到端跑(挤出假阳性) |
 

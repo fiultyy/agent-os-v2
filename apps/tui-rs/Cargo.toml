@@ -8,11 +8,17 @@ name = "v2-tui-rs"
 path = "src/main.rs"
 
 [dependencies]
-ratatui = "0.28"
+ratatui = { version = "0.28", features = ["crossterm"] }
 crossterm = "0.28"
 ureq = { version = "2", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# P2 分层架构组件层
+tui-popup = { version = "0.5", features = ["crossterm"] }     # 可拖拽弹窗(PopupState: mouse_down/drag/up + handle_mouse_event)·0.5 对齐 ratatui 0.28(0.4 拉 ratatui 0.27 版本冲突)
+ratatui-interact = "0.5"   # 右键 ContextMenuState / 模态 PopupDialog(DialogState show/hide/visible) / 焦点管理
+ratatui-image = "1"        # Kitty icat 图片(Picker::guess_protocol 检测 Kitty/Sixel/Iterm2,降级 Halfblocks)
+image = { version = "0.25", default-features = false, features = ["png"] }  # ratatui-image 依赖;png 够 demo
+rat-event = "2"            # 事件限定符类型:Regular/Popup/Dialog(模态消费所有事件) + Outcome::is_consumed
 
 [profile.release]
 opt-level = 2

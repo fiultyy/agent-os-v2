@@ -81,21 +81,26 @@ observe **不连任何 harness**,只收 orchestrator 推。事件流单向:harne
 
 ---
 
-## ADR-6: 前端 ratatui TUI(Rust,rebuild;选型实证 BT vs RA 三 demo;布局化非节点图)
+## ADR-6: 前端 ratatui TUI + Kitty 终端(Rust,rebuild;选型实证 BT vs RA 三 demo;布局化非节点图;Kitty GPU/原生多窗口/icat)
 
-**Context**:现有前端(canvas.live / `/observe` web)不成熟。用户要 TUI(通用 / 终端原生 / 无浏览器)。前端框架选型需实证而非拍脑袋 — 对比 Bubble Tea vs ratatui 三 demo(flow 横向轨道流 / stack 纵向 / popup 鼠标拖拽)后决断。
+**Context**:现有前端(canvas.live / `/observe` web)不成熟。用户要 TUI(通用 / 终端原生 / 无浏览器)。前端框架选型需实证而非拍脑袋 — 对比 Bubble Tea vs ratatui 三 demo(flow 横向轨道流 / stack 纵向 / popup 鼠标拖拽)后决断。**终端层**亦需选型:多窗口分屏 / 图片渲染 / GPU 渲染 / 性能需明确终端基线。
 
-**Decision**:前端 rebuild,**ratatui(Rust)** TUI(`apps/tui-rs/`)。选型实证依据:
+**Decision**:前端 rebuild,**ratatui(Rust)+ crossterm** TUI(`apps/tui-rs/`),终端基线 **Kitty**。选型实证依据:
 - ratatui 弹窗 `Clear+Block` overlay 原生、鼠标 `Down/Drag/Up` 直接、无 GC + 单 binary
 - Bubble Tea 需手搓 overlay,鼠标语义弱
+- **Kitty 终端**:GPU 渲染(OpenGL,平滑滚动/低延迟);**原生多窗口 layout**(ctrl+shift+enter split/stack/tab,Kitty 自管,**非应用层模拟**);`icat` 图形协议(终端内原生显示图片,observe 截图/thumbnail 直渲)
+- **性能**:5ms 冷启动 / 0.1ms 每帧 draw(immediate-mode diff);单二进制零依赖
+- **排除 Web/Electron**:用户明确关注**加载/切换性能** — Web 冷启动/资源切换慢、Electron 内存占用高、浏览器栈冗余;TUI 终端原生无此负担
 
-画布**布局化**(session 树 + flow 横向轨道流 + stack 纵向),**非 react-flow 节点图**(TUI 做不出拖拽节点图,用户接受布局化)。crossterm 事件(含鼠标)。BT 版 `apps/tui/` 保留作 reference。
+画布**布局化**(session 树 + flow 横向轨道流 + stack 纵向),**非 react-flow 节点图**(TUI 做不出拖拽节点图,用户接受布局化)。多窗口分屏交 **Kitty 原生 layout**(见 ADR-10),非应用层模拟。crossterm 事件(含鼠标)。BT 版 `apps/tui/` 保留作 reference。
 
 **Consequences**:
 - 推翻 web 前端(canvas.live / observe page),改 ratatui(Rust,`apps/tui-rs/`)
 - 单 binary 跨平台零依赖(`./v2-tui`),终端原生,**无 web 栈 / CORS**
+- 终端基线 Kitty:GPU 渲染 + 原生多窗口 + icat 图片(非 Kitty 降级,见 ADR-10)
 - 画布布局化:flow 横向轨道 + 分支 `├─/└─` 自展开向下;stack 纵向;popup 鼠标拖拽
 - 选型留痕:BT 版 `apps/tui/` 作 reference,便于回溯决策依据
+- 多窗口分屏 / 分层架构 / 组件生态 / 降级详见 **ADR-10**
 
 ---
 
@@ -146,7 +151,51 @@ observe **不连任何 harness**,只收 orchestrator 推。事件流单向:harne
 
 ---
 
-## 决策一致性矩阵(9 决策 × 影响 × 阶段)
+## ADR-10: TUI 架构分层 + Kitty 多窗口 + 组件生态 + 降级(P2 分层重构)
+
+**Context**:ADR-6 选定 ratatui + Kitty,但 P1 基线只是简版三视图(flow/stack/popup demo 直绘)。P2 需升级为**完整分层架构**以支持:多窗口分屏 / 可拖拽弹窗 / 模态对话框 / 图片渲染 / 右键菜单 / 终端能力降级。若继续 P1 扁平直绘,弹窗栈 / z-index / 鼠标路由 / 降级检测会散落难维护。需明确分层 + 多窗口归属(终端原生 vs 应用层)+ 组件选型 + 降级策略。
+
+**Decision**:
+
+**(a) Kitty 原生多窗口(非应用层模拟)**:
+- 多窗口分屏交 **Kitty layout** 原生处理(ctrl+shift+enter split/stack/tab,Kitty 自管窗口栈),**TUI 不模拟多窗口**
+- 每个 Kitty window 跑一个 TUI 实例(或同实例多 viewport,P2 实现时定),窗口创建/关闭/焦点由 Kitty 管
+- **不兼容降级**:终端非 Kitty/不支持原生多窗口 → 单窗口 + 内部 tab 切换(应用层 tab)
+
+**(b) 分层架构(4 层)**:
+1. **Kitty Layout 层**(终端原生多窗口):窗口/分屏/tab 归 Kitty,TUI 不重复造
+2. **事件层**(crossterm event poll):`KeyEvent` → focused panel;`MouseEvent`(Down/Drag/Up/Scroll)→ 点击/拖拽/滚轮;`Resize` → 重算 layout。事件路由:弹窗栈顶 modal 优先消费
+3. **状态层**(App State,自有 event loop):Panel 管理(open/focus/z-index 栈);**弹窗栈**(modal 栈顶消费所有事件,下层 panel 冻结);数据 model(session/turn/event 缓存)
+4. **渲染层**(ratatui immediate-mode):`Clear` 弹窗遮罩;z-order = base panels → overlays → modal popup;弹窗 `Rect` 任意坐标(centered / absolute / offset)
+
+**(c) 组件生态(4 crate)**:
+- **tui-popup**:可拖拽弹窗(mouse_down/drag/up)
+- **ratatui-interact**:右键 / 下拉 / 模态 `PopupDialog`
+- **ratatui-image**:Kitty `icat` 图片渲染,降级占位
+- **rat-event**:弹窗事件优先级(`Dialog` qualifier,模态拦截)
+
+**(d) 弹窗鼠标方案**(按复杂度递进):
+- 普通:`Clear + Rect + area.contains` 手动点击检测
+- 可拖拽:tui-popup(mouse_down/drag/up)
+- 模态:ratatui-interact `PopupDialog` + rat-event `Dialog` 拦截(栈顶消费所有事件)
+- 右键:ContextMenu
+- z-index:绘制顺序决定(后画在上),弹窗栈维护栈序
+
+**(e) 降级检测**:
+- 检测终端能力(环境变量 `$TERM` / `KITTY_WINDOW_ID` / Kitty graphics protocol query)
+- 非 Kitty/Alacritty:关图片渲染(ratatui-image 占位)+ 降刷新率 + 提示切换终端
+- 非原生多窗口终端:降级单窗口 + 内部 tab
+
+**Consequences**:
+- Kitty 多窗口归终端原生,TUI 不背多窗口模拟复杂度(降级才退应用层 tab)
+- 分层隔离事件/状态/渲染/组件,弹窗栈 + z-index + 鼠标路由集中可维护
+- 组件复用生态(4 crate)而非手搓每个弹窗
+- 降级路径明确:能力检测 → 关图/降刷/提示切终端/单窗口 tab
+- **P2 范围**:分层重构(P1 扁平 → 4 层)+ Kitty 多窗口接入 + 组件集成 + raw exec;P1 基线(简版三视图)保留作过渡
+
+---
+
+## 决策一致性矩阵(10 决策 × 影响 × 阶段)
 
 | 决策 | 主题 | 影响 | 阶段 |
 |------|------|------|------|
@@ -159,12 +208,13 @@ observe **不连任何 harness**,只收 orchestrator 推。事件流单向:harne
 | ADR-7 | raw = TUI exec 子进程(甩 web 终端栈) | raw 通路;免 xterm.js/ws/node-pty/ttyd/tmux | P2 |
 | ADR-8 | 持久化 = harness resume(无 tmux/screen) | 免 tmux;依赖 --resume/claw session key | P1(验证)/ P2(兜底) |
 | ADR-9 | TUI 形态(单 binary + 本地优先 + SSH + 无 CORS/transport 作废) | 部署;跨域;废除旧 transport 抽象 | 全局(P0 后端)/ P2+(SSH) |
+| ADR-10 | TUI 分层架构 + Kitty 多窗口 + 组件生态 + 降级 | P1 扁平→4 层重构;多窗口归 Kitty 原生;弹窗栈/z-index/鼠标路由;降级检测 | P2(分层重构+Kitty+组件+raw exec) |
 
 ### 分阶段路线(对应矩阵)
 
 - **P0**:后端原语层 + observe 纯化(curl 验证,不依赖前端)— ADR-1/2/3/4/5 + ADR-9 后端半
 - **P1**:ratatui TUI(flow/stack/popup demo + 接 orchestrator 控制)— ADR-6 + ADR-8 验证
-- **P2**:raw exec + 多实例深耕 + 编排原语升级(turn 链/分支/DAG)— ADR-7 + ADR-5 深耕 + ADR-1 升级
+- **P2**:raw exec + 多实例深耕 + 编排原语升级(turn 链/分支/DAG)+ TUI 分层重构 — ADR-7 + ADR-5 深耕 + ADR-1 升级 + **ADR-10(分层重构+Kitty 多窗口+组件+raw exec)**
 - **P3+**:Tauri 桌面壳 / memory 独立数据服务 / 远程 SSH
 
 ---
