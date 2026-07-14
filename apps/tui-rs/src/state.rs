@@ -23,7 +23,7 @@
 //! 弹窗栈:Vec 末尾是栈顶(z-index 最高)。模态弹窗激活时,handle() 先把 key/mouse 喂给
 //! 栈顶弹窗的 PopupState/DialogState;rat-event Dialog qualifier 语义——消费即不下发 base panel。
 
-use crate::components::mouse::MouseCursor;
+use crate::components::mouse::{ClickMap, MouseCursor};
 use crate::components::scrollbar::ScrollView;
 use crate::components::split::HSplit;
 use crate::components::tabs::TabBar;
@@ -398,6 +398,8 @@ pub struct App {
     pub observe_area: Rect,
     /// 鼠标是否正在拖 observe 分隔条(Drag 延续)。
     pub observe_dragging: bool,
+    /// ClickMap 页面内交互元素命中(Control 按钮 + Observe session 项,ADR-1/ADR-2)。
+    pub clickmap: ClickMap<usize>,
 }
 
 impl App {
@@ -428,6 +430,7 @@ impl App {
             observe_scroll: ScrollView::new(vec![]),
             observe_area: Rect::default(),
             observe_dragging: false,
+            clickmap: ClickMap::new(),
         }
     }
 
@@ -750,6 +753,45 @@ impl App {
                 if let Some(i) = self.tabbar.hit(self.tab_area, m.column, m.row) {
                     self.tabbar.select(i);
                     self.sync_panel_from_tab();
+                    return;
+                }
+                // ADR-1:Control 按钮 ClickMap 命中(0=trigger,1=spawn,2=refresh,3=raw-exec)。
+                if self.panel == Panel::Control {
+                    if let Some(id) = self.clickmap.hit(m.column, m.row) {
+                        match *id {
+                            0 => self.do_turn(),
+                            1 => self.do_spawn(),
+                            2 => {
+                                if let Some(sg) = fetch_sessions() {
+                                    self.set_sessions(sg);
+                                }
+                                self.fetch_claw_events();
+                            }
+                            3 => self.open_popup(Popup::centered(
+                                "raw-exec",
+                                " raw exec · spawn harness",
+                                vec![
+                                    "选 session → spawn claude --resume <sid> / claw TUI 全屏".to_string(),
+                                    format!(" 当前 cursor session: {}", self.current_sid()),
+                                    " ctrl+d 退出 harness 回 TUI(占位:交互模式生效)".to_string(),
+                                ],
+                                64,
+                                8,
+                            )),
+                            _ => {}
+                        }
+                        return;
+                    }
+                }
+                // ADR-2:Observe session 列表项点击选中 cursor。
+                if self.panel == Panel::Observe {
+                    if let Some(idx) = self.clickmap.hit(m.column, m.row) {
+                        if *idx < self.flat.len() {
+                            self.cursor = *idx;
+                            self.fetch_current();
+                        }
+                        return;
+                    }
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) => {

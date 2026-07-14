@@ -461,7 +461,10 @@ fn stack_event_line(e: &ObserveEvent) -> Line<'static> {
     ])
 }
 
-pub fn draw_control(f: &mut Frame, area: Rect, app: &App) {
+pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
+    // ADR-1:每帧 clear + 注册 4 按钮 Rect(参考 widgets_demo ClickMap 模式)。
+    app.clickmap.clear();
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(6), Constraint::Min(1)])
@@ -489,6 +492,38 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &App) {
         Line::raw(""),
     ];
     f.render_widget(Paragraph::new(bar), chunks[0]);
+
+    // ADR-1:按钮行(4 按钮 ClickMap 命中,参考 widgets_demo btn_a/btn_b 模式)。
+    // 按钮渲染在 chunks[0] 底部最后一行(已空 Line::raw(""))。
+    let btn_row = Rect::new(chunks[0].x, chunks[0].y + chunks[0].height.saturating_sub(1), chunks[0].width, 1);
+    let btn_rects = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+        ])
+        .split(btn_row);
+    let btn_labels: [(&str, usize, Color); 4] = [
+        (" [t] trigger ", 0, Color::Green),
+        (" [s] spawn   ", 1, Color::Cyan),
+        (" [r] refresh ", 2, Color::Yellow),
+        (" [e] raw-exec", 3, Color::Magenta),
+    ];
+    for (label, id, color) in btn_labels {
+        let rect = btn_rects[id];
+        app.clickmap.register(rect, id);
+        f.render_widget(
+            Paragraph::new(label).style(
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            rect,
+        );
+    }
 
     let mut lane_lines: Vec<Line> = vec![Line::from(Span::styled(
         " flow lane · openclaw 真实 turn(多实例 lane · tick_started → token_delta → tick_completed)".to_string(),
