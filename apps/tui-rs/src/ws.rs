@@ -21,9 +21,14 @@
 use crate::state::ObserveEvent;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::net::TcpStream;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tungstenite::client;
+use tungstenite::Message;
 
 const OBSERVE_WS: &str = "ws://localhost:8002";
 /// ping 间隔(保活;observe 服务端 receive_json 循环会等客户端消息,
@@ -91,7 +96,9 @@ impl WsManager {
         let handle = thread::Builder::new()
             .name("ws-manager".into())
             .spawn(move || {
-                let mut subs: HashMap<String, JoinHandle<()>> = HashMap::new();
+                // subs: key → (子线程 handle, closing flag)。closing flag 让 ws_loop
+                // 可中断(set_read_timeout 超时检测)→ graceful close socket(observe 侧 unsubscribe)。
+                let mut subs: HashMap<String, (JoinHandle<()>, Arc<AtomicBool>)> = HashMap::new();
                 for cmd in cmd_rx {
                     match cmd {
                         WsCmd::Subscribe { harness_type, session_id } => {
@@ -103,20 +110,23 @@ impl WsManager {
                             let ht = harness_type.clone();
                             let sid = session_id.clone();
                             let key_for_thread = key.clone();
+                            let closing = Arc::new(AtomicBool::new(false));
+                            let closing_for_thread = closing.clone();
                             let h = thread::Builder::new()
                                 .name(format!("ws-{}", key))
-                                .spawn(move || ws_loop(&ht, &sid, &key_for_thread, &msg_tx))
+                                .spawn(move || ws_loop(&ht, &sid, &key_for_thread, &msg_tx, closing_for_thread))
                                 .ok();
                             if let Some(h) = h {
-                                subs.insert(key, h);
+                                subs.insert(key, (h, closing));
                             }
                         }
                         WsCmd::Unsubscribe { harness_type, session_id } => {
                             let key = format!("{}/{}", harness_type, session_id);
-                            // JoinHandle 丢弃不 join(线程自行退出;drop 等效 detach)。
-                            // ponytail: 不发 close frame——drop socket 即断;observe 侧
-                            // WebSocketDisconnect 处理 unsubscribe。完善 graceful close defer。
-                            subs.remove(&key);
+                            // graceful close:设 closing flag → ws_loop 下次 read 超时检测 → break →
+                            // socket drop 发 close frame → observe 侧 WebSocketDisconnect unsubscribe。
+                            if let Some((_h, closing)) = subs.remove(&key) {
+                                closing.store(true, Ordering::Relaxed);
+                            }
                         }
                         WsCmd::Shutdown => {
                             // drop 所有 handle(detach);manager 退出。
@@ -157,33 +167,41 @@ impl WsManager {
 /// 单 key WS 读循环(子线程)。阻塞 read → 解析 → mpsc send。
 /// 连接断开/出错 → 发 WsMsg::Error → 线程退出(manager 已移除 key 不重连,
 /// 主 loop 下次 subscribe 同 key 会重建)。
-fn ws_loop(harness_type: &str, session_id: &str, key: &str, tx: &Sender<WsMsg>) {
+fn ws_loop(harness_type: &str, session_id: &str, key: &str, tx: &Sender<WsMsg>, closing: Arc<AtomicBool>) {
     let url = format!(
         "{}/ws/subscribe?harness_type={}&session_id={}",
         OBSERVE_WS, harness_type, session_id
     );
-    let (mut socket, _resp) = match tungstenite::connect(&url) {
+    // 手动建 TcpStream + set_read_timeout(绕过 connect 的 MaybeTlsStream,拿底层
+    // TcpStream 控制 → read 可中断检查 closing/ping)。修复 P3 minor 1/2。
+    // ponytail: host 硬编码 localhost:8002(与 OBSERVE_WS 一致;改 OBSERVE_WS 需同步)。
+    let tcp = match TcpStream::connect("localhost:8002") {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = tx.send(WsMsg::Error { key: key.to_string(), msg: format!("tcp connect: {}", e) });
+            return;
+        }
+    };
+    let _ = tcp.set_read_timeout(Some(Duration::from_millis(500)));
+    let (mut socket, _resp) = match client::client(&url, tcp) {
         Ok(p) => p,
         Err(e) => {
-            let _ = tx.send(WsMsg::Error { key: key.to_string(), msg: format!("connect: {}", e) });
+            let _ = tx.send(WsMsg::Error { key: key.to_string(), msg: format!("ws connect: {}", e) });
             return;
         }
     };
     let is_flow = harness_type == "flow";
     let flow_id = session_id.to_string();
-    // ponytail: read 阻塞,无法交错发 ping(tungstenite WebSocket 非 Clone,
-    // 不能开 ticker 线程持 socket)。observe 服务端 broadcast 不依赖客户端
-    // ping(concurrent send_text vs receive_json),连接保持。长空闲 +
-    // 服务端超时 → 断 → Error → 主 loop 重 subscribe(WS manager idempotent)。
-    // 完善:set_nonblock + select(ping/recv)defer。
-    let _ = PING_INTERVAL; // 标记常量已设计(防空闲断连),当前依赖 broadcast 保活
+    let mut last_ping = Instant::now();
 
     loop {
+        if closing.load(Ordering::Relaxed) {
+            break; // unsubscribe → graceful close(socket drop 发 close frame)
+        }
         match socket.read() {
             Ok(msg) => {
                 // tungstenite 0.26: into_text() → Result<Utf8Bytes, Error>。
                 if let Ok(text) = msg.into_text() {
-                    // text: Utf8Bytes(deref &str)。serde 解析 observe broadcast JSON。
                     if let Ok(p) = serde_json::from_str::<WsPayload>(&text) {
                         let ev: ObserveEvent = p.into();
                         let m = if is_flow {
@@ -198,8 +216,21 @@ fn ws_loop(harness_type: &str, session_id: &str, key: &str, tx: &Sender<WsMsg>) 
                     // 非 ObserveEvent JSON(如 {"type":"pong"})忽略。
                 }
             }
-            Err(tungstenite::Error::ConnectionClosed) => break,
-            Err(tungstenite::Error::AlreadyClosed) => break,
+            Err(tungstenite::Error::ConnectionClosed) | Err(tungstenite::Error::AlreadyClosed) => break,
+            Err(tungstenite::Error::Io(ref e))
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                // read 超时(set_read_timeout)→ 检查 closing + ping 交错。
+                if closing.load(Ordering::Relaxed) {
+                    break;
+                }
+                if last_ping.elapsed() >= PING_INTERVAL {
+                    let _ = socket.send(Message::Ping(vec![].into()));
+                    last_ping = Instant::now();
+                }
+                continue;
+            }
             Err(e) => {
                 let _ = tx.send(WsMsg::Error {
                     key: key.to_string(),
