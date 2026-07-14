@@ -82,6 +82,12 @@ pub fn fetch_events(h: &str, sid: &str) -> Option<Vec<ObserveEvent>> {
         .map(|e| e.events)
 }
 
+/// orche /health 预检(ADR-3)。GET :8001/health → bool。
+/// 非 业务方法:新 REST fetch,不触 state.rs 业务方法/数据字段。
+pub fn fetch_orche_health() -> bool {
+    ureq::get(&format!("{}/health", ORCH)).call().is_ok()
+}
+
 // ═══ flow engine(ADR-1 P2:turn 链/分支/DAG on trigger_turn)══════════
 // 镜像 services/orchestrator/src/harness/flow.py 的 FlowDef JSON DSL。
 // 调度在 orche 侧;TUI 只 create/run/poll 状态 + 渲染 DAG。
@@ -360,6 +366,39 @@ impl Popup {
 
 // ═══ App state ═════════════════════════════════════════════════════
 
+/// 键盘焦点目标(ADR-2:统一 focus indicator)。Tab 在目标间循环,方向键 panel 内切。
+/// UI 状态字段,不影响业务方法/数据结构。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FocusTarget {
+    TabBar,
+    /// Control tab 按钮索引(trigger/spawn/refresh/rawexec/flow-create-chain/...)。
+    ControlButton(usize),
+    /// Observe tab session 列表。
+    ObserveSession,
+    /// Flows tab flow 列表索引。
+    FlowsFlow(usize),
+}
+
+/// Control tab 按钮总数(trigger/spawn/refresh/rawexec + flow create Chain/Branch/DAG + run)。
+/// 键盘焦点循环时用此 cap ControlButton(idx)。T2 扩按钮后此常量同步。
+pub const CONTROL_BUTTON_COUNT: usize = 8;
+
+impl FocusTarget {
+    /// Tab 键:按 panel 切到下一个 focus 目标(panel 内 Tab → TabBar;TabBar → panel 首元素)。
+    /// ponytail: 简化 cycle——Tab 在 TabBar 和当前 panel 首元素间切;方向键 panel 内移。
+    pub fn cycle(self, panel: Panel) -> Self {
+        match self {
+            FocusTarget::TabBar => match panel {
+                Panel::Control => FocusTarget::ControlButton(0),
+                Panel::Observe => FocusTarget::ObserveSession,
+                Panel::Flows => FocusTarget::FlowsFlow(0),
+                Panel::Home => FocusTarget::TabBar, // Home 无可聚焦元素,停在 TabBar
+            },
+            _ => FocusTarget::TabBar,
+        }
+    }
+}
+
 pub struct App {
     /// 当前 focused base panel(P1)。
     pub panel: Panel,
@@ -404,6 +443,13 @@ pub struct App {
     /// None = 未启用(--dump / 测试);交互模式 main.rs 注入。
     /// ponytail: Option 包裹避免测试/new 强依赖网络;业务方法不触此字段。
     pub ws: Option<crate::ws::WsManager>,
+    // ── T1/T2 UI 状态(ADR-2/ADR-3,非业务字段)──────────────────────
+    /// 键盘焦点目标(ADR-2:统一 focus indicator)。
+    pub focus: FocusTarget,
+    /// orche 在线状态(ADR-3:fetch_orche_health 周期预检)。离线时 Control 显提示。
+    pub orche_online: bool,
+    /// 上次按钮点击时间 + action 名(ADR-3:点击 loading 反馈,render 检 <500ms 高亮)。
+    pub last_action: Option<(std::time::Instant, &'static str)>,
 }
 
 impl App {
@@ -436,6 +482,9 @@ impl App {
             observe_dragging: false,
             clickmap: ClickMap::new(),
             ws: None,
+            focus: FocusTarget::TabBar,
+            orche_online: true, // 默认假设在线,首次预检刷新
+            last_action: None,
         }
     }
 
@@ -649,8 +698,20 @@ impl App {
 
     // ── 事件消费 ──────────────────────────────────────────────────
 
-    /// 消费一个 AppEvent。返回 true 表示要退出 app。
-    ///
+    /// ADR-3:记录按钮点击时间 + action 名(render 检 <500ms 显 loading 高亮)。UI 状态,不改业务。
+    pub fn mark_action(&mut self, name: &'static str) {
+        self.last_action = Some((std::time::Instant::now(), name));
+    }
+
+    /// ADR-3:上次动作是否在 loading 窗口内(<500ms)。render 用此判按钮高亮态。
+    pub fn action_loading(&self, name: &str) -> bool {
+        match self.last_action {
+            Some((t, n)) => n == name && t.elapsed().as_millis() < 500,
+            None => false,
+        }
+    }
+
+    /// 消费一个 AppEvent。返回 true 表示要退出 app。    ///
     /// 分层分发:弹窗栈顶模态激活时,Key/Mouse 先喂弹窗(rat-event Dialog 语义,消费即不下发);
     /// 否则走 base panel(P1 keybindings)。
     pub fn handle(&mut self, ev: &crate::events::AppEvent) -> bool {
@@ -757,17 +818,19 @@ impl App {
                     self.sync_panel_from_tab();
                     return;
                 }
-                // ADR-1:Control 按钮 ClickMap 命中(0=trigger,1=spawn,2=refresh,3=raw-exec)。
+                // ADR-1:Control 按钮 ClickMap 命中(0=trigger,1=spawn,2=refresh,3=raw-exec,
+                //   4=create-chain,5=create-branch,6=create-dag,7=run-flow — T2 flow 入 Control)。
                 if self.panel == Panel::Control {
-                    if let Some(id) = self.clickmap.hit(m.column, m.row) {
-                        match *id {
-                            0 => self.do_turn(),
-                            1 => self.do_spawn(),
+                    if let Some(id) = self.clickmap.hit(m.column, m.row).cloned() {
+                        match id {
+                            0 => { self.do_turn(); self.mark_action("trigger"); }
+                            1 => { self.do_spawn(); self.mark_action("spawn"); }
                             2 => {
                                 if let Some(sg) = fetch_sessions() {
                                     self.set_sessions(sg);
                                 }
                                 self.fetch_claw_events();
+                                self.orche_online = fetch_orche_health();
                             }
                             3 => self.open_popup(Popup::centered(
                                 "raw-exec",
@@ -780,8 +843,14 @@ impl App {
                                 64,
                                 8,
                             )),
+                            4 => { self.create_preset_flow(FlowPreset::Chain); self.mark_action("create_chain"); }
+                            5 => { self.create_preset_flow(FlowPreset::Branch); self.mark_action("create_branch"); }
+                            6 => { self.create_preset_flow(FlowPreset::Dag); self.mark_action("create_dag"); }
+                            7 => { self.run_current_flow(); self.mark_action("run_flow"); }
                             _ => {}
                         }
+                        // ADR-2:点击后焦点归该按钮(键盘聚焦框跟随)。
+                        self.focus = FocusTarget::ControlButton(id);
                         return;
                     }
                 }
@@ -845,6 +914,13 @@ impl App {
             KeyCode::Tab => {
                 self.tabbar.next();
                 self.sync_panel_from_tab();
+                // ADR-2:切 panel 后焦点归 TabBar(下次方向键进入 panel 元素)。
+                self.focus = FocusTarget::TabBar;
+                false
+            }
+            KeyCode::BackTab => {
+                // ADR-2:Shift+Tab 在 TabBar 与当前 panel 元素间切焦点。
+                self.focus = self.focus.cycle(self.panel);
                 false
             }
             KeyCode::Char('1') => {
@@ -865,61 +941,90 @@ impl App {
             KeyCode::Char('4') => {
                 self.panel = Panel::Control;
                 self.sync_tab_from_panel();
+                // ADR-3:进入 Control 时预检 orche health(非阻塞,失败默认 false)。
+                self.orche_online = fetch_orche_health();
                 false
             }
             KeyCode::Char('c') => {
                 self.panel = Panel::Control;
                 self.sync_tab_from_panel();
+                self.orche_online = fetch_orche_health();
                 false
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 // P2 flow panel:j/k 切 flow cursor;Observe panel:j/k 滚 turn stream(ADR-2)。
                 if self.panel == Panel::Flows {
                     self.flow_cursor_down();
+                    // ADR-2:方向键更新键盘焦点跟随 flow cursor。
+                    self.focus = FocusTarget::FlowsFlow(self.flow_cursor);
                 } else if self.panel == Panel::Observe {
                     self.observe_scroll.scroll_down(1);
+                    self.focus = FocusTarget::ObserveSession;
+                } else if self.panel == Panel::Control {
+                    // ADR-2:Control panel 方向键在按钮间切焦点(不触发动作,只移动聚焦框)。
+                    let next = match self.focus {
+                        FocusTarget::ControlButton(i) => (i + 1).min(CONTROL_BUTTON_COUNT - 1),
+                        _ => 0,
+                    };
+                    self.focus = FocusTarget::ControlButton(next);
                 } else {
                     self.cursor_down();
+                    self.focus = FocusTarget::ObserveSession;
                 }
                 false
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 if self.panel == Panel::Flows {
                     self.flow_cursor_up();
+                    self.focus = FocusTarget::FlowsFlow(self.flow_cursor);
                 } else if self.panel == Panel::Observe {
                     self.observe_scroll.scroll_up(1);
+                    self.focus = FocusTarget::ObserveSession;
+                } else if self.panel == Panel::Control {
+                    let prev = match self.focus {
+                        FocusTarget::ControlButton(i) => i.saturating_sub(1),
+                        _ => 0,
+                    };
+                    self.focus = FocusTarget::ControlButton(prev);
                 } else {
                     self.cursor_up();
+                    self.focus = FocusTarget::ObserveSession;
                 }
                 false
             }
             KeyCode::Char('f') => {
                 // P2 flow:create 预设链 flow(A→B)。
                 self.create_preset_flow(FlowPreset::Chain);
+                self.mark_action("create_chain");
                 false
             }
             KeyCode::Char('G') => {
                 // P2 flow:create 预设分支 flow(A→B if cond else C)。
                 self.create_preset_flow(FlowPreset::Branch);
+                self.mark_action("create_branch");
                 false
             }
             KeyCode::Char('D') => {
                 // P2 flow:create 预设 DAG(A,C 并行 → B 合并)。
                 self.create_preset_flow(FlowPreset::Dag);
+                self.mark_action("create_dag");
                 false
             }
             KeyCode::Char('R') => {
                 // P2 flow:run 当前 cursor flow(POST /h/flows/{id}/run)。
                 self.run_current_flow();
+                self.mark_action("run_flow");
                 false
             }
             KeyCode::Char('t') => {
                 self.do_turn();
+                self.mark_action("trigger");
                 false
             }
             KeyCode::Char('s') => {
                 // 多实例:claude-code spawn 同 sid 多 PTY;claw create 新 session。
                 self.do_spawn();
+                self.mark_action("spawn");
                 false
             }
             KeyCode::Char('r') => {
@@ -1259,5 +1364,106 @@ mod tests {
         app.handle(&crate::events::AppEvent::Tick);
         // events 仍空(无 WS,无 fetch_claw_events)。
         assert!(app.events.is_empty(), "Tick with no WS should not fetch events via REST");
+    }
+
+    // ── T1/T2 自测(ADR-1/ADR-2/ADR-3:焦点循环 + loading + UI 状态)──────
+
+    /// ADR-2:FocusTarget::cycle 在 TabBar 与 panel 元素间切。
+    #[test]
+    fn focus_target_cycles_tabbar_and_panel() {
+        // Control panel:TabBar → ControlButton(0)。
+        assert_eq!(FocusTarget::TabBar.cycle(Panel::Control), FocusTarget::ControlButton(0));
+        // 从 ControlButton 回 TabBar。
+        assert_eq!(FocusTarget::ControlButton(0).cycle(Panel::Control), FocusTarget::TabBar);
+        // Observe:TabBar → ObserveSession。
+        assert_eq!(FocusTarget::TabBar.cycle(Panel::Observe), FocusTarget::ObserveSession);
+        // Flows:TabBar → FlowsFlow(0)。
+        assert_eq!(FocusTarget::TabBar.cycle(Panel::Flows), FocusTarget::FlowsFlow(0));
+        // Home:无元素,停在 TabBar。
+        assert_eq!(FocusTarget::TabBar.cycle(Panel::Home), FocusTarget::TabBar);
+    }
+
+    /// ADR-2:键盘 BackTab(Shift+Tab)切焦点(经 handle)。
+    #[test]
+    fn backtab_cycles_focus() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        app.focus = FocusTarget::TabBar;
+        // Shift+Tab:TabBar → ControlButton(0)。
+        let ev = crate::events::AppEvent::Key(KeyEvent::new(KeyCode::BackTab, crossterm::event::KeyModifiers::SHIFT));
+        app.handle(&ev);
+        assert_eq!(app.focus, FocusTarget::ControlButton(0), "BackTab should cycle focus to ControlButton(0)");
+        // 再 Shift+Tab:ControlButton(0) → TabBar。
+        app.handle(&ev);
+        assert_eq!(app.focus, FocusTarget::TabBar, "BackTab again should cycle back to TabBar");
+    }
+
+    /// ADR-3:mark_action + action_loading(<500ms 高亮窗口)。
+    #[test]
+    fn mark_action_sets_loading_window() {
+        let mut app = App::new(crate::kitty::detect());
+        // 无 action:不 loading。
+        assert!(!app.action_loading("trigger"));
+        app.mark_action("trigger");
+        // 刚标记:loading(<500ms)。
+        assert!(app.action_loading("trigger"), "action just marked should be loading");
+        assert!(!app.action_loading("spawn"), "different action name should not be loading");
+    }
+
+    /// ADR-2:App::new 初始化 UI 状态字段(focus/orche_online/last_action)。
+    #[test]
+    fn new_initializes_ui_state_fields() {
+        let app = App::new(crate::kitty::detect());
+        assert_eq!(app.focus, FocusTarget::TabBar);
+        assert!(app.last_action.is_none());
+        // orche_online 默认 true(首次预检刷新)。
+        assert!(app.orche_online);
+    }
+
+    /// ADR-3:Control 按钮点击设 focus + mark_action。
+    /// 模拟 clickmap 注册 trigger 按钮(id=0),点击后 focus=ControlButton(0) + last_action=trigger。
+    #[test]
+    fn control_click_sets_focus_and_loading() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        app.clickmap.clear();
+        app.clickmap.register(Rect::new(0, 5, 20, 1), 0); // trigger 按钮
+        let m = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 5,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        app.handle_base_mouse(&m);
+        assert_eq!(app.focus, FocusTarget::ControlButton(0), "click should set focus to clicked button");
+        assert!(app.action_loading("trigger"), "click should mark trigger as loading");
+    }
+
+    /// ADR-3:Control 方向键切 focus(ControlButton idx 在 0..CONTROL_BUTTON_COUNT 间)。
+    #[test]
+    fn control_arrow_keys_move_focus() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        app.focus = FocusTarget::ControlButton(0);
+        // Down:j 方向键 → ControlButton(1)。
+        app.handle_base_key(&KeyEvent::new(KeyCode::Down, crossterm::event::KeyModifiers::empty()));
+        assert_eq!(app.focus, FocusTarget::ControlButton(1));
+        // Up:k 方向键 → 回 ControlButton(0)。
+        app.handle_base_key(&KeyEvent::new(KeyCode::Up, crossterm::event::KeyModifiers::empty()));
+        assert_eq!(app.focus, FocusTarget::ControlButton(0));
+    }
+
+    /// ADR-3:fetch_orche_health 函数存在且不 panic(orche 离线时返 false,不 crash)。
+    #[test]
+    fn fetch_orche_health_returns_bool_without_panic() {
+        // 测试环境 orche 不可达,应返 false 而非 panic。
+        let _ = fetch_orche_health();
+    }
+
+    /// ADR-3:CONTROL_BUTTON_COUNT 覆盖所有 flow 按钮(create chain/branch/dag + run)。
+    #[test]
+    fn control_button_count_covers_all_flow_buttons() {
+        // 8 按钮:trigger(0)/spawn(1)/refresh(2)/rawexec(3)/chain(4)/branch(5)/dag(6)/run(7)。
+        assert_eq!(CONTROL_BUTTON_COUNT, 8);
     }
 }

@@ -109,6 +109,12 @@ impl TabBar {
 
     /// 渲染 tab 栏(原生 Tabs + 窗口切片 + < / > 边缘提示)。
     pub fn render(&mut self, f: &mut Frame, area: Rect) {
+        self.render_with_hover(f, area, None);
+    }
+
+    /// 渲染 tab 栏 + 鼠标悬停高亮(ADR-1)。
+    /// hovered_col/hovered_row = Some 时,悬停的 tab 加 reversed 边框高亮。
+    pub fn render_with_hover(&mut self, f: &mut Frame, area: Rect, hover: Option<(u16, u16)>) {
         let start = self.windowed_start(area);
         self.first_visible = start;
         let n = self.visible_count_at(start, area);
@@ -137,6 +143,34 @@ impl TabBar {
             .select(local_active)
             .divider("│")
             .render(area, f.buffer_mut());
+
+        // ADR-1:鼠标悬停 tab 高亮(在原生 Tabs 渲染后覆写悬停 tab 的 cell 样式)。
+        if let Some((col, row)) = hover {
+            if let Some(idx) = self.hit(area, col, row) {
+                if idx != self.active {
+                    // 算悬停 tab 的 x 范围(同 hit 逻辑),覆写该范围 cell 加 UNDERLINED。
+                    let inner = Block::bordered().inner(area);
+                    let last_visible = start + n - 1;
+                    let mut x = inner.x;
+                    for (i, t) in self.titles.iter().enumerate().skip(start).take(n) {
+                        let cw = Self::cell_width(t) as u16;
+                        let w = if i == last_visible { cw } else { cw + 1 };
+                        if i == idx {
+                            // 覆写悬停区域(仅 inner 行)加下划线高亮。
+                            for dx in 0..w {
+                                if let Some(cell) = f.buffer_mut().cell_mut((x + dx, row.max(inner.y))) {
+                                    let mut s = cell.style();
+                                    s = s.add_modifier(Modifier::UNDERLINED | Modifier::BOLD);
+                                    cell.set_style(s);
+                                }
+                            }
+                            break;
+                        }
+                        x += w;
+                    }
+                }
+            }
+        }
     }
 
     /// 鼠标点击命中:返回点中的 tab 全局索引(窗口偏移已加回)。

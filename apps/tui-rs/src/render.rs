@@ -7,7 +7,7 @@
 //! 仅把外层 draw() 改成分层调度 + 弹窗栈叠加渲染。
 
 use crate::components;
-use crate::state::{fmt_val, trunc, App, ObserveEvent, Panel, TrackedFlow};
+use crate::state::{fmt_val, trunc, App, FocusTarget, ObserveEvent, Panel, TrackedFlow};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -233,6 +233,15 @@ pub fn draw_flow(f: &mut Frame, area: Rect, app: &App) {
     lines.push(flow_selector_line(app));
     lines.push(Line::raw(""));
 
+    // ADR-2:键盘聚焦 FlowsFlow 时显示聚焦标记。
+    if matches!(app.focus, FocusTarget::FlowsFlow(_)) {
+        lines.push(Line::from(Span::styled(
+            " ▶ 键盘聚焦 flow 列表(方向键 j/k 切 flow · Enter 无鼠标也能操作)".to_string(),
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::raw(""));
+    }
+
     if let Some(tf) = app.current_flow() {
         lines.extend(flow_dag_lines(tf, cur));
     }
@@ -411,8 +420,17 @@ pub fn draw_stack(f: &mut Frame, area: Rect, app: &mut App) {
                 let label = trunc(&s.session_id, 22);
                 let n = app.instance_count(&s.harness_type, &s.session_id);
                 let multi_tag = if n >= 2 { format!(" ×{}", n) } else { String::new() };
+                let row_rect = Rect::new(left.x, left.y + row_idx, left.width, 1);
+                // ADR-1:hover 高亮(MouseCursor.in_rect)+ ADR-2:focus。
+                let hovered = app.mouse.in_rect(row_rect);
+                let focused = matches!(app.focus, FocusTarget::ObserveSession) && ci == app.cursor;
                 let (prefix, st) = if ci == app.cursor {
                     ("▸ ", Style::default().fg(Color::White).bg(Color::Blue).add_modifier(Modifier::BOLD))
+                } else if hovered {
+                    // hover:黄底(区别 cursor 蓝)
+                    ("  ", Style::default().fg(Color::Black).bg(Color::Yellow))
+                } else if focused {
+                    ("▶ ", Style::default().fg(Color::White).bg(Color::DarkGray).add_modifier(Modifier::BOLD))
                 } else {
                     ("  ", Style::default().fg(Color::White))
                 };
@@ -423,7 +441,6 @@ pub fn draw_stack(f: &mut Frame, area: Rect, app: &mut App) {
                 ]);
                 items.push(ListItem::new(line));
                 // ADR-2:注册 session 项 Rect(id=flat index ci)供鼠标点击命中。
-                let row_rect = Rect::new(left.x, left.y + row_idx, left.width, 1);
                 app.clickmap.register(row_rect, ci);
                 ci += 1;
                 row_idx = row_idx.saturating_add(1);
@@ -472,20 +489,28 @@ fn stack_event_line(e: &ObserveEvent) -> Line<'static> {
 }
 
 pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
-    // ADR-1:每帧 clear + 注册 4 按钮 Rect(参考 widgets_demo ClickMap 模式)。
+    // ADR-1:每帧 clear + 注册按钮 Rect(参考 widgets_demo ClickMap 模式)。
     app.clickmap.clear();
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(6), Constraint::Min(1)])
+        .constraints([Constraint::Length(7), Constraint::Min(1)])
         .split(area);
+
+    // ADR-3:orche health 提示(离线时显 ⚠ 警告)。
+    let orche_hint = if app.orche_online {
+        Span::styled(" orche: ● online", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+    } else {
+        Span::styled(" orche: ⚠ 离线,REST 将失败(按 r 重试)", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+    };
 
     let status_disp = app.turn_status.clone().unwrap_or_else(|| "(未触发)".to_string());
     let bar = vec![
-        Line::from(Span::styled(
-            " CONTROL · orchestrator 原语".to_string(),
-            Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
-        )),
+        Line::from(vec![
+            Span::styled(" CONTROL · orchestrator 原语", Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD)),
+            Span::raw("   "),
+            orche_hint,
+        ]),
         Line::from(vec![
             Span::styled(" session   ", Style::default().fg(Color::DarkGray)),
             Span::styled(crate::state::CLAW_SESSION.to_string(), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
@@ -497,42 +522,58 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
         ]),
         Line::from(vec![
             Span::styled(" last turn ", Style::default().fg(Color::DarkGray)),
-            Span::styled(trunc(&status_disp, 80), Style::default().fg(Color::White)),
+            Span::styled(trunc(&status_disp, 70), Style::default().fg(Color::White)),
         ]),
         Line::raw(""),
     ];
     f.render_widget(Paragraph::new(bar), chunks[0]);
 
-    // ADR-1:按钮行(4 按钮 ClickMap 命中,参考 widgets_demo btn_a/btn_b 模式)。
-    // 按钮渲染在 chunks[0] 底部最后一行(已空 Line::raw(""))。
-    let btn_row = Rect::new(chunks[0].x, chunks[0].y + chunks[0].height.saturating_sub(1), chunks[0].width, 1);
-    let btn_rects = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-        ])
-        .split(btn_row);
-    let btn_labels: [(&str, usize, Color); 4] = [
-        (" [t] trigger ", 0, Color::Green),
-        (" [s] spawn   ", 1, Color::Cyan),
-        (" [r] refresh ", 2, Color::Yellow),
-        (" [e] raw-exec", 3, Color::Magenta),
+    // ADR-1/T2:按钮行(8 按钮:trigger/spawn/refresh/rawexec + create-chain/branch/dag + run)。
+    // 按钮渲染在 chunks[0] 底部两行(第一行 4 按钮,第二行 4 flow 按钮)。
+    let btn_row1 = Rect::new(chunks[0].x, chunks[0].y + chunks[0].height.saturating_sub(2), chunks[0].width, 1);
+    let btn_row2 = Rect::new(chunks[0].x, chunks[0].y + chunks[0].height.saturating_sub(1), chunks[0].width, 1);
+    let quarter = [Constraint::Percentage(25); 4];
+    let btn_rects1 = Layout::default().direction(Direction::Horizontal).constraints(quarter.clone()).split(btn_row1);
+    let btn_rects2 = Layout::default().direction(Direction::Horizontal).constraints(quarter).split(btn_row2);
+
+    // (label, id, base_color, action_name) — action_name 对应 mark_action 的 loading 检测。
+    let row1: [(&str, usize, Color, &str); 4] = [
+        (" [t] trigger ", 0, Color::Green, "trigger"),
+        (" [s] spawn   ", 1, Color::Cyan, "spawn"),
+        (" [r] refresh ", 2, Color::Yellow, ""),
+        (" [e] raw-exec", 3, Color::Magenta, ""),
     ];
-    for (label, id, color) in btn_labels {
-        let rect = btn_rects[id];
-        app.clickmap.register(rect, id);
-        f.render_widget(
-            Paragraph::new(label).style(
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(color)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            rect,
-        );
+    let row2: [(&str, usize, Color, &str); 4] = [
+        (" [f] chain   ", 4, Color::Blue, "create_chain"),
+        (" [G] branch  ", 5, Color::Blue, "create_branch"),
+        (" [D] DAG     ", 6, Color::Blue, "create_dag"),
+        (" [R] run     ", 7, Color::Red, "run_flow"),
+    ];
+    for (rects, row_data) in [(&btn_rects1, &row1), (&btn_rects2, &row2)] {
+        for (label, id, color, action) in row_data.iter() {
+            let rect = rects[*id];
+            app.clickmap.register(rect, *id);
+            // ADR-1:hover 高亮(MouseCursor.in_rect)+ ADR-2:focus 聚焦框 + ADR-3:loading。
+            let hovered = app.mouse.in_rect(rect);
+            let focused = matches!(app.focus, FocusTarget::ControlButton(i) if i == *id);
+            let loading = !action.is_empty() && app.action_loading(action);
+            let base_bg = *color;
+            let style = if loading {
+                // loading:闪烁黄底(点击后 <500ms)
+                Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::RAPID_BLINK | Modifier::BOLD)
+            } else if focused {
+                // 键盘焦点:加边框感(白底)
+                Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD)
+            } else if hovered {
+                // 鼠标悬停:亮色边框
+                Style::default().fg(Color::Black).bg(base_bg).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            } else {
+                Style::default().fg(Color::Black).bg(base_bg).add_modifier(Modifier::BOLD)
+            };
+            // 焦点按钮加 ▶ 前缀(键盘可见)。
+            let display = if focused { format!("▶{}", label) } else { label.to_string() };
+            f.render_widget(Paragraph::new(display).style(style), rect);
+        }
     }
 
     let mut lane_lines: Vec<Line> = vec![Line::from(Span::styled(
@@ -709,9 +750,20 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         .constraints([Constraint::Length(3), Constraint::Min(1), Constraint::Length(1)])
         .split(area);
 
-    // 顶栏:TabBar 渲染 + 缓存 tab_area 供鼠标 hit。
-    app.tabbar.render(f, chunks[0]);
+    // 顶栏:TabBar 渲染(ADR-1:传鼠标位置做悬停高亮)+ 缓存 tab_area 供鼠标 hit。
+    let hover = if app.mouse.visible { Some((app.mouse.x, app.mouse.y)) } else { None };
+    app.tabbar.render_with_hover(f, chunks[0], hover);
     app.tab_area = chunks[0];
+
+    // ADR-2:键盘焦点在 TabBar 时,在 tab 栏底部加 ▶ 聚焦标记。
+    if matches!(app.focus, FocusTarget::TabBar) {
+        let focus_rect = Rect::new(chunks[0].x, chunks[0].y, 1, chunks[0].height);
+        if let Some(cell) = f.buffer_mut().cell_mut((focus_rect.x, focus_rect.y + focus_rect.height.saturating_sub(1))) {
+            let mut s = cell.style();
+            s = s.fg(Color::Yellow).add_modifier(Modifier::BOLD);
+            cell.set_char('▶').set_style(s);
+        }
+    }
 
     // 顶层统一 clear clickmap(不依赖各 panel 互斥 clear;Flows 等无 clickmap 的 tab 也 clean,修 minor 2/3)。
     app.clickmap.clear();
