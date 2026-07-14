@@ -400,6 +400,10 @@ pub struct App {
     pub observe_dragging: bool,
     /// ClickMap 页面内交互元素命中(Control 按钮 + Observe session 项,ADR-1/ADR-2)。
     pub clickmap: ClickMap<usize>,
+    /// ADR-1 T4:WS 直连 observe(弃 REST polling)。WS manager + 事件 channel。
+    /// None = 未启用(--dump / 测试);交互模式 main.rs 注入。
+    /// ponytail: Option 包裹避免测试/new 强依赖网络;业务方法不触此字段。
+    pub ws: Option<crate::ws::WsManager>,
 }
 
 impl App {
@@ -431,6 +435,7 @@ impl App {
             observe_area: Rect::default(),
             observe_dragging: false,
             clickmap: ClickMap::new(),
+            ws: None,
         }
     }
 
@@ -656,14 +661,11 @@ impl App {
                 self.size = (*w, *h);
             }
             AppEvent::Tick => {
-                // ponytail: 固定计数轮询 claw events,observe 挂了静默跳过(复用 P1 逻辑)。
-                if self.panel == Panel::Flows || self.panel == Panel::Control {
-                    self.fetch_claw_events();
-                }
-                // P2 flow:周期 poll 非终态 flow 的 GET /h/flows/{id}(实时 node 状态)。
-                if !self.flows.is_empty() {
-                    self.refresh_flows();
-                }
+                // ADR-1 T4:弃 REST polling。Tick 只 drain WS channel + UI 刷新。
+                // turn 事件经 WS 推送(drain_ws → app.events[key]);
+                // flow 事件经 WS 推送(drain_ws → app.flows[i].status)。
+                // fetch_claw_events/refresh_flows 不再在 Tick 调(保留方法定义,业务不变)。
+                self.drain_ws();
             }
             AppEvent::Key(k) => {
                 if self.modal_active() {
@@ -966,6 +968,115 @@ impl App {
             .get(self.cursor)
             .map(|s| s.session_id.clone())
             .unwrap_or_else(|| "(无 session)".to_string())
+    }
+
+    // ── WS 事件处理(ADR-1 T4:弃 polling,WS 推送更新 app.events/flows)──
+    // 业务方法不变;WS message → app.events[key]/app.flows[i] 映射(同 fetch_events/refresh_flows 效果)。
+
+    /// 非阻塞收 WS 事件,累积进 app.events[key](turn 事件)。
+    /// 主 loop 每帧调(Tick 或 poll 间隙)。WS manager 未注入时 no-op。
+    pub fn drain_ws(&mut self) {
+        // ponytail: 先抽干 channel 到本地 Vec(不可变借 self.ws),再应用(可变借 self)。
+        // 避免 try_recv 借 self.ws 期间可变借 self.events/instances 的 borrow 冲突。
+        let msgs: Vec<crate::ws::WsMsg> = {
+            let Some(mgr) = self.ws.as_ref() else { return };
+            let mut out = Vec::new();
+            let mut n = 0u32;
+            while let Ok(msg) = mgr.rx.try_recv() {
+                out.push(msg);
+                n += 1;
+                if n > 256 { break; } // 防极端积压卡帧(observe 高频 token_delta)
+            }
+            out
+        };
+        for msg in msgs {
+            match msg {
+                crate::ws::WsMsg::Event { key, ev } => {
+                    // 累积 turn 事件(同 fetch_events 效果:events[key].push + 实例去重计数)。
+                    let evs = self.events.entry(key.clone()).or_default();
+                    // 限制单 key 事件数(同 REST limit=50 语义,防无限增长)。
+                    if evs.len() >= 200 {
+                        evs.remove(0);
+                    }
+                    evs.push(ev);
+                    // 多实例计数:重算去重 harness_id 数(ADR-5:同 sid 多 harness_id)。
+                    if !self.events[&key].is_empty() {
+                        let cnt = self.events[&key].iter()
+                            .filter(|e| !e.harness_id.is_empty())
+                            .map(|e| e.harness_id.as_str())
+                            .collect::<std::collections::HashSet<_>>().len();
+                        self.instances.insert(key, cnt);
+                    }
+                }
+                crate::ws::WsMsg::FlowEvent { flow_id, ev } => {
+                    self.apply_flow_event(&flow_id, &ev);
+                }
+                crate::ws::WsMsg::Error { key, .. } => {
+                    // 连接断;不重连(WS manager idempotent,主 loop 下次 subscribe 重建)。
+                    // ponytail: 自动重连 defer。保留 key 在 subs(已 detach)。
+                    let _ = key;
+                }
+            }
+        }
+    }
+
+    /// flow WS 事件 → app.flows[i].status(ADR-4:flow WS 订阅 ('flow',flow_id))。
+    /// data.flow_event ∈ {flow_started,node_started,node_completed,flow_completed}
+    /// (见 services/orchestrator/src/harness/flow.py:97-120)。
+    /// ponytail: 不完整重建 FlowStatus——只标 flow/node 状态(轻量);精确状态由
+    /// run_current_flow/create_preset_flow 的 fetch_flow REST 初始拉取兜底。
+    fn apply_flow_event(&mut self, flow_id: &str, ev: &ObserveEvent) {
+        let Some(fe) = ev.data.get("flow_event").and_then(|v| v.as_str()) else { return };
+        // 找 tracked flow(按 flow_id)。
+        let idx = self.flows.iter().position(|tf| tf.flow_id == flow_id);
+        let Some(i) = idx else { return };
+        // node 事件:更新 node 状态(若 flow_payload 含 node_id/node_status)。
+        if let Some(payload) = ev.data.get("flow_payload") {
+            if let (Some(nid), Some(nst)) = (
+                payload.get("node_id").and_then(|v| v.as_str()),
+                payload.get("node_status").and_then(|v| v.as_str()),
+            ) {
+                let tf = &mut self.flows[i];
+                let status = tf.status.get_or_insert_with(|| FlowStatus {
+                    flow_id: flow_id.to_string(),
+                    status: "running".to_string(),
+                    nodes: HashMap::new(),
+                });
+                let node = status.nodes.entry(nid.to_string()).or_insert_with(|| FlowNodeState {
+                    id: nid.to_string(),
+                    status: String::new(),
+                    response: String::new(),
+                    status_code: String::new(),
+                });
+                node.status = nst.to_string();
+                if let Some(resp) = payload.get("response").and_then(|v| v.as_str()) {
+                    node.response = resp.to_string();
+                }
+            }
+        }
+        // flow 级事件:更新 flow.status。
+        match fe {
+            "flow_started" => {
+                let tf = &mut self.flows[i];
+                let status = tf.status.get_or_insert_with(|| FlowStatus {
+                    flow_id: flow_id.to_string(),
+                    status: "running".to_string(),
+                    nodes: HashMap::new(),
+                });
+                status.status = "running".to_string();
+            }
+            "flow_completed" => {
+                if let Some(tf) = self.flows.get_mut(i) {
+                    if let Some(s) = tf.status.as_mut() {
+                        s.status = "completed".to_string();
+                    }
+                }
+            }
+            "node_started" | "node_completed" => {
+                // node 级已上面处理;flow status 保持 running。
+            }
+            _ => {}
+        }
     }
 }
 

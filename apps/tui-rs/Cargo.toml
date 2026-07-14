@@ -21,6 +21,8 @@ image = { version = "0.25", default-features = false, features = ["png"] }  # ra
 rat-event = "2"            # 事件限定符类型:Regular/Popup/Dialog(模态消费所有事件) + Outcome::is_consumed
 # 第 2 批基础控件:md 渲染(候选 tui-markdown 等全锁 ratatui ≥0.29 不可用 → pulldown-cmark 纯解析 + 手写映射,零 ratatui 耦合)
 pulldown-cmark = "0.13"
+# ADR-1 T4:WS 直连 observe(弃 REST polling)。tungstenite 纯 Rust 同步 WS,无 tokio(匹配 ratatui 同步模型)。
+tungstenite = "0.26"
 
 [profile.release]
 opt-level = 2

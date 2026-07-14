@@ -17,6 +17,7 @@ mod kitty;
 mod render;
 mod state;
 mod widgets_demo;
+mod ws;
 
 use crate::events::{poll_once, AppEvent};
 use crate::state::{fetch_events, fetch_sessions, App};
@@ -34,19 +35,45 @@ use std::io;
 ///
 /// poll 间隔由 kitty 检测决定(图形终端短间隔,降级长间隔省 CPU)。
 /// 弹窗栈 modal 激活时,state.handle 内部已把 key/mouse 先喂栈顶弹窗(rat-event Dialog 语义)。
+/// ADR-1 T4:WS manager 注入 app,Tick drain_ws 收 WS 事件(弃 REST polling)。
 fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> io::Result<()> {
     let poll = app.term.poll_interval;
+    // ADR-4:cursor 切换 → 重订阅 session WS(关旧开新)。跟踪当前订阅 key。
+    let mut sub_key: Option<String> = app.flat.get(app.cursor)
+        .map(|s| format!("{}/{}", s.harness_type, s.session_id));
     loop {
         terminal.draw(|f| render::draw(f, &mut app))?;
         let ev = poll_once(poll);
         // q / Quit 经 handle 返回 true 退出。
         if app.handle(&ev) {
-            return Ok(());
+            break;
         }
         if matches!(ev, AppEvent::Quit) {
-            return Ok(());
+            break;
+        }
+        // ADR-4:cursor 移动后检查是否需重订阅 WS(cursor_down/up/set_sessions 改 cursor)。
+        if let Some(mgr) = app.ws.as_ref() {
+            let cur_key = app.flat.get(app.cursor)
+                .map(|s| format!("{}/{}", s.harness_type, s.session_id));
+            if cur_key != sub_key {
+                // 关旧开新。
+                if let Some(old) = sub_key.as_ref() {
+                    if let Some((ht, sid)) = old.split_once('/') {
+                        mgr.unsubscribe(ht, sid);
+                    }
+                }
+                if let Some(s) = app.flat.get(app.cursor) {
+                    mgr.subscribe(&s.harness_type, &s.session_id);
+                }
+                sub_key = cur_key;
+            }
         }
     }
+    // 关闭 WS manager(manager 线程 + 所有 WS 子线程 detach)。
+    if let Some(mut mgr) = app.ws.take() {
+        mgr.shutdown();
+    }
+    Ok(())
 }
 
 fn main() -> io::Result<()> {
@@ -74,6 +101,12 @@ fn main() -> io::Result<()> {
     let mut app = App::new(term);
     if let Some(sg) = fetch_sessions() {
         app.set_sessions(sg);
+    }
+
+    // ADR-1 T4:启动 WS manager,初始订阅 cursor session。
+    app.ws = Some(ws::WsManager::spawn());
+    if let Some(s) = app.flat.get(app.cursor) {
+        app.ws.as_ref().unwrap().subscribe(&s.harness_type, &s.session_id);
     }
 
     let res = run(&mut terminal, app);
