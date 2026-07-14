@@ -1065,7 +1065,8 @@ mod tests {
         // tab_area 在顶部 (0,0,80,3),clickmap region 在 (10,5)。
         app.tab_area = Rect::new(0, 0, 80, 3);
         app.clickmap.clear();
-        app.clickmap.register(Rect::new(10, 5, 20, 1), 3);
+        // region 含点击点 (3,1)(与 tab_area 重叠)→ 真测 tabbar 短路 clickmap(若优先级反转,clickmap 命中→raw-exec 开)。
+        app.clickmap.register(Rect::new(0, 0, 80, 3), 3);
         // 点击 tab 栏区域 → 应切 tab,不开 raw-exec 弹窗。
         let m = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),

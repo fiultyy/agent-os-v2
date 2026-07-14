@@ -713,6 +713,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     app.tabbar.render(f, chunks[0]);
     app.tab_area = chunks[0];
 
+    // 顶层统一 clear clickmap(不依赖各 panel 互斥 clear;Flows 等无 clickmap 的 tab 也 clean,修 minor 2/3)。
+    app.clickmap.clear();
+
     // 主区:按 active tab 分发(ADR-1)。
     match app.panel {
         Panel::Home => draw_home(f, chunks[1], app),
