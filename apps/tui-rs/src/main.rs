@@ -16,6 +16,7 @@ mod events;
 mod kitty;
 mod render;
 mod state;
+mod widgets_demo;
 
 use crate::events::{poll_once, AppEvent};
 use crate::state::{fetch_events, fetch_sessions, App};
@@ -49,6 +50,13 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> i
 }
 
 fn main() -> io::Result<()> {
+    if std::env::args().any(|a| a == "--widgets-dump") {
+        widgets_demo::run_dump();
+        return Ok(());
+    }
+    if std::env::args().any(|a| a == "--widgets") {
+        return widgets_demo::run();
+    }
     if std::env::args().any(|a| a == "--dump") {
         run_dump();
         return Ok(());

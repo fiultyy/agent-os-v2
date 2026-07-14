@@ -378,7 +378,7 @@ impl App {
             cursor: 0,
             events: HashMap::new(),
             turn_status: None,
-            turn_msg: "what is 8+8?".to_string(),
+            turn_msg: String::new(),
             popups: vec![],
             term,
             size: (0, 0),
@@ -784,6 +784,13 @@ impl App {
                     64,
                     8,
                 ));
+                false
+            }
+            KeyCode::Char(c) => {
+                // control mode:Char 追加 turn_msg(输入 message);单键 t/c/f/G/D/R/s/r/q 等已先 match
+                if self.panel == Panel::Control {
+                    self.turn_msg.push(c);
+                }
                 false
             }
             _ => false,

@@ -1,12 +1,27 @@
-//! 组件层:P2 新增 crate 的封装。
+//! 组件层:P2 新增 crate 的封装 + 基础控件层(GUI 重构准备)。
 //!
+//! App 业务耦合(原有):
 //! - tui_popup:可拖拽弹窗(render_popup,首次 centered/offset,后续 drag 跟随)
 //! - ratatui_interact:右键 ContextMenu / 模态 PopupDialog(入口,演示 interact 集成)
 //! - ratatui_image:Kitty icat 图片预览(render_image_preview,非 Kitty 降级)
 //! - rat_event:事件限定符语义(Regular/Popup/Dialog,由 state 层调度)
 //! - raw_exec:spawn claude --resume <sid> / claw TUI 全屏,ctrl+d 退出回
+//!
+//! 基础控件层(通用,与 App 业务解耦,后续 GUI 重构消费):
+//! - tabs:tag分页(ratatui 原生 Tabs + 窗口分页)
+//! - popup:浮动弹窗(通用 PopupWindow,tui-popup 薄封装)
+//! - mouse:鼠标光标(MouseCursor)+ 鼠标点击(ClickMap,原生 Rect::contains)
+//! - anchor:锚点连接线(AnchorGraph,ratatui canvas 薄封装)
 
+pub mod anchor;
+pub mod markdown;
+pub mod mouse;
+pub mod popup;
+pub mod position;
 pub mod raw_exec;
+pub mod scrollbar;
+pub mod split;
+pub mod tabs;
 
 use crate::kitty::{Protocol, TermCap};
 use crate::state::Popup;
