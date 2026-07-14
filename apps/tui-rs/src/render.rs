@@ -392,15 +392,20 @@ pub fn draw_stack(f: &mut Frame, area: Rect, app: &mut App) {
     // ADR-2:HSplit resizable 替代固定 Layout(session 树 | turn stream)。
     let [left, bar, right] = app.observe_split.rects(area);
     app.observe_area = area; // 缓存供 events 鼠标拖拽命中
+    // ADR-2:每帧 clear + 注册 session 列表项 Rect(参考 widgets_demo ClickMap 模式)。
+    app.clickmap.clear();
 
     // ── 左:session 树(harness 分组 + ×N 多实例标记)──
     let mut items: Vec<ListItem> = vec![];
     let mut harnesses: Vec<String> = app.sessions.sessions_by_harness.keys().cloned().collect();
     harnesses.sort();
     let mut ci = 0;
+    // row_idx 跟踪当前 item 在 List 中的行号(含 header/空行),用于算 session 项的 y 坐标。
+    let mut row_idx: u16 = 0;
     for hs in &harnesses {
         let n = app.sessions.sessions_by_harness.get(hs).map(|v| v.len()).unwrap_or(0);
         items.push(ListItem::new(format!(" ▾ {} · {}", hs, n)).style(Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD)));
+        row_idx = row_idx.saturating_add(1);
         if let Some(ss) = app.sessions.sessions_by_harness.get(hs) {
             for s in ss {
                 let label = trunc(&s.session_id, 22);
@@ -417,10 +422,15 @@ pub fn draw_stack(f: &mut Frame, area: Rect, app: &mut App) {
                     Span::styled(multi_tag, Style::default().fg(multi_color).add_modifier(Modifier::BOLD)),
                 ]);
                 items.push(ListItem::new(line));
+                // ADR-2:注册 session 项 Rect(id=flat index ci)供鼠标点击命中。
+                let row_rect = Rect::new(left.x, left.y + row_idx, left.width, 1);
+                app.clickmap.register(row_rect, ci);
                 ci += 1;
+                row_idx = row_idx.saturating_add(1);
             }
         }
         items.push(ListItem::new(""));
+        row_idx = row_idx.saturating_add(1);
     }
     f.render_widget(List::new(items), left);
 
