@@ -551,7 +551,9 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
     ];
     for (rects, row_data) in [(&btn_rects1, &row1), (&btn_rects2, &row2)] {
         for (label, id, color, action) in row_data.iter() {
-            let rect = rects[*id];
+            // row1 id 0-3 → rects[id];row2 id 4-7 → rects[id-4](每行 4 槽)。
+            let rect_idx = *id % 4;
+            let rect = rects[rect_idx];
             app.clickmap.register(rect, *id);
             // ADR-1:hover 高亮(MouseCursor.in_rect)+ ADR-2:focus 聚焦框 + ADR-3:loading。
             let hovered = app.mouse.in_rect(rect);
