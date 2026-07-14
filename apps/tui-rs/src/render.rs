@@ -388,11 +388,12 @@ fn node_status_glyph(status: &str) -> (String, Color) {
     }
 }
 
-pub fn draw_stack(f: &mut Frame, area: Rect, app: &App) {
-    let h = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
-        .split(area);
+pub fn draw_stack(f: &mut Frame, area: Rect, app: &mut App) {
+    // ADR-2:HSplit resizable 替代固定 Layout(session 树 | turn stream)。
+    let [left, bar, right] = app.observe_split.rects(area);
+    app.observe_area = area; // 缓存供 events 鼠标拖拽命中
+
+    // ── 左:session 树(harness 分组 + ×N 多实例标记)──
     let mut items: Vec<ListItem> = vec![];
     let mut harnesses: Vec<String> = app.sessions.sessions_by_harness.keys().cloned().collect();
     harnesses.sort();
@@ -403,7 +404,6 @@ pub fn draw_stack(f: &mut Frame, area: Rect, app: &App) {
         if let Some(ss) = app.sessions.sessions_by_harness.get(hs) {
             for s in ss {
                 let label = trunc(&s.session_id, 22);
-                // 多实例标记:同 sid 多 harness_id(ADR-5)。N≥2 标 ×N。
                 let n = app.instance_count(&s.harness_type, &s.session_id);
                 let multi_tag = if n >= 2 { format!(" ×{}", n) } else { String::new() };
                 let (prefix, st) = if ci == app.cursor {
@@ -412,7 +412,6 @@ pub fn draw_stack(f: &mut Frame, area: Rect, app: &App) {
                     ("  ", Style::default().fg(Color::White))
                 };
                 let multi_color = if n >= 2 { Color::Yellow } else { Color::DarkGray };
-                // ListItem 接 Line(多 span):sid + ×N 标记同行的两段样式。
                 let line = ratatui::text::Line::from(vec![
                     Span::styled(format!("   {}{}", prefix, label), st),
                     Span::styled(multi_tag, Style::default().fg(multi_color).add_modifier(Modifier::BOLD)),
@@ -423,8 +422,15 @@ pub fn draw_stack(f: &mut Frame, area: Rect, app: &App) {
         }
         items.push(ListItem::new(""));
     }
-    f.render_widget(List::new(items), h[0]);
+    f.render_widget(List::new(items), left);
 
+    // 分隔条(resizable 拖拽命中区)。
+    f.render_widget(
+        ratatui::widgets::Block::default().style(Style::default().fg(Color::DarkGray)),
+        bar,
+    );
+
+    // ── 右:turn stream(ScrollView 滚动,ADR-2)──
     let key = app.flat.get(app.cursor).map(|s| format!("{}/{}", s.harness_type, s.session_id)).unwrap_or_default();
     let mut ev_lines: Vec<Line> = vec![
         Line::from(Span::styled(" turn stream".to_string(), Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD))),
@@ -435,7 +441,9 @@ pub fn draw_stack(f: &mut Frame, area: Rect, app: &App) {
             ev_lines.push(stack_event_line(e));
         }
     }
-    f.render_widget(Paragraph::new(ev_lines), h[1]);
+    // ScrollView 内容更新 + 渲染(scroll + wrap + scrollbar 指示器)。
+    app.observe_scroll.set_content(ev_lines);
+    app.observe_scroll.render(f, right);
 }
 
 fn stack_event_line(e: &ObserveEvent) -> Line<'static> {

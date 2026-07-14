@@ -24,6 +24,8 @@
 //! 栈顶弹窗的 PopupState/DialogState;rat-event Dialog qualifier 语义——消费即不下发 base panel。
 
 use crate::components::mouse::MouseCursor;
+use crate::components::scrollbar::ScrollView;
+use crate::components::split::HSplit;
 use crate::components::tabs::TabBar;
 use crate::kitty::TermCap;
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -388,6 +390,14 @@ pub struct App {
     pub mouse: MouseCursor,
     /// 顶栏 tab 区域缓存(draw 算 → handle mouse hit 用)。
     pub tab_area: Rect,
+    /// Observe tab HSplit resizable 状态(ADR-2:session 树 | turn stream)。
+    pub observe_split: HSplit,
+    /// Observe tab turn stream ScrollView(ADR-2:长内容滚动)。
+    pub observe_scroll: ScrollView,
+    /// Observe tab 区域缓存(draw 算 → handle mouse drag hit 用)。
+    pub observe_area: Rect,
+    /// 鼠标是否正在拖 observe 分隔条(Drag 延续)。
+    pub observe_dragging: bool,
 }
 
 impl App {
@@ -414,6 +424,10 @@ impl App {
             ]),
             mouse: MouseCursor::default(),
             tab_area: Rect::default(),
+            observe_split: HSplit::new(35),
+            observe_scroll: ScrollView::new(vec![]),
+            observe_area: Rect::default(),
+            observe_dragging: false,
         }
     }
 
@@ -701,23 +715,60 @@ impl App {
     }
 
     /// base panel 鼠标:右键弹 context menu / 左键 tab 切 panel / 滚轮列表。
-    /// 复用 components/tabs.rs tabbar.hit(tab_area, col, row) 精确命中(ADR-2)。
+    /// ADR-2:Observe tab 加分隔条拖拽(HSplit.drag)+ turn stream 滚轮(ScrollView)。
     fn handle_base_mouse(&mut self, m: &MouseEvent) {
         // 光标总是跟踪(Moved/Down/Drag Left)。
         self.mouse.track(*m);
         match m.kind {
             MouseEventKind::Down(MouseButton::Right) => {
-                // 右键 → context menu(用 help 弹窗承载,演示 interact 交互入口)。
                 self.open_help();
             }
-            MouseEventKind::ScrollDown => self.cursor_down(),
-            MouseEventKind::ScrollUp => self.cursor_up(),
+            MouseEventKind::ScrollDown => {
+                if self.panel == Panel::Observe {
+                    self.observe_scroll.scroll_down(1);
+                } else {
+                    self.cursor_down();
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                if self.panel == Panel::Observe {
+                    self.observe_scroll.scroll_up(1);
+                } else {
+                    self.cursor_up();
+                }
+            }
             MouseEventKind::Down(MouseButton::Left) => {
-                // TabBar 命中切 tab(ADR-2:复用 tabs.rs hit)。
+                // ADR-2:Observe tab 分隔条命中检测(HSplit bar rect)。
+                if self.panel == Panel::Observe && self.observe_area.contains(ratatui::layout::Position { x: m.column, y: m.row }) {
+                    let [_left, bar, _right] = self.observe_split.rects(self.observe_area);
+                    if bar.contains(ratatui::layout::Position { x: m.column, y: m.row }) {
+                        self.observe_dragging = true;
+                        return;
+                    }
+                }
+                // TabBar 命中切 tab。
                 if let Some(i) = self.tabbar.hit(self.tab_area, m.column, m.row) {
                     self.tabbar.select(i);
                     self.sync_panel_from_tab();
                 }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                // ADR-2:拖拽分隔条改 pct。
+                if self.observe_dragging {
+                    // dx 近似为鼠标列变化(单步 drag delta)→ HSplit.drag 算 pct delta。
+                    // crossterm Drag 每事件给当前位置,无 prev;用 1/-1 步进近似方向。
+                    // ponytail: 精确需存 last_x 算 dx;单步足够流畅(每像素一个事件)。
+                    let [_left, _bar, _right] = self.observe_split.rects(self.observe_area);
+                    // 方向:鼠标在 bar 右侧→右拖加左 pane;左侧→左拖减。
+                    let bar_x = _bar.x;
+                    let dx: i32 = if m.column > bar_x { 1 } else if m.column < bar_x { -1 } else { 0 };
+                    if dx != 0 {
+                        self.observe_split.drag(dx, self.observe_area);
+                    }
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.observe_dragging = false;
             }
             _ => {}
         }
@@ -778,9 +829,11 @@ impl App {
                 false
             }
             KeyCode::Char('j') | KeyCode::Down => {
-                // P2 flow panel:j/k 切 flow cursor;其余 panel 走 session cursor。
+                // P2 flow panel:j/k 切 flow cursor;Observe panel:j/k 滚 turn stream(ADR-2)。
                 if self.panel == Panel::Flows {
                     self.flow_cursor_down();
+                } else if self.panel == Panel::Observe {
+                    self.observe_scroll.scroll_down(1);
                 } else {
                     self.cursor_down();
                 }
@@ -789,6 +842,8 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => {
                 if self.panel == Panel::Flows {
                     self.flow_cursor_up();
+                } else if self.panel == Panel::Observe {
+                    self.observe_scroll.scroll_up(1);
                 } else {
                     self.cursor_up();
                 }
