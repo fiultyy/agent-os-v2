@@ -1010,4 +1010,70 @@ mod tests {
         let uncond: Vec<_> = def.edges.iter().filter(|e| e.condition.is_none()).collect();
         assert_eq!(uncond.len(), 1, "one unconditional edge (A→C else)");
     }
+
+    /// ADR-1:Control 按钮 ClickMap 命中 → raw-exec open_popup(id=3)。
+    /// 手动注册 clickmap region(id=3),模拟 draw_control 注册后 handle_base_mouse 命中。
+    #[test]
+    fn control_clickmap_rawexec_opens_popup() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        // 模拟 draw_control 注册 raw-exec 按钮(id=3)在 (10,5)-(30,6)。
+        app.clickmap.clear();
+        app.clickmap.register(Rect::new(10, 5, 20, 1), 3);
+        // 点击该区域 → 应打开 raw-exec 弹窗。
+        let m = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 15,
+            row: 5,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        app.handle_base_mouse(&m);
+        assert!(app.popups.iter().any(|p| p.id == "raw-exec"), "raw-exec popup should open on button click");
+    }
+
+    /// ADR-2:Observe session 列表项 ClickMap 命中 → cursor=idx。
+    /// 手动注册 clickmap region(id=1),模拟 draw_stack 注册后 handle_base_mouse 命中。
+    #[test]
+    fn observe_clickmap_session_selects_cursor() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Observe;
+        // 填充 flat sessions(2 个)。
+        app.flat = vec![
+            Session { harness_type: "claw".into(), session_id: "sess-a".into(), harness_id: "h1".into() },
+            Session { harness_type: "claw".into(), session_id: "sess-b".into(), harness_id: "h2".into() },
+        ];
+        app.cursor = 0;
+        // 模拟 draw_stack 注册 session 项(id=1,第二行)在 (0,3)-(35,4)。
+        app.clickmap.clear();
+        app.clickmap.register(Rect::new(0, 3, 35, 1), 1);
+        // 点击该区域 → cursor 应变为 1。
+        let m = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 3,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        app.handle_base_mouse(&m);
+        assert_eq!(app.cursor, 1, "clicking session row 1 should set cursor=1");
+    }
+
+    /// ADR-1/ADR-2:TabBar 命中优先于 ClickMap(点 tab 栏不应触发按钮)。
+    #[test]
+    fn tabbar_hit_takes_priority_over_clickmap() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        // tab_area 在顶部 (0,0,80,3),clickmap region 在 (10,5)。
+        app.tab_area = Rect::new(0, 0, 80, 3);
+        app.clickmap.clear();
+        app.clickmap.register(Rect::new(10, 5, 20, 1), 3);
+        // 点击 tab 栏区域 → 应切 tab,不开 raw-exec 弹窗。
+        let m = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 3,
+            row: 1,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        app.handle_base_mouse(&m);
+        assert!(!app.popups.iter().any(|p| p.id == "raw-exec"), "tabbar hit should not trigger clickmap");
+    }
 }
