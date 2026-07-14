@@ -41,6 +41,10 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> i
     // ADR-4:cursor 切换 → 重订阅 session WS(关旧开新)。跟踪当前订阅 key。
     let mut sub_key: Option<String> = app.flat.get(app.cursor)
         .map(|s| format!("{}/{}", s.harness_type, s.session_id));
+    // ADR-4:flow WS 订阅跟踪。create_preset_flow/run_current_flow 后 flows 增长,
+    // 主 loop 检测新 flow_id → subscribe('flow',flow_id)。业务方法不改(ADR-3),
+    // 订阅在主 loop 侧驱动。终态 flow 保留 WS(收历史,保守;ponytail: 不主动 unsubscribe)。
+    let mut sub_flows: std::collections::HashSet<String> = std::collections::HashSet::new();
     loop {
         terminal.draw(|f| render::draw(f, &mut app))?;
         let ev = poll_once(poll);
@@ -66,6 +70,13 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> i
                     mgr.subscribe(&s.harness_type, &s.session_id);
                 }
                 sub_key = cur_key;
+            }
+            // ADR-4 T2:新 tracked flow → 订阅 flow WS(收 flow_started/node_*/flow_completed)。
+            for tf in &app.flows {
+                if !sub_flows.contains(&tf.flow_id) {
+                    mgr.subscribe("flow", &tf.flow_id);
+                    sub_flows.insert(tf.flow_id.clone());
+                }
             }
         }
     }

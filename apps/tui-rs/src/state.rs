@@ -1188,4 +1188,76 @@ mod tests {
         app.handle_base_mouse(&m);
         assert!(!app.popups.iter().any(|p| p.id == "raw-exec"), "tabbar hit should not trigger clickmap");
     }
+
+    /// ADR-1 T2:flow WS 事件 → app.flows[i].status 更新。
+    /// 模拟 observe flow 广播(node_completed + flow_payload),apply_flow_event 应更新 node 状态。
+    #[test]
+    fn flow_ws_event_updates_flow_status() {
+        let mut app = App::new(crate::kitty::detect());
+        // 注入一个 tracked flow(无初始 status)。
+        let def = preset_flow(FlowPreset::Chain, "m");
+        app.flows.push(TrackedFlow {
+            flow_id: "flow_test1".to_string(),
+            def,
+            status: None,
+        });
+        // 模拟 WS flow 事件:node_completed,node A → completed,response "16"。
+        let ev = ObserveEvent {
+            event_type: "tick_completed".to_string(),
+            tick_id: "flow_test1".to_string(),
+            harness_id: "flow_engine_abcd".to_string(),
+            data: {
+                let mut d = HashMap::new();
+                d.insert("flow_event".to_string(), serde_json::json!("node_completed"));
+                d.insert("flow_payload".to_string(), serde_json::json!({
+                    "node_id": "A", "node_status": "completed", "response": "16"
+                }));
+                d
+            },
+        };
+        app.apply_flow_event("flow_test1", &ev);
+        let tf = &app.flows[0];
+        assert_eq!(tf.status.as_ref().unwrap().status, "running");
+        assert_eq!(tf.status.as_ref().unwrap().nodes["A"].status, "completed");
+        assert_eq!(tf.status.as_ref().unwrap().nodes["A"].response, "16");
+    }
+
+    /// ADR-1 T2:flow_completed WS 事件 → app.flows[i].status = completed。
+    #[test]
+    fn flow_ws_completed_marks_flow_done() {
+        let mut app = App::new(crate::kitty::detect());
+        app.flows.push(TrackedFlow {
+            flow_id: "flow_test2".to_string(),
+            def: preset_flow(FlowPreset::Chain, "m"),
+            status: Some(FlowStatus {
+                flow_id: "flow_test2".to_string(),
+                status: "running".to_string(),
+                nodes: HashMap::new(),
+            }),
+        });
+        let ev = ObserveEvent {
+            event_type: "tick_completed".to_string(),
+            tick_id: "flow_test2".to_string(),
+            harness_id: "flow_engine_abcd".to_string(),
+            data: {
+                let mut d = HashMap::new();
+                d.insert("flow_event".to_string(), serde_json::json!("flow_completed"));
+                d.insert("flow_payload".to_string(), serde_json::json!({}));
+                d
+            },
+        };
+        app.apply_flow_event("flow_test2", &ev);
+        assert_eq!(app.flows[0].status.as_ref().unwrap().status, "completed");
+    }
+
+    /// ADR-1 T1+T2:Tick 弃 REST polling —— Tick 分支不含 fetch_claw_events/refresh_flows。
+    /// 通过 handle(Tick) 不改 flows(空 WS channel 时)验证 Tick 不触发 REST。
+    #[test]
+    fn tick_does_not_poll_rest() {
+        let mut app = App::new(crate::kitty::detect());
+        // ws=None(drain_ws no-op),Tick 不应 panic 也不调 REST。
+        app.handle(&crate::events::AppEvent::Tick);
+        // events 仍空(无 WS,无 fetch_claw_events)。
+        assert!(app.events.is_empty(), "Tick with no WS should not fetch events via REST");
+    }
 }
