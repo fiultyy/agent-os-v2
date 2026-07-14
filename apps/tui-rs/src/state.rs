@@ -30,6 +30,7 @@ use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKin
 use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use ratatui::text::Text;
 use tui_popup::PopupState;
 
 const OBSERVE: &str = "http://localhost:8002";
@@ -320,6 +321,8 @@ pub struct Popup {
     pub id: &'static str,
     pub title: String,
     pub body: Vec<String>,
+    /// markdown 渲染正文(ADR-3 help 弹窗用 md_to_text)。Some 时 render_popup 优先用此字段。
+    pub md_text: Option<Text<'static>>,
     pub state: PopupState, // tui-popup: area(渲染回填) + drag_state
     pub modal: bool,
     /// 期望尺寸(列x行);PopupState.area 由 render 回填,body 决定实际尺寸。
@@ -337,6 +340,7 @@ impl Popup {
             id,
             title: title.to_string(),
             body,
+            md_text: None,
             state: PopupState::default(),
             modal: true,
             width: w,
@@ -344,6 +348,11 @@ impl Popup {
             position: None,
             placed: false,
         }
+    }
+    /// 带 markdown 渲染正文的弹窗(ADR-3)。md_text 优先于 body。
+    pub fn with_md(mut self, md: Text<'static>) -> Self {
+        self.md_text = Some(md);
+        self
     }
 }
 
@@ -584,24 +593,36 @@ impl App {
     }
 
     /// 便捷:打开 help 弹窗(展示分层架构 + Kitty 检测结果)。
+    /// ADR-3: body 用 md_to_text 渲染(标题/列表/代码高亮)。
     pub fn open_help(&mut self) {
-        let mut body = vec![
-            "P2 分层架构(ratatui immediate-mode):".to_string(),
-            "  事件层 events.rs  →  状态层 state.rs  →  渲染层 render.rs".to_string(),
-            "  组件层 components/  →  tui-popup 拖拽 / interact 右键 / image icat".to_string(),
-            "".to_string(),
-            format!(" Kitty 检测:protocol={} image_ok={}", self.term.protocol.label(), self.term.image_ok),
-            format!(" poll_interval={}ms", self.term.poll_interval.as_millis()),
-            "".to_string(),
-            " 键位:tab 切 base panel · e raw exec · s spawn 多实例 · p 弹窗 · ?/h help · q quit".to_string(),
-            " flow:f 链 / G 分支 / D DAG 创建 · R 运行 · j/k 切 flow(flow panel)".to_string(),
-            " 弹窗:esc/enter 关闭 · 鼠标拖拽标题栏 · 右键 base panel 弹 context menu".to_string(),
-        ];
+        let md = format!(
+            "# v2 harness-bridge · P2 分层架构\n\n\
+             **ratatui immediate-mode** 分层:\n\n\
+             - 事件层 `events.rs` → 状态层 `state.rs` → 渲染层 `render.rs`\n\
+             - 组件层 `components/` → `tui-popup` 拖拽 / `interact` 右键 / `image` icat\n\n\
+             ## 终端检测\n\n\
+             - Kitty `protocol` = `{}`\n\
+             - `image_ok` = `{}`\n\
+             - `poll_interval` = `{}ms`\n\n\
+             ## 键位\n\n\
+             - `tab` 切 base panel · `1-4` 选 tab\n\
+             - `t` 触发 turn · `s` spawn 多实例 · `e` raw exec\n\
+             - `f` 链 / `G` 分支 / `D` DAG 创建 flow · `R` 运行 · `j/k` 切 flow\n\
+             - `p` / `?` / `h` 弹窗 · 右键 base panel 弹 context menu\n\
+             - `esc` / `enter` 关闭弹窗 · `q` quit\n",
+            self.term.protocol.label(),
+            self.term.image_ok,
+            self.term.poll_interval.as_millis(),
+        );
+        let mut full_md = md;
         if !self.term.hint.is_empty() {
-            body.push(String::new());
-            body.push(format!(" ⚠ {}", self.term.hint));
+            full_md.push_str(&format!("\n> ⚠ {}\n", self.term.hint));
         }
-        self.open_popup(Popup::centered("help", " v2 harness-bridge · P2 分层架构", body, 70, 16));
+        let text = crate::components::markdown::md_to_text(&full_md);
+        self.open_popup(
+            Popup::centered("help", " v2 harness-bridge · help", vec![], 72, 22)
+                .with_md(text),
+        );
     }
 
     // ── 事件消费 ──────────────────────────────────────────────────

@@ -511,37 +511,133 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &App) {
 
 // ═══ Home 占位面板 ════════════════════════════════════════════════
 
-/// Home tab 占位:总览入口(ADR-1)。列出 4 tab 的用途 + 快捷键。
+/// Home dashboard 三块真数据(ADR-1):session 总览 + flow 状态 + cursor 摘要。
+/// read-only 读 App 业务字段,用 position::percent_line 显活跃指标。
 pub fn draw_home(f: &mut Frame, area: Rect, app: &App) {
-    let lines = vec![
+    use crate::components::position;
+
+    // ── block 1: session 总览(harness 分组 + 多实例 ×N)──
+    let mut session_lines: Vec<Line> = vec![Line::from(Span::styled(
+        " Sessions · harness 分组".to_string(),
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    ))];
+
+    let mut harnesses: Vec<&String> = app.sessions.sessions_by_harness.keys().collect();
+    harnesses.sort();
+    let total_sessions = app.flat.len();
+    for hs in &harnesses {
+        let n = app.sessions.sessions_by_harness.get(*hs).map(|v| v.len()).unwrap_or(0);
+        // 多实例标记:该 harness 下有多少 session 是 ×N 多实例。
+        let multi_count = app.sessions.sessions_by_harness.get(*hs).map(|ss| {
+            ss.iter().filter(|s| app.instance_count(&s.harness_type, &s.session_id) >= 2).count()
+        }).unwrap_or(0);
+        let multi_tag = if multi_count > 0 {
+            format!("  (×N multi: {})", multi_count)
+        } else { String::new() };
+        session_lines.push(Line::from(vec![
+            Span::styled(format!("  ▾ {:<14}", hs), Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD)),
+            Span::raw(format!(" {} sessions{}", n, multi_tag)),
+        ]));
+    }
+    if total_sessions == 0 {
+        session_lines.push(Line::from(Span::styled(
+            "  (无 session · 按 r 刷新)".to_string(),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    session_lines.push(Line::raw(""));
+    session_lines.push(position::percent_line(
+        if total_sessions > 0 { Some(app.cursor) } else { None },
+        total_sessions,
+    ));
+
+    // ── block 2: flow 状态(running/completed/failed 计数)──
+    let mut running = 0;
+    let mut completed = 0;
+    let mut failed = 0;
+    let mut pending = 0;
+    for tf in &app.flows {
+        match tf.status.as_ref().map(|s| s.status.as_str()).unwrap_or("pending") {
+            "running" => running += 1,
+            "completed" => completed += 1,
+            "failed" => failed += 1,
+            _ => pending += 1,
+        }
+    }
+    let flow_lines = vec![
         Line::from(Span::styled(
-            " HOME · 总览".to_string(),
-            Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
+            " Flows · 状态".to_string(),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         )),
+        Line::from(vec![
+            Span::styled("  ● running   ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::raw(format!("{}", running)),
+        ]),
+        Line::from(vec![
+            Span::styled("  ✓ completed ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            Span::raw(format!("{}", completed)),
+        ]),
+        Line::from(vec![
+            Span::styled("  ✗ failed    ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::raw(format!("{}", failed)),
+        ]),
+        Line::from(vec![
+            Span::styled("  ○ pending   ", Style::default().fg(Color::Yellow)),
+            Span::raw(format!("{}", pending)),
+        ]),
         Line::raw(""),
         Line::from(vec![
-            Span::styled(" Flows    ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw("编排 DAG(turn 链 / 分支 / DAG on trigger_turn)"),
+            Span::styled("  total ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{}", app.flows.len()), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
         ]),
-        Line::from(vec![
-            Span::styled(" Observe  ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw("session 纵向堆叠 + turn stream 事件流"),
-        ]),
-        Line::from(vec![
-            Span::styled(" Control  ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw("orchestrator 原语(trigger turn / spawn / create flow)"),
-        ]),
-        Line::raw(""),
-        Line::from(Span::styled(
-            " [Tab/1-4 切 tab · 鼠标点 tab 栏]".to_string(),
-            Style::default().fg(Color::DarkGray),
-        )),
-        Line::from(Span::styled(
-            format!(" kitty={} · sessions={} · flows={}", app.term.protocol.label(), app.flat.len(), app.flows.len()),
-            Style::default().fg(Color::DarkGray),
-        )),
     ];
-    f.render_widget(Paragraph::new(lines), area);
+
+    // ── block 3: cursor session 摘要(最近 turn_status + 事件数)──
+    let cur_session = app.flat.get(app.cursor);
+    let cur_sid = cur_session.map(|s| trunc(&s.session_id, 24)).unwrap_or_else(|| "(无)".to_string());
+    let cur_ht = cur_session.map(|s| s.harness_type.as_str()).unwrap_or("—");
+    let cur_key = cur_session.map(|s| format!("{}/{}", s.harness_type, s.session_id)).unwrap_or_default();
+    let event_count = app.events.get(&cur_key).map(|e| e.len()).unwrap_or(0);
+    let inst_n = cur_session.map(|s| app.instance_count(&s.harness_type, &s.session_id)).unwrap_or(0);
+    let turn_disp = app.turn_status.clone().unwrap_or_else(|| "(未触发)".to_string());
+
+    let cursor_lines = vec![
+        Line::from(Span::styled(
+            " Cursor session".to_string(),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::styled("  session  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(cur_sid, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  ({})", cur_ht), Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(vec![
+            Span::styled("  events   ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{}", event_count), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                if inst_n >= 2 { format!("  ×{} instances", inst_n) } else { String::new() },
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  last turn", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!(" {}", trunc(&turn_disp, 50)), Style::default().fg(Color::White)),
+        ]),
+    ];
+
+    // 三块布局:左右分栏(session 总览 | flow 状态)+ 底部 cursor 摘要全宽。
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(7)])
+        .split(cols[0]);
+
+    f.render_widget(Paragraph::new(session_lines), rows[0]);
+    f.render_widget(Paragraph::new(flow_lines), cols[1]);
+    f.render_widget(Paragraph::new(cursor_lines), rows[1]);
 }
 
 // ═══ 分层 draw:顶栏 TabBar → 主区 panel → 底栏 hint → 弹窗栈 → MouseCursor ═══

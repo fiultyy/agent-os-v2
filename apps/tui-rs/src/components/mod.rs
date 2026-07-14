@@ -42,13 +42,17 @@ use ratatui::{
 ///
 /// 用 tui-popup 的 `StatefulWidgetRef::render_ref`:自带 Clear 遮罩 + Block 边框 + area 回填。
 pub fn render_popup(f: &mut Frame, screen: Rect, p: &mut Popup) {
-    // 构造 body Text(多行正文)。
-    let lines: Vec<Line> = p
-        .body
-        .iter()
-        .map(|s| Line::from(s.as_str()).style(Style::default().fg(Color::Yellow)))
-        .collect();
-    let body_text = Text::from(lines);
+    // ADR-3:md_text 优先(markdown 渲染),否则回退 body(Vec<String> 纯文本)。
+    let body_text = if let Some(md) = &p.md_text {
+        md.clone()
+    } else {
+        let lines: Vec<Line> = p
+            .body
+            .iter()
+            .map(|s| Line::from(s.as_str()).style(Style::default().fg(Color::Yellow)))
+            .collect();
+        Text::from(lines)
+    };
     let popup = tui_popup::Popup::new(body_text)
         .title(Line::from(format!(" {} ", p.title)).style(
             Style::default()
