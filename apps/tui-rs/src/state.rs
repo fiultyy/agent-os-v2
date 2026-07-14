@@ -23,8 +23,11 @@
 //! 弹窗栈:Vec 末尾是栈顶(z-index 最高)。模态弹窗激活时,handle() 先把 key/mouse 喂给
 //! 栈顶弹窗的 PopupState/DialogState;rat-event Dialog qualifier 语义——消费即不下发 base panel。
 
+use crate::components::mouse::MouseCursor;
+use crate::components::tabs::TabBar;
 use crate::kitty::TermCap;
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tui_popup::PopupState;
@@ -284,23 +287,26 @@ pub struct TrackedFlow {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Panel {
-    Flow,
-    Stack,
+    Home,
+    Flows,
+    Observe,
     Control,
 }
 impl Panel {
     pub fn label(self) -> &'static str {
         match self {
-            Panel::Flow => "FLOW ◐ 编排 DAG",
-            Panel::Stack => "STACK ☰ 纵向堆叠",
+            Panel::Home => "HOME ◉ 概览",
+            Panel::Flows => "FLOWS ◐ 编排 DAG",
+            Panel::Observe => "OBSERVE ☰ 纵向堆叠",
             Panel::Control => "CONTROL ⌘ orchestrator",
         }
     }
     pub fn next(self) -> Self {
         match self {
-            Panel::Flow => Panel::Stack,
-            Panel::Stack => Panel::Control,
-            Panel::Control => Panel::Flow,
+            Panel::Home => Panel::Flows,
+            Panel::Flows => Panel::Observe,
+            Panel::Observe => Panel::Control,
+            Panel::Control => Panel::Home,
         }
     }
 }
@@ -367,12 +373,18 @@ pub struct App {
     pub flows: Vec<TrackedFlow>,
     /// flow panel cursor(选哪个 tracked flow 看 DAG)。turn_msg 在 control mode 复用作 flow 首节点 message。
     pub flow_cursor: usize,
+    /// 顶栏 TabBar(ADR-1:Home/Flows/Observe/Control 4 tab)。
+    pub tabbar: TabBar,
+    /// 鼠标光标(ADR-2:帧末黑底黄字高亮)。
+    pub mouse: MouseCursor,
+    /// 顶栏 tab 区域缓存(draw 算 → handle mouse hit 用)。
+    pub tab_area: Rect,
 }
 
 impl App {
     pub fn new(term: TermCap) -> Self {
         Self {
-            panel: Panel::Flow,
+            panel: Panel::Home,
             sessions: Default::default(),
             flat: vec![],
             cursor: 0,
@@ -385,6 +397,14 @@ impl App {
             instances: HashMap::new(),
             flows: vec![],
             flow_cursor: 0,
+            tabbar: TabBar::new(vec![
+                "Home".to_string(),
+                "Flows".to_string(),
+                "Observe".to_string(),
+                "Control".to_string(),
+            ]),
+            mouse: MouseCursor::default(),
+            tab_area: Rect::default(),
         }
     }
 
@@ -599,7 +619,7 @@ impl App {
             }
             AppEvent::Tick => {
                 // ponytail: 固定计数轮询 claw events,observe 挂了静默跳过(复用 P1 逻辑)。
-                if self.panel == Panel::Flow || self.panel == Panel::Control {
+                if self.panel == Panel::Flows || self.panel == Panel::Control {
                     self.fetch_claw_events();
                 }
                 // P2 flow:周期 poll 非终态 flow 的 GET /h/flows/{id}(实时 node 状态)。
@@ -659,9 +679,11 @@ impl App {
         }
     }
 
-    /// base panel 鼠标:右键弹 context menu / 左键切 panel(简化:点顶部 title 区切)。
-    /// ponytail: 不做完整 hit-test;右键任意位置开 help-menu,左键按 y 分区切 panel。
+    /// base panel 鼠标:右键弹 context menu / 左键 tab 切 panel / 滚轮列表。
+    /// 复用 components/tabs.rs tabbar.hit(tab_area, col, row) 精确命中(ADR-2)。
     fn handle_base_mouse(&mut self, m: &MouseEvent) {
+        // 光标总是跟踪(Moved/Down/Drag Left)。
+        self.mouse.track(*m);
         match m.kind {
             MouseEventKind::Down(MouseButton::Right) => {
                 // 右键 → context menu(用 help 弹窗承载,演示 interact 交互入口)。
@@ -670,20 +692,34 @@ impl App {
             MouseEventKind::ScrollDown => self.cursor_down(),
             MouseEventKind::ScrollUp => self.cursor_up(),
             MouseEventKind::Down(MouseButton::Left) => {
-                // 点顶栏(title 行)区域切 panel:简化为 y==0 时按 x 分三段。
-                if m.row == 0 {
-                    let third = self.size.0.max(1) / 3;
-                    self.panel = if m.column < third {
-                        Panel::Flow
-                    } else if m.column < third * 2 {
-                        Panel::Stack
-                    } else {
-                        Panel::Control
-                    };
+                // TabBar 命中切 tab(ADR-2:复用 tabs.rs hit)。
+                if let Some(i) = self.tabbar.hit(self.tab_area, m.column, m.row) {
+                    self.tabbar.select(i);
+                    self.sync_panel_from_tab();
                 }
             }
             _ => {}
         }
+    }
+
+    /// 把 tabbar.active 同步到 self.panel(0=Home,1=Flows,2=Observe,3=Control)。
+    pub fn sync_panel_from_tab(&mut self) {
+        self.panel = match self.tabbar.active {
+            0 => Panel::Home,
+            1 => Panel::Flows,
+            2 => Panel::Observe,
+            _ => Panel::Control,
+        };
+    }
+    /// 把 self.panel 同步到 tabbar.active(render 前确保一致)。
+    pub fn sync_tab_from_panel(&mut self) {
+        let idx = match self.panel {
+            Panel::Home => 0,
+            Panel::Flows => 1,
+            Panel::Observe => 2,
+            Panel::Control => 3,
+        };
+        self.tabbar.select(idx);
     }
 
     /// base panel 键位(P1 保留 + P2 扩展 e=raw exec / p=弹窗)。返回 true = 退出 app。
@@ -691,28 +727,38 @@ impl App {
         match k.code {
             KeyCode::Char('q') => true,
             KeyCode::Tab => {
-                self.panel = self.panel.next();
+                self.tabbar.next();
+                self.sync_panel_from_tab();
                 false
             }
             KeyCode::Char('1') => {
-                self.panel = Panel::Flow;
+                self.panel = Panel::Home;
+                self.sync_tab_from_panel();
                 false
             }
             KeyCode::Char('2') => {
-                self.panel = Panel::Stack;
+                self.panel = Panel::Flows;
+                self.sync_tab_from_panel();
                 false
             }
             KeyCode::Char('3') => {
+                self.panel = Panel::Observe;
+                self.sync_tab_from_panel();
+                false
+            }
+            KeyCode::Char('4') => {
                 self.panel = Panel::Control;
+                self.sync_tab_from_panel();
                 false
             }
             KeyCode::Char('c') => {
                 self.panel = Panel::Control;
+                self.sync_tab_from_panel();
                 false
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 // P2 flow panel:j/k 切 flow cursor;其余 panel 走 session cursor。
-                if self.panel == Panel::Flow {
+                if self.panel == Panel::Flows {
                     self.flow_cursor_down();
                 } else {
                     self.cursor_down();
@@ -720,7 +766,7 @@ impl App {
                 false
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                if self.panel == Panel::Flow {
+                if self.panel == Panel::Flows {
                     self.flow_cursor_up();
                 } else {
                     self.cursor_up();

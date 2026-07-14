@@ -509,35 +509,72 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(lane_lines), chunks[1]);
 }
 
-// ═══ 分层 draw:base → overlay → modal popup 栈 ═══════════════════
+// ═══ Home 占位面板 ════════════════════════════════════════════════
+
+/// Home tab 占位:总览入口(ADR-1)。列出 4 tab 的用途 + 快捷键。
+pub fn draw_home(f: &mut Frame, area: Rect, app: &App) {
+    let lines = vec![
+        Line::from(Span::styled(
+            " HOME · 总览".to_string(),
+            Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled(" Flows    ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw("编排 DAG(turn 链 / 分支 / DAG on trigger_turn)"),
+        ]),
+        Line::from(vec![
+            Span::styled(" Observe  ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw("session 纵向堆叠 + turn stream 事件流"),
+        ]),
+        Line::from(vec![
+            Span::styled(" Control  ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw("orchestrator 原语(trigger turn / spawn / create flow)"),
+        ]),
+        Line::raw(""),
+        Line::from(Span::styled(
+            " [Tab/1-4 切 tab · 鼠标点 tab 栏]".to_string(),
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            format!(" kitty={} · sessions={} · flows={}", app.term.protocol.label(), app.flat.len(), app.flows.len()),
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+// ═══ 分层 draw:顶栏 TabBar → 主区 panel → 底栏 hint → 弹窗栈 → MouseCursor ═══
 
 /// 顶层 draw:分层调度。
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
     app.size = (area.width, area.height);
 
-    // z-order layer 0:base panel(标题栏 + 当前 panel + 提示栏)
+    // 确保 tabbar.active 与 panel 同步(键盘切 panel 后 tab 高亮一致)。
+    app.sync_tab_from_panel();
+
+    // 顶栏 TabBar(3) / 主区(Min)/ 底栏 hint(1)。
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)])
+        .constraints([Constraint::Length(3), Constraint::Min(1), Constraint::Length(1)])
         .split(area);
 
-    let title = Paragraph::new(format!(
-        " v2 harness-bridge(ratatui · P2 分层)· {} · kitty={} · [tab/e/p/?,右键 menu]",
-        app.panel.label(),
-        app.term.protocol.label(),
-    ))
-    .style(Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD));
-    f.render_widget(title, chunks[0]);
+    // 顶栏:TabBar 渲染 + 缓存 tab_area 供鼠标 hit。
+    app.tabbar.render(f, chunks[0]);
+    app.tab_area = chunks[0];
 
+    // 主区:按 active tab 分发(ADR-1)。
     match app.panel {
-        Panel::Flow => draw_flow(f, chunks[1], app),
-        Panel::Stack => draw_stack(f, chunks[1], app),
+        Panel::Home => draw_home(f, chunks[1], app),
+        Panel::Flows => draw_flow(f, chunks[1], app),
+        Panel::Observe => draw_stack(f, chunks[1], app),
         Panel::Control => draw_control(f, chunks[1], app),
     }
 
+    // 底栏 hint。
     let hint = Paragraph::new(format!(
-        " tab 切视图 · c control · j/k 选(flow panel 切 flow)· t turn · f/G/D 创建 flow · R 运行 flow · s spawn · p 弹窗 · ? help · q quit{}",
+        " Tab/1-4 切 tab · 鼠标点 tab · j/k 选(flow panel 切 flow)· t turn · f/G/D 创建 flow · R 运行 · s spawn · p 弹窗 · ? help · q quit{}",
         if app.term.hint.is_empty() { String::new() } else { format!("  ⚠ {}", app.term.hint) },
     ))
     .style(Style::default().fg(Color::DarkGray));
@@ -552,4 +589,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     for p in app.popups.iter_mut() {
         components::render_popup(f, area, p);
     }
+
+    // 帧末:鼠标光标(ADR-2:最后渲染,黑底黄字高亮)。
+    app.mouse.render(f);
 }
