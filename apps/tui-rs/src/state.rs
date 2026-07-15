@@ -915,13 +915,10 @@ impl App {
                         return;
                     }
                 }
-                // ADR-2:Observe session 列表项点击选中 cursor。
+                // ADR-2(第八轮):Observe session 点 → 跳 Control(跨 tab cursor 同步 + WS 重订阅)。
                 if self.panel == Panel::Observe {
                     if let Some(idx) = self.clickmap.hit(m.column, m.row) {
-                        if *idx < self.flat.len() {
-                            self.cursor = *idx;
-                            self.fetch_current();
-                        }
+                        self.jump_to_control(*idx);
                         return;
                     }
                 }
@@ -989,6 +986,27 @@ impl App {
         self.tabbar.select(idx);
     }
 
+    /// ADR-2(第八轮):Observe→Control 跨 tab 跳转(cursor 同步 + WS 重订阅)。
+    /// 点 Observe session 或键盘 Enter on ObserveSession focus → panel=Control + cursor=idx。
+    /// 切 Control cursor session 后 WS manager 重订阅(observe 实时事件流入 cursor session)。
+    /// 业务方法不改:仅组合现有 set panel/cursor/fetch/subscribe(UI 状态操作)。
+    pub fn jump_to_control(&mut self, idx: usize) {
+        if idx < self.flat.len() {
+            self.cursor = idx;
+            self.fetch_current();
+        }
+        self.panel = Panel::Control;
+        self.sync_tab_from_panel();
+        self.orche_online = fetch_orche_health();
+        // WS 重订阅 Control cursor session(若 WS manager 已注入)。
+        if let Some(s) = self.flat.get(self.cursor) {
+            if let Some(mgr) = self.ws.as_ref() {
+                mgr.subscribe(&s.harness_type, &s.session_id);
+            }
+        }
+        self.focus = FocusTarget::ControlSession(self.cursor);
+    }
+
     /// base panel 键位(P1 保留 + P2 扩展 e=raw exec / p=弹窗)。返回 true = 退出 app。
     fn handle_base_key(&mut self, k: &KeyEvent) -> bool {
         match k.code {
@@ -1010,6 +1028,12 @@ impl App {
                 if self.panel == Panel::Control {
                     if let FocusTarget::ControlButton(i) = self.focus {
                         self.trigger_control_button(i);
+                    }
+                }
+                // ADR-2(第八轮):Observe session 聚焦时 Enter → 跳 Control(cursor 同步 + WS 重订阅)。
+                if self.panel == Panel::Observe {
+                    if matches!(self.focus, FocusTarget::ObserveSession) {
+                        self.jump_to_control(self.cursor);
                     }
                 }
                 false
@@ -1337,10 +1361,10 @@ mod tests {
         assert!(app.popups.iter().any(|p| p.id == "raw-exec"), "raw-exec popup should open on button click");
     }
 
-    /// ADR-2:Observe session 列表项 ClickMap 命中 → cursor=idx。
-    /// 手动注册 clickmap region(id=1),模拟 draw_stack 注册后 handle_base_mouse 命中。
+    /// ADR-2(第八轮):Observe session 点 → 跳 Control(cursor 同步 + panel 切 Control)。
+    /// 手动注册 clickmap region(id=1),模拟 draw_observe_scroll 注册后 handle_base_mouse 命中。
     #[test]
-    fn observe_clickmap_session_selects_cursor() {
+    fn observe_clickmap_session_jumps_to_control() {
         let mut app = App::new(crate::kitty::detect());
         app.panel = Panel::Observe;
         // 填充 flat sessions(2 个)。
@@ -1349,10 +1373,10 @@ mod tests {
             Session { harness_type: "claw".into(), session_id: "sess-b".into(), harness_id: "h2".into() },
         ];
         app.cursor = 0;
-        // 模拟 draw_stack 注册 session 项(id=1,第二行)在 (0,3)-(35,4)。
+        // 模拟 draw_observe_scroll 注册 session 项(id=1,第二行)在 (0,3)-(35,4)。
         app.clickmap.clear();
         app.clickmap.register(Rect::new(0, 3, 35, 1), 1);
-        // 点击该区域 → cursor 应变为 1。
+        // 点击该区域 → cursor=1 + panel=Control(跨 tab 跳转)。
         let m = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 5,
@@ -1361,7 +1385,27 @@ mod tests {
         };
         app.handle_base_mouse(&m);
         assert_eq!(app.cursor, 1, "clicking session row 1 should set cursor=1");
+        assert_eq!(app.panel, Panel::Control, "clicking Observe session should jump to Control");
     }
+
+    /// ADR-2(第八轮):Observe 键盘 Enter on ObserveSession focus → 跳 Control(cursor 同步)。
+    #[test]
+    fn observe_enter_jumps_to_control() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Observe;
+        app.focus = FocusTarget::ObserveSession;
+        app.flat = vec![
+            Session { harness_type: "claw".into(), session_id: "sess-a".into(), harness_id: "h1".into() },
+            Session { harness_type: "claw".into(), session_id: "sess-b".into(), harness_id: "h2".into() },
+        ];
+        app.cursor = 1;
+        // Enter on ObserveSession → panel=Control + cursor 仍 1。
+        app.handle_base_key(&KeyEvent::new(KeyCode::Enter, crossterm::event::KeyModifiers::empty()));
+        assert_eq!(app.panel, Panel::Control, "Enter on ObserveSession should jump to Control");
+        assert_eq!(app.cursor, 1, "cursor synced across tab jump");
+        assert_eq!(app.focus, FocusTarget::ControlSession(1), "focus set to ControlSession after jump");
+    }
+
 
     /// ADR-1/ADR-2:TabBar 命中优先于 ClickMap(点 tab 栏不应触发按钮)。
     #[test]
