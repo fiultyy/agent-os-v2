@@ -99,6 +99,75 @@ impl HSplit {
     }
 }
 
+/// N-pane 垂直可扩展堆叠:Vec<u16> pcts 按比例垂直分(pane 上下堆叠)。N>=2。
+/// pcts 按比例分(不要求和 100,按 pct/sum);各 pct clamp 10..=90。pane 间 1 行分隔条。
+/// ponytail: 后续 push pane(加 flow/属性)= pcts.push;架构不变。
+pub struct VerticalStack {
+    pub pcts: Vec<u16>,
+}
+
+impl VerticalStack {
+    pub fn new(pcts: Vec<u16>) -> Self {
+        assert!(pcts.len() >= 2, "VerticalStack needs N>=2 panes");
+        Self { pcts: pcts.into_iter().map(|p| p.clamp(10, 90)).collect() }
+    }
+
+    /// N pane Rect(pane 间留 1 行分隔条)。返 len==pcts.len()。
+    pub fn rects(&self, area: Rect) -> Vec<Rect> {
+        let n = self.pcts.len();
+        let sep_h: u16 = if area.height == 0 { 0 } else { 1 };
+        let total_sep = sep_h * (n.saturating_sub(1)) as u16;
+        let usable = area.height.saturating_sub(total_sep);
+        let sum: u32 = self.pcts.iter().map(|&p| p as u32).sum::<u32>().max(1);
+        let mut out = Vec::with_capacity(n);
+        let mut y = area.y;
+        for (i, &p) in self.pcts.iter().enumerate() {
+            let h = if i == n - 1 {
+                // 末 pane 吃余量(避免舍入缝隙)。
+                area.y + area.height - y
+            } else {
+                (usable as u32 * p as u32 / sum) as u16
+            };
+            out.push(Rect { x: area.x, y, width: area.width, height: h });
+            y += h + sep_h;
+        }
+        out
+    }
+
+    /// N-1 分隔条 Rect(pane 间 1 行高,供鼠标拖拽命中)。
+    pub fn separators(&self, area: Rect) -> Vec<Rect> {
+        let panes = self.rects(area);
+        let sep_h: u16 = if area.height == 0 { 0 } else { 1 };
+        panes
+            .windows(2)
+            .map(|w| Rect {
+                x: area.x,
+                y: w[0].y + w[0].height,
+                width: area.width,
+                height: sep_h,
+            })
+            .collect()
+    }
+
+    /// 拖 pane_idx 与 pane_idx+1 之间的分隔条:dy>0(下拖)减上 pane 加下 pane。
+    /// 改 pcts[pane_idx]/pcts[pane_idx+1](和守恒),各 clamp 10..=90。
+    pub fn drag(&mut self, pane_idx: usize, dy: i32, area: Rect) {
+        if pane_idx + 1 >= self.pcts.len() {
+            return;
+        }
+        let usable = (area.height as i32).max(1);
+        let sum: i32 = self.pcts[pane_idx] as i32 + self.pcts[pane_idx + 1] as i32;
+        // dy>0 下拖:上 pane 减少。
+        let delta = -dy * sum / usable;
+        let mut a = self.pcts[pane_idx] as i32 + delta;
+        // clamp a 10..=sum-10,b 取余保持和守恒。
+        a = a.max(10).min(sum - 10);
+        let b = sum - a;
+        self.pcts[pane_idx] = a as u16;
+        self.pcts[pane_idx + 1] = b as u16;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,5 +225,53 @@ mod tests {
         let [l, bar, r] = HSplit::new(50).rects(Rect::new(0, 0, 0, 10));
         assert_eq!(bar.width, 0);
         assert_eq!(l.width + r.width, 0);
+    }
+
+    // ── VerticalStack N-pane ──
+    #[test]
+    fn vstack_n2_rects_and_seps() {
+        let v = VerticalStack::new(vec![50, 50]);
+        let panes = v.rects(Rect::new(0, 0, 40, 21));
+        assert_eq!(panes.len(), 2, "N=2 → 2 panes");
+        assert_eq!(panes[0].height + panes[1].height, 20, "2 panes + 1 sep = 21");
+        let seps = v.separators(Rect::new(0, 0, 40, 21));
+        assert_eq!(seps.len(), 1, "N=2 → 1 separator");
+        assert_eq!(seps[0].y, panes[0].y + panes[0].height);
+        assert_eq!(seps[0].height, 1);
+    }
+
+    #[test]
+    fn vstack_n3_rects_and_seps() {
+        let v = VerticalStack::new(vec![60, 30, 10]);
+        let panes = v.rects(Rect::new(0, 0, 40, 32)); // usable = 32 - 2 sep = 30
+        assert_eq!(panes.len(), 3, "N=3 → 3 panes");
+        // 60/100 * 30 = 18, 30/100 * 30 = 9, 末 pane 吃余 = 3
+        assert_eq!(panes[0].height, 18);
+        assert_eq!(panes[1].height, 9);
+        assert_eq!(panes[2].height, 3);
+        let seps = v.separators(Rect::new(0, 0, 40, 32));
+        assert_eq!(seps.len(), 2, "N=3 → 2 separators");
+    }
+
+    #[test]
+    fn vstack_drag_clamps() {
+        let mut v = VerticalStack::new(vec![50, 50]);
+        v.drag(0, 1000, Rect::new(0, 0, 40, 21)); // 下拖大量 → 上 pane 减到 min(10)
+        assert_eq!(v.pcts[0], 10);
+        assert_eq!(v.pcts[1], 90, "和守恒 = 100");
+        v.drag(0, -1000, Rect::new(0, 0, 40, 21)); // 上拖大量 → 上 pane 加到 max(90)
+        assert_eq!(v.pcts[0], 90);
+        assert_eq!(v.pcts[1], 10);
+    }
+
+    #[test]
+    fn vstack_zero_area_safe() {
+        let v = VerticalStack::new(vec![50, 50]);
+        let panes = v.rects(Rect::new(0, 0, 10, 0));
+        let seps = v.separators(Rect::new(0, 0, 10, 0));
+        assert_eq!(panes.len(), 2);
+        assert_eq!(seps.len(), 1);
+        assert_eq!(seps[0].height, 0, "0 高度 area → sep 0");
+        assert_eq!(panes[0].height + panes[1].height, 0);
     }
 }
