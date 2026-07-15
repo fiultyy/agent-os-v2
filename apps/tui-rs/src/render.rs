@@ -397,84 +397,111 @@ fn node_status_glyph(status: &str) -> (String, Color) {
     }
 }
 
+/// ADR-3(第八轮):Observe tab 卷轴 UI。所有 session 事件流连续滚动(日志总览),
+/// 不分 session 树 | turn stream HSplit(改全屏 ScrollView 大卷轴)。
+/// 每 session 一个 header 块 + 其事件行(session 标签前缀)。点 header/session → 跳 Control(ADR-2)。
+/// WS 数据源不变(observe service 不改,drain_ws 更新 app.events)。
 pub fn draw_stack(f: &mut Frame, area: Rect, app: &mut App) {
-    // ADR-2:HSplit resizable 替代固定 Layout(session 树 | turn stream)。
-    let [left, bar, right] = app.observe_split.rects(area);
-    app.observe_area = area; // 缓存供 events 鼠标拖拽命中
-    // clickmap.clear() 在顶层 draw() 统一做(第三轮 minor 修复),此处不重复(F2)。
+    app.observe_area = area; // 缓存供 events 鼠标命中(分隔条拖拽虽去,保留兼容)
 
-    // ── 左:session 树(harness 分组 + ×N 多实例标记)──
-    let mut items: Vec<ListItem> = vec![];
-    let mut harnesses: Vec<String> = app.sessions.sessions_by_harness.keys().cloned().collect();
-    harnesses.sort();
-    let mut ci = 0;
-    // row_idx 跟踪当前 item 在 List 中的行号(含 header/空行),用于算 session 项的 y 坐标。
-    let mut row_idx: u16 = 0;
-    for hs in &harnesses {
-        let n = app.sessions.sessions_by_harness.get(hs).map(|v| v.len()).unwrap_or(0);
-        items.push(ListItem::new(format!(" ▾ {} · {}", hs, n)).style(Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD)));
-        row_idx = row_idx.saturating_add(1);
-        if let Some(ss) = app.sessions.sessions_by_harness.get(hs) {
-            for s in ss {
-                let label = trunc(&s.session_id, 22);
-                let n = app.instance_count(&s.harness_type, &s.session_id);
-                let multi_tag = if n >= 2 { format!(" ×{}", n) } else { String::new() };
-                let row_rect = Rect::new(left.x, left.y + row_idx, left.width, 1);
-                // ADR-1:hover 高亮(MouseCursor.in_rect)+ ADR-2:focus。
-                let hovered = app.mouse.in_rect(row_rect);
-                let focused = matches!(app.focus, FocusTarget::ObserveSession) && ci == app.cursor;
-                let (prefix, st) = if ci == app.cursor {
-                    ("▸ ", Style::default().fg(Color::White).bg(Color::Blue).add_modifier(Modifier::BOLD))
-                } else if hovered {
-                    // hover:黄底(区别 cursor 蓝)
-                    ("  ", Style::default().fg(Color::Black).bg(Color::Yellow))
-                } else if focused {
-                    ("▶ ", Style::default().fg(Color::White).bg(Color::DarkGray).add_modifier(Modifier::BOLD))
-                } else {
-                    ("  ", Style::default().fg(Color::White))
-                };
-                let multi_color = if n >= 2 { Color::Yellow } else { Color::DarkGray };
-                let line = ratatui::text::Line::from(vec![
-                    Span::styled(format!("   {}{}", prefix, label), st),
-                    Span::styled(multi_tag, Style::default().fg(multi_color).add_modifier(Modifier::BOLD)),
-                ]);
-                items.push(ListItem::new(line));
-                // ADR-2:注册 session 项 Rect(id=flat index ci)供鼠标点击命中。
-                app.clickmap.register(row_rect, ci);
-                ci += 1;
-                row_idx = row_idx.saturating_add(1);
-            }
-        }
-        items.push(ListItem::new(""));
-        row_idx = row_idx.saturating_add(1);
-    }
-    f.render_widget(List::new(items), left);
-
-    // 分隔条(resizable 拖拽命中区)。
-    f.render_widget(
-        ratatui::widgets::Block::default().style(Style::default().fg(Color::DarkGray)),
-        bar,
-    );
-
-    // ── 右:turn stream(ScrollView 滚动,ADR-2)──
-    let key = app.flat.get(app.cursor).map(|s| format!("{}/{}", s.harness_type, s.session_id)).unwrap_or_default();
-    let mut ev_lines: Vec<Line> = vec![
-        Line::from(Span::styled(" turn stream".to_string(), Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD))),
+    // 收集所有 session 事件 → 连续行(header 块 + 事件行)。按 flat 顺序(已排序)。
+    // 跟踪每 session header 在总行列表中的索引(供 clickmap 算屏幕 y,考虑 scroll offset)。
+    let mut all_lines: Vec<Line> = vec![
+        Line::from(Span::styled(
+            " OBSERVE · 事件卷轴(所有 session 连续滚动 · 点 header 跳 Control · Enter 跳 Control)".to_string(),
+            Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
+        )),
         Line::raw(""),
     ];
-    if let Some(evs) = app.events.get(&key) {
-        for e in evs {
-            ev_lines.push(stack_event_line(e));
+    // (header_line_idx, flat_idx) 对:header 行在全量 lines 中的索引 + 对应 flat 索引。
+    let mut header_marks: Vec<(usize, usize)> = vec![];
+
+    for (fi, s) in app.flat.iter().enumerate() {
+        let key = format!("{}/{}", s.harness_type, s.session_id);
+        let evs = app.events.get(&key);
+        let ev_n = evs.map(|e| e.len()).unwrap_or(0);
+        let inst = app.instance_count(&s.harness_type, &s.session_id);
+        let sid_tag = trunc(&s.session_id, 24);
+        let multi_tag = if inst >= 2 { format!(" ×{}", inst) } else { String::new() };
+
+        // header 行(session 标签 + 事件数 + 多实例)。
+        let is_cursor = fi == app.cursor;
+        let st = if is_cursor {
+            Style::default().fg(Color::White).bg(Color::Blue).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        };
+        header_marks.push((all_lines.len(), fi));
+        all_lines.push(Line::from(vec![
+            Span::styled(format!(" ▸ {} ", sid_tag), st),
+            Span::styled(format!("({}) ", s.harness_type), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{}ev", ev_n), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                if inst >= 2 { format!("  {}", multi_tag) } else { String::new() },
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+
+        // 事件行:每事件一行,session 标签前缀(日志风格)。
+        if let Some(evs) = evs {
+            for e in evs {
+                let (tag, color, body) = event_log_parts(e);
+                let prefix = format!(" [{}] ", trunc(&s.session_id, 10));
+                all_lines.push(Line::from(vec![
+                    Span::styled(prefix, Style::default().fg(Color::DarkGray)),
+                    Span::styled(format!(" {} ", tag), Style::default().fg(Color::Black).bg(color).add_modifier(Modifier::BOLD)),
+                    Span::raw(format!(" {}", trunc(&body, 50))),
+                ]));
+            }
+        } else {
+            all_lines.push(Line::from(Span::styled(
+                "   (observe 不可达 · r 刷新)".to_string(),
+                Style::default().fg(Color::DarkGray),
+            )));
         }
+        all_lines.push(Line::raw("")); // session 间空行
     }
-    // ScrollView 内容更新 + 渲染(scroll + wrap + scrollbar 指示器)。
-    app.observe_scroll.set_content(ev_lines);
-    app.observe_scroll.render(f, right);
+
+    if app.flat.is_empty() {
+        all_lines.push(Line::from(Span::styled(
+            " (无 session · r 刷新)".to_string(),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    app.observe_scroll.set_content(all_lines);
+    app.observe_scroll.render(f, area);
+
+    // clickmap:为可见 header 行注册(flat 索引)供鼠标点击跳 Control。
+    // ScrollView render 用 Block(全 borders),inner = area 四周缩 1;offset 是行偏移。
+    // header 屏幕行 y = inner.y + (header_line_idx - offset)(落在 inner 内才注册)。
+    // ponytail: scroll offset 下 clickmap 仅 header 行精确(事件行不注册,日志卷轴点 header 足够)。
+    let inner = ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::ALL).inner(area);
+    let offset = app.observe_scroll.offset;
+    for (line_idx, flat_idx) in &header_marks {
+        if *line_idx < offset {
+            continue;
+        }
+        let screen_y = inner.y + (*line_idx - offset) as u16;
+        if screen_y >= inner.y + inner.height {
+            continue; // 屏幕外
+        }
+        let row_rect = Rect::new(inner.x, screen_y, inner.width, 1);
+        app.clickmap.register(row_rect, *flat_idx);
+    }
 }
 
-fn stack_event_line(e: &ObserveEvent) -> Line<'static> {
-    // 第六轮 ADR-7:复用 control::stack_event_line(消除重复,两处共用)。
-    components::control::stack_event_line(e)
+/// 事件 → (tag, color, body)用于卷轴日志行(ADR-3 Observe 卷轴)。复用 glyph 语义。
+fn event_log_parts(e: &ObserveEvent) -> (String, Color, String) {
+    use crate::state::fmt_val;
+    match e.event_type.as_str() {
+        "tick_started" => ("START".to_string(), Color::Green, fmt_val(&e.data, "request")),
+        "tool_call" => ("TOOL▸".to_string(), Color::Blue, fmt_val(&e.data, "tool_name")),
+        "tool_result" => ("TOOL◂".to_string(), Color::Blue, fmt_val(&e.data, "result")),
+        "tick_completed" => ("DONE ".to_string(), Color::Magenta, fmt_val(&e.data, "response")),
+        "token_delta" => ("δ".to_string(), Color::DarkGray, fmt_val(&e.data, "delta_text")),
+        other => (other.to_string(), Color::DarkGray, String::new()),
+    }
 }
 
 pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {

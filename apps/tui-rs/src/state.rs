@@ -868,15 +868,8 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                // ADR-2:Observe tab 分隔条命中检测(HSplit bar rect)。
-                if self.panel == Panel::Observe && self.observe_area.contains(ratatui::layout::Position { x: m.column, y: m.row }) {
-                    let [_left, bar, _right] = self.observe_split.rects(self.observe_area);
-                    if bar.contains(ratatui::layout::Position { x: m.column, y: m.row }) {
-                        self.observe_dragging = true;
-                        return;
-                    }
-                }
                 // 第六轮 T1:Control tab 分隔条命中(HSplit 水平 + VSplit 垂直堆叠)。
+                // (Observe 第八轮改全屏卷轴,无 HSplit 分隔条,不再检测 observe_split bar。)
                 if self.panel == Panel::Control && self.control_area.contains(ratatui::layout::Position { x: m.column, y: m.row }) {
                     let [_left, hbar, right] = self.control_split.rects(self.control_area);
                     if hbar.contains(ratatui::layout::Position { x: m.column, y: m.row }) {
