@@ -30,6 +30,7 @@ use crate::components::tabs::TabBar;
 use crate::kitty::TermCap;
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
+use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use ratatui::text::Text;
@@ -245,6 +246,17 @@ pub fn trunc(s: &str, n: usize) -> String {
     }
 }
 
+/// harness_type → (2 字母色块标签, 色)。左大纲色块列用。
+pub fn harness_tag(h: &str) -> (&'static str, Color) {
+    match h {
+        "openclaw" => ("oc", Color::Cyan),
+        "claude-code" => ("cc", Color::Blue),
+        "flow" => ("fl", Color::Magenta),
+        "agent-os-v2" => ("ao", Color::Green),
+        _ => ("·", Color::Yellow),
+    }
+}
+
 // ═══ flow presets(ADR-1 P2:turn 链/分支/DAG 演示拓扑)══════════════
 // 给 control mode 一键创建 + run。真实 harness 消息由 orche 触发 turn。
 
@@ -440,19 +452,21 @@ pub struct App {
     pub observe_area: Rect,
     /// 鼠标是否正在拖 observe 分隔条(Drag 延续)。
     pub observe_dragging: bool,
-    // ── Control Cursor 式布局(第六轮 T1/T2,非业务字段)───────────────
-    /// Control tab HSplit(左大纲 | 右堆叠)resizable 状态。
+    // ── Control 布局(窄大纲 + 色块组标签 + 右侧 tab 化,非业务字段)─────
+    /// Control HSplit(左窄大纲 | 右主区)。pct=左占比,resizable。
     pub control_split: HSplit,
-    /// Control tab 右堆叠 VerticalStack(对话 | 输入)resizable 状态。N-pane 可扩展(ADR-1)。
-    pub control_stack: crate::components::split::VerticalStack,
-    /// Control tab 对话区 ScrollView(turn stream 滚动)。
+    /// Control 对话区 ScrollView(turn stream 滚动)。
     pub control_chat_scroll: ScrollView,
-    /// Control tab 区域缓存(draw 算 → handle mouse drag hit 用)。
+    /// Control 区域缓存(draw 算 → handle mouse drag hit 用)。
     pub control_area: Rect,
-    /// 鼠标是否正在拖 control 主分隔条(HSplit bar)。
+    /// 鼠标正在拖 control 主分隔条(左|右 HSplit bar)。
     pub control_h_dragging: bool,
-    /// 鼠标正在拖 control 堆叠分隔条的 pane_idx(VerticalStack separators[pane_idx],ADR-1)。
-    pub control_v_dragging: Option<usize>,
+    /// 右主区 tab(对话 | flow | 属性)。复用 TabBar。
+    pub control_right_tabs: TabBar,
+    /// 右主区 tab 栏区域缓存(点击 hit 用)。
+    pub right_tab_area: Rect,
+    /// 左大纲 harness 组名(排序,draw_control 写入;色块点击 id-200 索引)。
+    pub control_groups: Vec<String>,
     /// ClickMap 页面内交互元素命中(Control 按钮 + Observe session 项,ADR-1/ADR-2)。
     pub clickmap: ClickMap<usize>,
     /// ADR-1 T4:WS 直连 observe(弃 REST polling)。WS manager + 事件 channel。
@@ -466,6 +480,12 @@ pub struct App {
     pub orche_online: bool,
     /// 上次按钮点击时间 + action 名(ADR-3:点击 loading 反馈,render 检 <500ms 高亮)。
     pub last_action: Option<(std::time::Instant, &'static str)>,
+    /// raw-exec 待执行 spawn(`e` 键 / 按钮3 设置)。run() loop 消费它:
+    /// 挂起 TUI raw mode + alt screen → 子进程(claude --resume / openclaw)接管终端 → 退出后恢复 + 全重绘。
+    pub pending_spawn: Option<(crate::components::raw_exec::Harness, Option<String>)>,
+    /// Control 输入模式:true=所有字母进 turn_msg(输入栏可自由打字,不受 t/s/p/h 等快捷键抢占);
+    /// Esc 退出到快捷键模式(此时 t/s/f/G/D/R/p/h 等生效),`i` 再进入。默认 true:进 Control 即可打字。
+    pub insert_mode: bool,
 }
 
 impl App {
@@ -496,18 +516,24 @@ impl App {
             observe_scroll: ScrollView::new(vec![]),
             observe_area: Rect::default(),
             observe_dragging: false,
-            control_split: HSplit::new(30),
-            // ADR-1(第八轮):push pane 扩 4 区(对话/输入/flow/属性)。VerticalStack 真扩展验证。
-            control_stack: crate::components::split::VerticalStack::new(vec![40, 20, 20, 20]),
+            control_split: HSplit::new(22),
             control_chat_scroll: ScrollView::new(vec![]),
             control_area: Rect::default(),
             control_h_dragging: false,
-            control_v_dragging: None,
+            control_right_tabs: TabBar::new(vec![
+                " 对话 ".to_string(),
+                " flow ".to_string(),
+                " 属性 ".to_string(),
+            ]),
+            right_tab_area: Rect::default(),
+            control_groups: vec![],
             clickmap: ClickMap::new(),
             ws: None,
             focus: FocusTarget::TabBar,
             orche_online: true, // 默认假设在线,首次预检刷新
             last_action: None,
+            pending_spawn: None,
+            insert_mode: true,
         }
     }
 
@@ -581,6 +607,8 @@ impl App {
         if ht == "claw" {
             self.fetch_claw_events();
         }
+        // 发送后清空输入栏(Enter/t 发送即清,Cursor 式 chat 语义)。
+        self.turn_msg.clear();
     }
 
     /// spawn 多实例(s 键)。claude-code:POST /spawn 同 sid 多 PTY;
@@ -604,6 +632,20 @@ impl App {
             self.turn_status = Some(st);
         }
         self.fetch_current();
+    }
+
+    /// 请求 raw-exec:按 cursor session 的 harness_type 决定拉起哪个 harness
+    /// (claude-code → `claude --resume <sid>`;其余 → `openclaw`)。
+    /// 不直接 spawn(无 terminal 句柄做挂起/恢复);设置 pending_spawn,run() loop 消费。
+    pub fn request_raw_exec(&mut self) {
+        let (harness, sid) = match self.flat.get(self.cursor) {
+            Some(s) => (
+                crate::components::raw_exec::harness_for(&s.harness_type),
+                Some(s.session_id.clone()),
+            ),
+            None => (crate::components::raw_exec::Harness::ClaudeCode, None),
+        };
+        self.pending_spawn = Some((harness, sid));
     }
 
     // ── flow 操作(P2 编排:turn 链/分支/DAG)──────────────────────
@@ -817,17 +859,7 @@ impl App {
                 self.fetch_claw_events();
                 self.orche_online = fetch_orche_health();
             }
-            3 => self.open_popup(Popup::centered(
-                "raw-exec",
-                " raw exec · spawn harness",
-                vec![
-                    "选 session → spawn claude --resume <sid> / claw TUI 全屏".to_string(),
-                    format!(" 当前 cursor session: {}", self.current_sid()),
-                    " ctrl+d 退出 harness 回 TUI(占位:交互模式生效)".to_string(),
-                ],
-                64,
-                8,
-            )),
+            3 => self.request_raw_exec(),
             4 => { self.create_preset_flow(FlowPreset::Chain); self.mark_action("create_chain"); }
             5 => { self.create_preset_flow(FlowPreset::Branch); self.mark_action("create_branch"); }
             6 => { self.create_preset_flow(FlowPreset::Dag); self.mark_action("create_dag"); }
@@ -868,33 +900,36 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                // 第六轮 T1:Control tab 分隔条命中(HSplit 水平 + VSplit 垂直堆叠)。
-                // (Observe 第八轮改全屏卷轴,无 HSplit 分隔条,不再检测 observe_split bar。)
+                // Control 左|右 HSplit 分隔条命中(仅水平 bar;垂直堆叠已 tab 化,无 VStack 分隔条)。
                 if self.panel == Panel::Control && self.control_area.contains(ratatui::layout::Position { x: m.column, y: m.row }) {
-                    let [_left, hbar, right] = self.control_split.rects(self.control_area);
+                    let [_left, hbar, _right] = self.control_split.rects(self.control_area);
                     if hbar.contains(ratatui::layout::Position { x: m.column, y: m.row }) {
                         self.control_h_dragging = true;
                         return;
                     }
-                    let seps = self.control_stack.separators(right);
-                    for (i, sep) in seps.iter().enumerate() {
-                        if sep.contains(ratatui::layout::Position { x: m.column, y: m.row }) {
-                            self.control_v_dragging = Some(i);
-                            return;
-                        }
-                    }
                 }
-                // TabBar 命中切 tab。
+                // 顶栏 TabBar 命中切 base panel。
                 if let Some(i) = self.tabbar.hit(self.tab_area, m.column, m.row) {
                     self.tabbar.select(i);
                     self.sync_panel_from_tab();
                     return;
                 }
-                // ADR-1:Control 按钮 ClickMap 命中 → trigger_control_button(鼠标 + 键盘 Enter 共用,F1 修复)。
-                // 第六轮 T1:Control 左大纲 session 项 ClickMap 命中(id≥100 → 切 cursor)。
+                // 右主区 tab(对话/flow/属性)点击。
+                if self.panel == Panel::Control {
+                    if let Some(i) = self.control_right_tabs.hit(self.right_tab_area, m.column, m.row) {
+                        self.control_right_tabs.select(i);
+                        return;
+                    }
+                }
+                // ClickMap 命中:id 0-7 按钮、100+ session 项、200+ 组色块。
                 if self.panel == Panel::Control {
                     if let Some(id) = self.clickmap.hit(m.column, m.row) {
-                        if *id >= 100 {
+                        if *id >= 200 {
+                            // 组色块:id-200 = group_idx → 跳该组首 session。
+                            if let Some(group) = self.control_groups.get(*id - 200).cloned() {
+                                self.jump_to_group(&group);
+                            }
+                        } else if *id >= 100 {
                             // session 项:id-100 = flat index → 切 cursor + fetch_current。
                             let idx = *id - 100;
                             if idx < self.flat.len() {
@@ -917,8 +952,7 @@ impl App {
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                // (Observe 第八轮改全屏卷轴,无 HSplit 分隔条,observe_dragging 已删,不再拖拽。)
-                // 第六轮 T1:Control tab 分隔条拖拽(HSplit 水平 + VSplit 垂直堆叠)。
+                // Control 左|右 HSplit bar 拖拽(垂直堆叠已 tab 化,无 VStack 拖拽)。
                 if self.control_h_dragging {
                     let [_left, hbar, _right] = self.control_split.rects(self.control_area);
                     let dx: i32 = if m.column > hbar.x { 1 } else if m.column < hbar.x { -1 } else { 0 };
@@ -926,21 +960,9 @@ impl App {
                         self.control_split.drag(dx, self.control_area);
                     }
                 }
-                if let Some(pane_idx) = self.control_v_dragging {
-                    let [_left, _hbar, right] = self.control_split.rects(self.control_area);
-                    let seps = self.control_stack.separators(right);
-                    if pane_idx < seps.len() {
-                        let vbar = seps[pane_idx];
-                        let dy: i32 = if m.row > vbar.y { 1 } else if m.row < vbar.y { -1 } else { 0 };
-                        if dy != 0 {
-                            self.control_stack.drag(pane_idx, dy, right);
-                        }
-                    }
-                }
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 self.control_h_dragging = false;
-                self.control_v_dragging = None;
             }
             _ => {}
         }
@@ -987,8 +1009,28 @@ impl App {
         self.focus = FocusTarget::ControlSession(self.cursor);
     }
 
+    /// 色块组标签点击:跳到该 harness 组的首个 session(切 cursor + fetch)。
+    pub fn jump_to_group(&mut self, group: &str) {
+        if let Some(idx) = self.flat.iter().position(|s| s.harness_type == group) {
+            self.cursor = idx;
+            self.fetch_current();
+        }
+    }
+
     /// base panel 键位(P1 保留 + P2 扩展 e=raw exec / p=弹窗)。返回 true = 退出 app。
     fn handle_base_key(&mut self, k: &KeyEvent) -> bool {
+        // Control 输入模式:只捕获文字键(Esc/Enter/Backspace/Char),不触字母快捷键。
+        // 修"p 弹 help"等字母冲突:输入栏打字时 t/s/p/h/f 等不抢占。
+        // Tab/方向键/BackTab 等 fall through 到下面的正常处理(打字时仍可导航)。
+        if self.panel == Panel::Control && self.insert_mode {
+            match k.code {
+                KeyCode::Esc => { self.insert_mode = false; return false; }
+                KeyCode::Enter => { self.do_turn(); self.mark_action("trigger"); return false; }
+                KeyCode::Backspace => { self.turn_msg.pop(); return false; }
+                KeyCode::Char(c) => { self.turn_msg.push(c); return false; }
+                _ => { /* Tab/方向键等 fall through */ }
+            }
+        }
         match k.code {
             KeyCode::Char('q') => true,
             KeyCode::Tab => {
@@ -1004,11 +1046,14 @@ impl App {
                 false
             }
             KeyCode::Enter => {
-                // F1:键盘 Enter 触发聚焦的 Control 按钮(focus==ControlButton(i),鼠标点击共用 trigger_control_button)。
+                // Control:Enter 触发聚焦按钮;焦点不在按钮(输入态/大纲/TabBar)→ 发送 turn(trigger 按钮 0)。
+                // 修"enter 无效":输入态下 focus≠ControlButton,原逻辑什么都不做。
                 if self.panel == Panel::Control {
-                    if let FocusTarget::ControlButton(i) = self.focus {
-                        self.trigger_control_button(i);
-                    }
+                    let btn = match self.focus {
+                        FocusTarget::ControlButton(i) => i,
+                        _ => 0,
+                    };
+                    self.trigger_control_button(btn);
                 }
                 // ADR-2(第八轮):Observe session 聚焦时 Enter → 跳 Control(cursor 同步 + WS 重订阅)。
                 if self.panel == Panel::Observe {
@@ -1137,27 +1182,25 @@ impl App {
                 false
             }
             KeyCode::Char('e') => {
-                // raw exec:占位提示(真实 spawn 见 components/raw_exec.rs)。
-                self.open_popup(Popup::centered(
-                    "raw-exec",
-                    " raw exec · spawn harness",
-                    vec![
-                        "选 session → spawn claude --resume <sid> / claw TUI 全屏".to_string(),
-                        format!(" 当前 cursor session: {}", self.current_sid()),
-                        " ctrl+d 退出 harness 回 TUI(占位:交互模式生效)".to_string(),
-                    ],
-                    64,
-                    8,
-                ));
+                // raw exec:挂起 TUI 全屏拉起 cursor session 的 harness(claude --resume / openclaw)。
+                // 实际 spawn 由 run() loop 消费 pending_spawn(原占位弹窗已废)。
+                self.request_raw_exec();
                 false
             }
-            KeyCode::Char(c) => {
-                // control mode:Char 追加 turn_msg(输入 message);单键 t/c/f/G/D/R/s/r/q 等已先 match
-                if self.panel == Panel::Control {
-                    self.turn_msg.push(c);
-                }
+            KeyCode::Char('i') if self.panel == Panel::Control => {
+                // 进入输入模式(可自由打字);Esc 退出。
+                self.insert_mode = true;
                 false
             }
+            KeyCode::Char('[') if self.panel == Panel::Control => {
+                self.control_right_tabs.prev();
+                false
+            }
+            KeyCode::Char(']') if self.panel == Panel::Control => {
+                self.control_right_tabs.next();
+                false
+            }
+            // normal 模式下普通字母/退格无动作:打字统一由 insert 模式处理(见函数顶 capture)。
             _ => false,
         }
     }
@@ -1321,16 +1364,18 @@ mod tests {
         assert_eq!(uncond.len(), 1, "one unconditional edge (A→C else)");
     }
 
-    /// ADR-1:Control 按钮 ClickMap 命中 → raw-exec open_popup(id=3)。
+    /// ADR-1:Control 按钮 ClickMap 命中 id=3(raw-exec)→ 请求 pending_spawn(原占位弹窗已废)。
     /// 手动注册 clickmap region(id=3),模拟 draw_control 注册后 handle_base_mouse 命中。
     #[test]
-    fn control_clickmap_rawexec_opens_popup() {
+    fn control_clickmap_rawexec_requests_spawn() {
         let mut app = App::new(crate::kitty::detect());
         app.panel = Panel::Control;
-        // 模拟 draw_control 注册 raw-exec 按钮(id=3)在 (10,5)-(30,6)。
+        app.flat = vec![Session {
+            harness_type: "claude-code".into(), session_id: "abc123".into(), harness_id: "h1".into(),
+        }];
+        app.cursor = 0;
         app.clickmap.clear();
         app.clickmap.register(Rect::new(10, 5, 20, 1), 3);
-        // 点击该区域 → 应打开 raw-exec 弹窗。
         let m = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 15,
@@ -1338,7 +1383,10 @@ mod tests {
             modifiers: crossterm::event::KeyModifiers::empty(),
         };
         app.handle_base_mouse(&m);
-        assert!(app.popups.iter().any(|p| p.id == "raw-exec"), "raw-exec popup should open on button click");
+        assert!(app.pending_spawn.is_some(), "raw-exec button should set pending_spawn");
+        let (h, sid) = app.pending_spawn.unwrap();
+        assert_eq!(h, crate::components::raw_exec::Harness::ClaudeCode);
+        assert_eq!(sid.as_deref(), Some("abc123"));
     }
 
     /// ADR-2(第八轮):Observe session 点 → 跳 Control(cursor 同步 + panel 切 Control)。
@@ -1584,17 +1632,113 @@ mod tests {
         assert_eq!(CONTROL_BUTTON_COUNT, 8);
     }
 
-    /// ADR-1(第八轮):control_stack pcts 扩 4 pane(对话/输入/flow/属性)。VerticalStack 真扩展验证。
+    /// 右主区 tab(对话/flow/属性)切换:next/prev 循环、select 定位。
     #[test]
-    fn control_stack_has_4_panes() {
-        let app = App::new(crate::kitty::detect());
-        assert_eq!(app.control_stack.pcts.len(), 4, "control_stack must have 4 panes (对话/输入/flow/属性)");
-        // push pane 加区不改架构:VerticalStack.rects 返 len==pcts.len()。
-        let panes = app.control_stack.rects(ratatui::layout::Rect::new(0, 0, 80, 40));
-        assert_eq!(panes.len(), 4, "4 panes → 4 rects");
-        // panes 上下堆叠(y 单调递增)。
-        for w in panes.windows(2) {
-            assert!(w[1].y >= w[0].y + w[0].height, "panes stack vertically");
-        }
+    fn control_right_tab_cycles() {
+        let mut app = App::new(crate::kitty::detect());
+        assert_eq!(app.control_right_tabs.active, 0, "默认对话 tab");
+        app.control_right_tabs.next();
+        assert_eq!(app.control_right_tabs.active, 1, "next → flow");
+        app.control_right_tabs.next();
+        assert_eq!(app.control_right_tabs.active, 2, "next → 属性");
+        app.control_right_tabs.next();
+        assert_eq!(app.control_right_tabs.active, 0, "next 循环回 对话");
+        app.control_right_tabs.prev();
+        assert_eq!(app.control_right_tabs.active, 2, "prev → 属性");
+        app.control_right_tabs.select(1);
+        assert_eq!(app.control_right_tabs.active, 1);
+    }
+
+    /// [` ` / `]` 键(normal 模式)切右 tab。
+    #[test]
+    fn control_right_tab_keys() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        app.insert_mode = false; // normal 模式快捷键生效
+        app.handle_base_key(&KeyEvent::new(KeyCode::Char(']'), crossterm::event::KeyModifiers::empty()));
+        assert_eq!(app.control_right_tabs.active, 1, "] → flow");
+        app.handle_base_key(&KeyEvent::new(KeyCode::Char('['), crossterm::event::KeyModifiers::empty()));
+        assert_eq!(app.control_right_tabs.active, 0, "[ → 对话");
+    }
+
+    /// 色块组标签点击(clickmap id 200+group_idx)→ 跳该组首 session。
+    #[test]
+    fn control_group_tag_click_jumps() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        // flat 顺序:sessions_by_harness 排序后 openclaw 在前(取 2 组验证)。
+        app.flat = vec![
+            Session { harness_type: "claude-code".into(), session_id: "cc-1".into(), harness_id: "h1".into() },
+            Session { harness_type: "claude-code".into(), session_id: "cc-2".into(), harness_id: "h2".into() },
+            Session { harness_type: "openclaw".into(), session_id: "oc-1".into(), harness_id: "h3".into() },
+        ];
+        app.sessions.sessions_by_harness.insert("claude-code".into(), app.flat[0..2].to_vec());
+        app.sessions.sessions_by_harness.insert("openclaw".into(), app.flat[2..3].to_vec());
+        app.cursor = 0; // 当前在 claude-code(cc-1)
+        // control_groups 由 draw_control 写入;这里直接模拟(排序后 claude-code 在前,openclaw 在后)。
+        app.control_groups = vec!["claude-code".into(), "openclaw".into()];
+        // 点击 openclaw 色块(id = 200 + 1)。
+        app.clickmap.clear();
+        app.clickmap.register(Rect::new(0, 0, 2, 1), 201);
+        let m = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 1, row: 0,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        app.handle_base_mouse(&m);
+        assert_eq!(app.cursor, 2, "点 openclaw 色块 → cursor 跳到该组首 session(flat idx 2 = oc-1)");
+    }
+
+    // ── 输入栏修复自检(ADR:backspace/enter/scroll)──────────────────────
+
+    /// Backspace 在 Control 输入栏删末字符(修"backspace 无效")。
+    #[test]
+    fn control_backspace_pops_turn_msg() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        app.turn_msg = "abc".to_string();
+        app.handle_base_key(&KeyEvent::new(KeyCode::Backspace, crossterm::event::KeyModifiers::empty()));
+        assert_eq!(app.turn_msg, "ab");
+        // 非 Control panel:Backspace 不影响 turn_msg。
+        app.panel = Panel::Home;
+        app.handle_base_key(&KeyEvent::new(KeyCode::Backspace, crossterm::event::KeyModifiers::empty()));
+        assert_eq!(app.turn_msg, "ab", "Backspace outside Control must not edit turn_msg");
+    }
+
+    /// Enter 在 Control 输入态(focus≠按钮)触发 turn → 发送后清空输入栏(修"enter 无效")。
+    /// 测试环境 orche 离线,trigger_turn 返 None,但 do_turn 仍清 turn_msg。
+    #[test]
+    fn control_enter_typing_sends_and_clears() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        app.focus = FocusTarget::TabBar; // 输入态:焦点不在按钮
+        app.turn_msg = "hi".to_string();
+        app.handle_base_key(&KeyEvent::new(KeyCode::Enter, crossterm::event::KeyModifiers::empty()));
+        assert!(app.turn_msg.is_empty(), "Enter in typing mode should send + clear turn_msg");
+    }
+
+    /// insert 模式:被绑定的字母(p/h/t...)进 turn_msg,不触快捷键;Esc 退到 normal 后才触发。
+    /// 修"输入栏 p 键弹 help":p 应打字而非弹窗。
+    #[test]
+    fn control_insert_mode_types_bound_letters() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        app.insert_mode = true;
+        app.turn_msg.clear();
+        // insert 模式:p 打字(不弹 help)
+        app.handle_base_key(&KeyEvent::new(KeyCode::Char('p'), crossterm::event::KeyModifiers::empty()));
+        assert_eq!(app.turn_msg, "p");
+        assert!(app.popups.is_empty(), "insert 模式 p 不应弹 help");
+        // h 同理打字
+        app.handle_base_key(&KeyEvent::new(KeyCode::Char('h'), crossterm::event::KeyModifiers::empty()));
+        assert_eq!(app.turn_msg, "ph");
+        // Esc 退出 insert → p 弹 help
+        app.handle_base_key(&KeyEvent::new(KeyCode::Esc, crossterm::event::KeyModifiers::empty()));
+        assert!(!app.insert_mode);
+        app.handle_base_key(&KeyEvent::new(KeyCode::Char('p'), crossterm::event::KeyModifiers::empty()));
+        assert!(app.popups.iter().any(|x| x.id == "help"), "normal 模式 p 应弹 help");
+        // i 重新进入 insert
+        app.handle_base_key(&KeyEvent::new(KeyCode::Char('i'), crossterm::event::KeyModifiers::empty()));
+        assert!(app.insert_mode, "i 重新进入 insert 模式");
     }
 }

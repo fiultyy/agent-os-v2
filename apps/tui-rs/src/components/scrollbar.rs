@@ -38,7 +38,10 @@ impl ScrollView {
     }
     pub fn set_content(&mut self, lines: Vec<ratatui::text::Line<'static>>) {
         self.lines = lines;
-        self.offset = 0;
+        // 不重置 offset:set_content 每帧由 draw_* 调用,重置会让滚轮刚改的偏移立刻归零(=滚不动)。
+        // clamp 到新 total,内容缩短时不越界。
+        let max = self.total().saturating_sub(1);
+        self.offset = self.offset.min(max);
     }
     /// content_length(未 wrap 行数近似)。
     fn total(&self) -> usize {
@@ -112,5 +115,18 @@ mod tests {
         assert_eq!(v.offset, 5);
         v.page_up(3);
         assert_eq!(v.offset, 2);
+    }
+
+    /// set_content 不再重置 offset(draw_* 每帧调,重置会让滚轮失效)。仅 clamp 到新 total。
+    #[test]
+    fn set_content_preserves_offset() {
+        let mut v = ScrollView::new(vec![Line::from("a"); 20]);
+        v.scroll_down(5);
+        assert_eq!(v.offset, 5);
+        v.set_content(vec![Line::from("a"); 20]); // 模拟 draw_* 每帧重灌同样内容
+        assert_eq!(v.offset, 5, "offset must survive per-frame set_content");
+        // 内容缩短时 clamp,不越界。
+        v.set_content(vec![Line::from("a"); 3]);
+        assert_eq!(v.offset, 2, "offset clamps to new total-1");
     }
 }

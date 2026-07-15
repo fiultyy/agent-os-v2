@@ -12,9 +12,19 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{List, ListItem, Paragraph},
+    widgets::{Block, Borders, List, ListItem, Paragraph},
     Frame,
 };
+
+/// 功能分区边框:Control 右堆叠各 pane + 左大纲的可见边界。cyan bold 标题 + 全边框。
+fn region_block(title: &str) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .title(Line::from(Span::styled(
+            title.to_string(),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )))
+}
 
 // ═══ mock flow 演示数据(P1 保留)═══════════════════════════════════
 
@@ -506,167 +516,179 @@ fn event_log_parts(e: &ObserveEvent) -> (String, Color, String) {
 
 pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
     use crate::components::control;
+    use crate::state::harness_tag;
 
-    // 第六轮 ADR-1:Cursor 式布局 — HSplit(左大纲 | 右堆叠)。
-    // clickmap clear 由顶层 draw() 统一做(修 minor 2/3),这里不重复 clear。
-    app.control_area = area; // 缓存供 mouse drag hit。
-
+    // 窄大纲(色块组标签 + session 列)| 右主区(StatusBar + 右tab + body + 输入栏)。
+    app.control_area = area; // 缓存供 mouse drag/hit。
     let [left, bar, right] = app.control_split.rects(area);
 
-    // ── 左大纲:session list(sessions_by_harness 分组 + 属性 + cursor 高亮 + ClickMap)──
-    // 复用第三轮 Observe draw_stack 的 session 项 ClickMap 模式。
-    // session 项 ClickMap id = 100 + flat_index(避免与按钮 id 0-7 冲突)。
-    let mut items: Vec<ListItem> = vec![ListItem::new(
-        Line::from(Span::styled(
-            " Sessions · harness 分组",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        )),
-    )];
+    // ── 左区:region_block 边框内水平切 [色块列(2) | session 列] ──
+    let left_block = region_block(" 大纲 ");
+    let left_inner = left_block.inner(left);
+    f.render_widget(left_block, left);
+    let left_split = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(2), Constraint::Min(1)])
+        .split(left_inner);
+    let tag_col = left_split[0];
+    let sess_col = left_split[1];
+
     let mut harnesses: Vec<String> = app.sessions.sessions_by_harness.keys().cloned().collect();
     harnesses.sort();
+    app.control_groups = harnesses.clone();
+    let cursor_group = app.flat.get(app.cursor).map(|s| s.harness_type.clone());
+
+    // session 列:flat 顺序(已按 harness 排序),去组头,组间空行。
+    // 记录每组首 session 行(group_start),供色块对齐渲染到该行。
+    let mut items: Vec<ListItem> = vec![];
     let mut ci = 0usize;
-    // row_idx 跟踪当前 item 在 List 中的行号(header=1)。
-    let mut row_idx: u16 = 1;
+    let mut row_idx: u16 = 0;
+    let mut group_start: Vec<u16> = vec![];
+    let sid_cap = sess_col.width.saturating_sub(6).max(4) as usize;
     for hs in &harnesses {
-        let n = app.sessions.sessions_by_harness.get(hs).map(|v| v.len()).unwrap_or(0);
-        items.push(ListItem::new(
-            Line::from(Span::styled(
-                format!(" ▾ {} · {}", hs, n),
-                Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
-            )),
-        ));
-        row_idx = row_idx.saturating_add(1);
+        let mut group_first = true;
         if let Some(ss) = app.sessions.sessions_by_harness.get(hs) {
             for s in ss {
-                let sid = trunc(&s.session_id, 20);
+                if ci > 0 && group_first {
+                    items.push(ListItem::new(""));
+                    row_idx = row_idx.saturating_add(1);
+                }
+                if group_first {
+                    group_start.push(row_idx);
+                    group_first = false;
+                }
+                let sid = trunc(&s.session_id, sid_cap);
                 let inst = app.instance_count(&s.harness_type, &s.session_id);
                 let ev_key = format!("{}/{}", s.harness_type, s.session_id);
                 let ev_n = app.events.get(&ev_key).map(|e| e.len()).unwrap_or(0);
-                let multi_tag = if inst >= 2 { format!(" ×{}", inst) } else { String::new() };
-                let row_rect = Rect::new(left.x, left.y + row_idx, left.width, 1);
+                let multi_tag = if inst >= 2 { format!("×{}", inst) } else { String::new() };
+                let row_rect = Rect::new(sess_col.x, sess_col.y + row_idx, sess_col.width, 1);
                 let hovered = app.mouse.in_rect(row_rect);
                 let is_cursor = ci == app.cursor;
                 let (prefix, st) = if is_cursor {
-                    ("▸ ", Style::default().fg(Color::White).bg(Color::Blue).add_modifier(Modifier::BOLD))
+                    ("▸", Style::default().fg(Color::White).bg(Color::Blue).add_modifier(Modifier::BOLD))
                 } else if hovered {
-                    ("  ", Style::default().fg(Color::Black).bg(Color::Yellow))
+                    (" ", Style::default().fg(Color::Black).bg(Color::Yellow))
                 } else {
-                    ("  ", Style::default().fg(Color::White))
+                    (" ", Style::default().fg(Color::White))
                 };
                 let multi_color = if inst >= 2 { Color::Yellow } else { Color::DarkGray };
                 let line = ratatui::text::Line::from(vec![
-                    Span::styled(format!("   {}{}", prefix, sid), st),
+                    Span::styled(format!("{}{}", prefix, sid), st),
                     Span::styled(multi_tag, Style::default().fg(multi_color).add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("  {}ev", ev_n), Style::default().fg(Color::DarkGray)),
+                    Span::styled(format!(" {}", ev_n), Style::default().fg(Color::DarkGray)),
                 ]);
                 items.push(ListItem::new(line));
-                // ClickMap register: id = 100 + flat index(点选切 cursor)。
                 app.clickmap.register(row_rect, 100 + ci);
                 ci += 1;
                 row_idx = row_idx.saturating_add(1);
             }
         }
-        items.push(ListItem::new(""));
-        row_idx = row_idx.saturating_add(1);
+        if group_first {
+            group_start.push(row_idx); // 空组:占位保持与 harnesses 等长
+        }
     }
     if app.flat.is_empty() {
-        items.push(ListItem::new(
-            Line::from(Span::styled(" (无 session · r 刷新)", Style::default().fg(Color::DarkGray))),
-        ));
+        items.push(ListItem::new(Line::from(Span::styled(
+            "(无 session · r 刷新)", Style::default().fg(Color::DarkGray),
+        ))));
     }
-    f.render_widget(List::new(items), left);
+    f.render_widget(List::new(items), sess_col);
 
-    // 分隔条(resizable 拖拽命中区)。
+    // 色块列:对齐到每组首 session 行(group_start),光标组反白;clickmap id 200+group_idx。
+    for (gi, hs) in harnesses.iter().enumerate() {
+        let (tag, color) = harness_tag(hs);
+        let is_cursor = cursor_group.as_deref() == Some(hs.as_str());
+        let y_off = *group_start.get(gi).unwrap_or(&0);
+        let block_rect = Rect::new(tag_col.x, tag_col.y + y_off, 2, 1);
+        if block_rect.y < tag_col.y + tag_col.height {
+            let style = if is_cursor {
+                Style::default().bg(color).fg(Color::Black).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(color).add_modifier(Modifier::BOLD)
+            };
+            f.render_widget(
+                Paragraph::new(tag).style(style).alignment(ratatui::layout::Alignment::Center),
+                block_rect,
+            );
+            app.clickmap.register(block_rect, 200 + gi);
+        }
+    }
+
+    // 左|右分隔条(resizable)。
     f.render_widget(
         ratatui::widgets::Block::default().style(Style::default().fg(Color::DarkGray)),
         bar,
     );
 
-    // ── 右堆叠:VerticalStack 4 pane(对话 | 输入 | flow | 属性)。ADR-1(第八轮)真扩展验证。
-    // pcts=[40,20,20,20],push pane 加 flow/属性区(不改架构,VerticalStack.rects 按比例分)。
-    let vpanes = app.control_stack.rects(right);
-    let chat_area = vpanes[0];
-    let input_area = vpanes[1];
-    let flow_area = vpanes[2];
-    let props_area = vpanes[3];
-    for sep in app.control_stack.separators(right) {
-        f.render_widget(
-            ratatui::widgets::Block::default().style(Style::default().fg(Color::DarkGray)),
-            sep,
-        );
-    }
-
-    // 右堆叠区 0(顶):StatusBar(紧凑 1-2 行)+ 对话 turn stream(ScrollView)。
-    let right_top = Layout::default()
+    // ── 右区:StatusBar(恒显) + 右TabBar + body(按 tab) + 输入栏(恒显) ──
+    let right_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(1)])
-        .split(chat_area);
-    control::render_status_bar(f, right_top[0], app);
+        .constraints([Constraint::Length(2), Constraint::Length(3), Constraint::Min(1), Constraint::Length(5)])
+        .split(right);
+    let [status_area, tabs_area, body_area, input_area] = [right_chunks[0], right_chunks[1], right_chunks[2], right_chunks[3]];
 
-    // 对话:cursor session turn stream(observe events)。
+    control::render_status_bar(f, status_area, app);
+
+    let hover = if app.mouse.visible { Some((app.mouse.x, app.mouse.y)) } else { None };
+    app.control_right_tabs.render_with_hover(f, tabs_area, hover);
+    app.right_tab_area = tabs_area;
+
     let key = app.flat.get(app.cursor)
         .map(|s| format!("{}/{}", s.harness_type, s.session_id))
         .unwrap_or_default();
-    let ev_lines = if let Some(evs) = app.events.get(&key) {
-        control::render_turn_stream(evs)
-    } else if key.is_empty() {
-        vec![
-            Line::from(Span::styled(
-                " (无 cursor session · 左大纲点选 session)",
-                Style::default().fg(Color::DarkGray),
-            )),
-        ]
-    } else {
-        vec![
-            Line::from(Span::styled(
-                " (observe 不可达 · r 刷新)",
-                Style::default().fg(Color::DarkGray),
-            )),
-        ]
-    };
-    app.control_chat_scroll.set_content(ev_lines);
-    app.control_chat_scroll.render(f, right_top[1]);
 
-    // 右堆叠区 1:InputBar(turn_msg + 按钮)。
-    control::render_input_bar(f, input_area, app);
-
-    // 右堆叠区 2:flow 区(flow lane 多实例 observe_lanes + 当前 cursor flow DAG flow_dag_lines)。
-    let mut flow_lines_v: Vec<Line> = vec![
-        Line::from(Span::styled(
-            " flow · lane + DAG".to_string(),
-            Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
-        )),
-    ];
-    // flow lane:cursor session 多实例 observe_lanes(openclaw turn 多实例)。
-    if let Some(evs) = app.events.get(&key) {
-        if !evs.is_empty() {
-            flow_lines_v.extend(observe_lanes(evs));
+    // body:对话=chat 卷轴(主)、flow=lane+DAG、属性=props。
+    match app.control_right_tabs.active {
+        0 => {
+            let ev_lines = if let Some(evs) = app.events.get(&key) {
+                control::render_turn_stream(evs)
+            } else if key.is_empty() {
+                vec![Line::from(Span::styled(
+                    " (无 cursor session · 左大纲点选 session 或色块)", Style::default().fg(Color::DarkGray),
+                ))]
+            } else {
+                vec![Line::from(Span::styled(
+                    " (observe 不可达 · r 刷新)", Style::default().fg(Color::DarkGray),
+                ))]
+            };
+            app.control_chat_scroll.set_content(ev_lines);
+            app.control_chat_scroll.render(f, body_area);
+        }
+        1 => {
+            let mut flow_lines_v: Vec<Line> = vec![];
+            if let Some(evs) = app.events.get(&key) {
+                if !evs.is_empty() {
+                    flow_lines_v.extend(observe_lanes(evs));
+                }
+            }
+            if let Some(tf) = app.current_flow() {
+                flow_lines_v.push(Line::raw(""));
+                flow_lines_v.extend(flow_dag_lines(tf, app.flow_cursor));
+            } else if flow_lines_v.is_empty() {
+                flow_lines_v.push(Line::from(Span::styled(
+                    " (无 flow · f/G/D 创建预设)", Style::default().fg(Color::DarkGray),
+                )));
+            }
+            f.render_widget(Paragraph::new(flow_lines_v).block(region_block(" flow · lane+DAG ")), body_area);
+        }
+        _ => {
+            let prop_lines = render_props_lines(app);
+            f.render_widget(Paragraph::new(prop_lines).block(region_block(" 属性 · cursor session ")), body_area);
         }
     }
-    // flow DAG:当前 cursor tracked flow(若有)。
-    if let Some(tf) = app.current_flow() {
-        flow_lines_v.push(Line::raw(""));
-        flow_lines_v.extend(flow_dag_lines(tf, app.flow_cursor));
-    } else if flow_lines_v.len() == 1 {
-        // 既无 lane 也无 DAG:占位提示。
-        flow_lines_v.push(Line::from(Span::styled(
-            " (无 flow · f/G/D 创建预设)".to_string(),
-            Style::default().fg(Color::DarkGray),
-        )));
-    }
-    f.render_widget(Paragraph::new(flow_lines_v), flow_area);
 
-    // 右堆叠区 3:属性区(cursor session 详情:sid/harness/实例/事件数/last turn)。
-    let prop_lines = render_props_lines(app);
-    f.render_widget(Paragraph::new(prop_lines), props_area);
+    // 输入栏(恒显,含 8 按钮)。
+    let input_block = region_block(" 输入 · message ");
+    let input_inner = input_block.inner(input_area);
+    f.render_widget(input_block, input_area);
+    control::render_input_bar(f, input_inner, app);
 }
 
 /// 属性区:cursor session 详情(sid/harness/实例/事件数/last turn)。读 app 业务字段,不改业务方法。
+/// 标题由 region_block 边框给出,本函数只返回字段行。
 fn render_props_lines(app: &App) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
-        " 属性 · cursor session".to_string(),
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-    ))];
+    let mut lines: Vec<Line> = vec![];
     let Some(s) = app.flat.get(app.cursor) else {
         lines.push(Line::from(Span::styled(
             " (无 session · r 刷新)".to_string(),

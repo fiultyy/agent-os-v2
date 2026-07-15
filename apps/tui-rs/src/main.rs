@@ -55,6 +55,14 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> i
         if matches!(ev, AppEvent::Quit) {
             break;
         }
+        // raw-exec:消费 pending_spawn(e 键 / 按钮3)→ 挂起 TUI 全屏拉起 harness → 恢复 + 全重绘。
+        if let Some((h, sid)) = app.pending_spawn.take() {
+            let _ = components::raw_exec::spawn_resume(h, sid.as_deref());
+            // 子进程占用主屏、重进 alt screen(空白);swap_buffers 重置 inactive buffer,
+            // 使下一帧 flush 对空 previous → 全重绘(否则 ratatui diff 判无变化,屏留白)。
+            let _ = terminal.swap_buffers();
+            let _ = terminal.draw(|f| render::draw(f, &mut app));
+        }
         // ADR-4:cursor 移动后检查是否需重订阅 WS(cursor_down/up/set_sessions 改 cursor)。
         if let Some(mgr) = app.ws.as_ref() {
             let cur_key = app.flat.get(app.cursor)

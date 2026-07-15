@@ -68,11 +68,16 @@ pub fn render_input_bar(f: &mut Frame, area: Rect, app: &mut App) {
         .split(area);
 
     // message 输入行。
+    let mode_hint = if app.insert_mode {
+        "  [enter 发送 · esc 退快捷键]"
+    } else {
+        "  [i 输入 message · t/s/f/G/D/R/p/h/e 快捷键]"
+    };
     let msg_line = Line::from(vec![
         Span::styled(" ❯ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
         Span::styled(app.turn_msg.clone(), Style::default().fg(Color::White)),
         Span::styled("▌", Style::default().fg(Color::Cyan).add_modifier(Modifier::SLOW_BLINK)),
-        Span::styled("  [t trigger · enter 按钮]", Style::default().fg(Color::DarkGray)),
+        Span::styled(mode_hint, Style::default().fg(Color::DarkGray)),
     ]);
     f.render_widget(Paragraph::new(msg_line), chunks[0]);
 
