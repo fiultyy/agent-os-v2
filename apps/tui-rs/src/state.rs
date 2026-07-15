@@ -487,10 +487,9 @@ pub struct App {
     /// Esc 退出到快捷键模式(此时 t/s/f/G/D/R/p/h 等生效),`i` 再进入。默认 true:进 Control 即可打字。
     pub insert_mode: bool,
     // ── ADR-1/ADR-7 输入 UX(节点 A 新增)──────────────────────────────
-    /// ADR-1 多行 textarea 输入。组件由节点 B 在 components::textarea 注册;
-    /// 未注册前 turn_msg 兼作文本缓冲(本字段占位,待 mod 注册后启用)。
-    // pub textarea: crate::components::textarea::Textarea,
-    /// ADR-7 输入历史(↑/↓ 翻历史)。原生 Vec + 索引兜底(InputHistory 组件待节点 B 注册)。
+    /// ADR-1 多行 textarea 输入(codex 式编辑器)。turn_msg 保留作 do_turn 兼容缓冲。
+    pub textarea: crate::components::textarea::Textarea,
+    /// ADR-7 输入历史(↑/↓ 翻历史)。原生 Vec + 索引兜底(InputHistory 组件已注册但 state 仍用 Vec)。
     pub input_history: Vec<String>,
     /// 历史浏览游标(None=不在浏览历史,写新输入;Some(i)=指向 input_history[i])。
     pub history_cursor: Option<usize>,
@@ -552,6 +551,7 @@ impl App {
             last_action: None,
             pending_spawn: None,
             insert_mode: true,
+            textarea: crate::components::textarea::Textarea::new(),
             input_history: vec![],
             history_cursor: None,
             mentions_open: false,
@@ -1110,14 +1110,38 @@ impl App {
     /// base panel 键位(P1 保留 + P2 扩展 e=raw exec / p=弹窗)。返回 true = 退出 app。
     fn handle_base_key(&mut self, k: &KeyEvent) -> bool {
         // ADR-1/ADR-7:Control insert 模式 = textarea 编辑态。
-        // 文字键/Backspace/Enter/Esc 进输入;↑↓ 翻历史;@ 触 mention popup。
-        // ADR-1:多行 textarea 组件待节点 B 注册,此处 turn_msg 兼作缓冲(textarea.text() 对齐)。
+        // 文字键/Backspace/Left/Right/Enter/Esc 进 textarea;↑↓ 翻历史;@ 触 mention popup。
+        // textarea.handle_key 直接 mutate text+cursor;Enter=Send 发送 turn(发送后 clear)。
         // Tab/BackTab fall through 到导航(打字时仍可切焦点)。
         if self.panel == Panel::Control && self.insert_mode {
             match k.code {
                 KeyCode::Esc => {
                     self.insert_mode = false;
                     self.mentions_open = false;
+                    return false;
+                }
+                KeyCode::Up => {
+                    // ADR-7:历史 ↑ → 回填 textarea(textarea.set_text + turn_msg 兼容)。
+                    if let Some(prev) = self.history_prev() {
+                        let s = prev.to_string();
+                        self.turn_msg = s.clone();
+                        self.textarea.set_text(&s);
+                    }
+                    return false;
+                }
+                KeyCode::Down => {
+                    // ADR-7:历史 ↓ → 末条后清空(写新输入)。
+                    match self.history_next() {
+                        Some(next) => {
+                            let s = next.to_string();
+                            self.turn_msg = s.clone();
+                            self.textarea.set_text(&s);
+                        }
+                        None => {
+                            self.turn_msg.clear();
+                            self.textarea.clear();
+                        }
+                    }
                     return false;
                 }
                 KeyCode::Enter => {
@@ -1127,47 +1151,39 @@ impl App {
                         // 未注册前关 popup(占位),不发送。
                         self.mentions_open = false;
                     } else {
-                        let msg = self.turn_msg.clone();
+                        // Enter = Send:把 textarea 文本作 message 发送,再 clear。
+                        let msg = self.textarea.text().to_string();
                         self.push_history(&msg);
+                        self.turn_msg = msg; // do_turn 读 turn_msg(兼容)
                         self.do_turn();
+                        self.textarea.clear();
                         self.mark_action("trigger");
                     }
                     return false;
                 }
-                KeyCode::Backspace => {
-                    self.turn_msg.pop();
-                    // @mention popup:输入栏变空或 @ 被删 → 关 popup。
-                    if !self.turn_msg.ends_with('@') {
-                        self.mentions_open = false;
+                KeyCode::Tab | KeyCode::BackTab => {
+                    // 焦点导航键 fall through(打字时仍可 Tab 切焦点)。
+                }
+                _ => {
+                    // 编辑键(Backspace/Left/Right/Char/Home/End/...)交 textarea 处理。
+                    use crate::components::textarea::TextareaOp;
+                    let op = self.textarea.handle_key(k);
+                    // 同步 turn_msg(do_turn 兼容读 turn_msg)。
+                    self.turn_msg = self.textarea.text().to_string();
+                    // @mention popup:@ 出现 → 开 popup;@ 被删 → 关 popup。
+                    match op {
+                        TextareaOp::Insert(c) if c == '@' => {
+                            self.mentions_open = true;
+                        }
+                        TextareaOp::Backspace => {
+                            if !self.turn_msg.ends_with('@') {
+                                self.mentions_open = false;
+                            }
+                        }
+                        _ => {}
                     }
                     return false;
                 }
-                KeyCode::Up => {
-                    // ADR-7:历史 ↑ → 回填 turn_msg(textarea.set_text 对齐)。
-                    if let Some(prev) = self.history_prev() {
-                        self.turn_msg = prev.to_string();
-                    }
-                    return false;
-                }
-                KeyCode::Down => {
-                    // ADR-7:历史 ↓ → 末条后清空(写新输入)。
-                    match self.history_next() {
-                        Some(next) => self.turn_msg = next.to_string(),
-                        None => self.turn_msg.clear(),
-                    }
-                    return false;
-                }
-                KeyCode::Char('@') => {
-                    // ADR-7:@ → 触 mention popup(Mentions::trigger()/open())。
-                    self.turn_msg.push('@');
-                    self.mentions_open = true;
-                    return false;
-                }
-                KeyCode::Char(c) => {
-                    self.turn_msg.push(c);
-                    return false;
-                }
-                _ => { /* Tab/BackTab/左右方向键等 fall through */ }
             }
         }
         match k.code {
@@ -1837,9 +1853,12 @@ mod tests {
     fn control_backspace_pops_turn_msg() {
         let mut app = App::new(crate::kitty::detect());
         app.panel = Panel::Control;
+        // ADR-1:insert 模式输入走 textarea;turn_msg 是同步镜像。
+        app.textarea.set_text("abc");
         app.turn_msg = "abc".to_string();
         app.handle_base_key(&KeyEvent::new(KeyCode::Backspace, crossterm::event::KeyModifiers::empty()));
         assert_eq!(app.turn_msg, "ab");
+        assert_eq!(app.textarea.text(), "ab");
         // 非 Control panel:Backspace 不影响 turn_msg。
         app.panel = Panel::Home;
         app.handle_base_key(&KeyEvent::new(KeyCode::Backspace, crossterm::event::KeyModifiers::empty()));
@@ -1853,9 +1872,11 @@ mod tests {
         let mut app = App::new(crate::kitty::detect());
         app.panel = Panel::Control;
         app.focus = FocusTarget::TabBar; // 输入态:焦点不在按钮
+        app.textarea.set_text("hi");
         app.turn_msg = "hi".to_string();
         app.handle_base_key(&KeyEvent::new(KeyCode::Enter, crossterm::event::KeyModifiers::empty()));
         assert!(app.turn_msg.is_empty(), "Enter in typing mode should send + clear turn_msg");
+        assert!(app.textarea.text().is_empty());
     }
 
     /// insert 模式:被绑定的字母(p/h/t...)进 turn_msg,不触快捷键;Esc 退到 normal 后才触发。
@@ -1891,8 +1912,11 @@ mod tests {
         let mut app = App::new(crate::kitty::detect());
         app.panel = Panel::Control;
         app.insert_mode = true;
+        // ADR-1:insert 模式输入走 textarea;Enter 读 textarea.text() 发送 + clear。
+        app.textarea.set_text("first");
         app.turn_msg = "first".into();
         app.handle_base_key(&KeyEvent::new(KeyCode::Enter, crossterm::event::KeyModifiers::empty()));
+        app.textarea.set_text("second");
         app.turn_msg = "second".into();
         app.handle_base_key(&KeyEvent::new(KeyCode::Enter, crossterm::event::KeyModifiers::empty()));
         assert_eq!(app.input_history, vec!["first".to_string(), "second".to_string()]);

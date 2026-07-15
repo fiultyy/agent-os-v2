@@ -886,6 +886,24 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         }
     }
 
+    // ADR-3:顶栏右端 i(id998→open_props)/×(id999→quit_requested)按钮。
+    // 两个 3x1 色块,右对齐到顶栏;clickmap register 全局命中(state.handle_base_mouse 已路由)。
+    let top = chunks[0];
+    let quit_rect = Rect::new(top.right().saturating_sub(3), top.y, 3, 1);
+    let info_rect = Rect::new(top.right().saturating_sub(6), top.y, 3, 1);
+    f.render_widget(
+        Paragraph::new(" × ").style(Style::default().fg(Color::Black).bg(Color::Red).add_modifier(Modifier::BOLD))
+            .alignment(ratatui::layout::Alignment::Center),
+        quit_rect,
+    );
+    f.render_widget(
+        Paragraph::new(" i ").style(Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD))
+            .alignment(ratatui::layout::Alignment::Center),
+        info_rect,
+    );
+    app.clickmap.register(quit_rect, 999);
+    app.clickmap.register(info_rect, 998);
+
     // 顶层统一 clear clickmap(不依赖各 panel 互斥 clear;Flows 等无 clickmap 的 tab 也 clean,修 minor 2/3)。
     app.clickmap.clear();
 

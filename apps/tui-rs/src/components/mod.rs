@@ -25,6 +25,8 @@ pub mod raw_exec;
 pub mod scrollbar;
 pub mod split;
 pub mod tabs;
+pub mod textarea;
+pub mod footer;
 
 use crate::kitty::{Protocol, TermCap};
 use crate::state::Popup;
