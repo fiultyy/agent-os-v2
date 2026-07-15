@@ -443,16 +443,16 @@ pub struct App {
     // ── Control Cursor 式布局(第六轮 T1/T2,非业务字段)───────────────
     /// Control tab HSplit(左大纲 | 右堆叠)resizable 状态。
     pub control_split: HSplit,
-    /// Control tab 右堆叠 VSplit(对话 | 输入)resizable 状态。
-    pub control_stack: crate::components::split::VSplit,
+    /// Control tab 右堆叠 VerticalStack(对话 | 输入)resizable 状态。N-pane 可扩展(ADR-1)。
+    pub control_stack: crate::components::split::VerticalStack,
     /// Control tab 对话区 ScrollView(turn stream 滚动)。
     pub control_chat_scroll: ScrollView,
     /// Control tab 区域缓存(draw 算 → handle mouse drag hit 用)。
     pub control_area: Rect,
     /// 鼠标是否正在拖 control 主分隔条(HSplit bar)。
     pub control_h_dragging: bool,
-    /// 鼠标是否正在拖 control 堆叠分隔条(VSplit bar)。
-    pub control_v_dragging: bool,
+    /// 鼠标正在拖 control 堆叠分隔条的 pane_idx(VerticalStack separators[pane_idx],ADR-1)。
+    pub control_v_dragging: Option<usize>,
     /// ClickMap 页面内交互元素命中(Control 按钮 + Observe session 项,ADR-1/ADR-2)。
     pub clickmap: ClickMap<usize>,
     /// ADR-1 T4:WS 直连 observe(弃 REST polling)。WS manager + 事件 channel。
@@ -497,11 +497,11 @@ impl App {
             observe_area: Rect::default(),
             observe_dragging: false,
             control_split: HSplit::new(30),
-            control_stack: crate::components::split::VSplit::new(75),
+            control_stack: crate::components::split::VerticalStack::new(vec![75, 25]),
             control_chat_scroll: ScrollView::new(vec![]),
             control_area: Rect::default(),
             control_h_dragging: false,
-            control_v_dragging: false,
+            control_v_dragging: None,
             clickmap: ClickMap::new(),
             ws: None,
             focus: FocusTarget::TabBar,
@@ -882,10 +882,12 @@ impl App {
                         self.control_h_dragging = true;
                         return;
                     }
-                    let [_top, vbar, _bot] = self.control_stack.rects(right);
-                    if vbar.contains(ratatui::layout::Position { x: m.column, y: m.row }) {
-                        self.control_v_dragging = true;
-                        return;
+                    let seps = self.control_stack.separators(right);
+                    for (i, sep) in seps.iter().enumerate() {
+                        if sep.contains(ratatui::layout::Position { x: m.column, y: m.row }) {
+                            self.control_v_dragging = Some(i);
+                            return;
+                        }
                     }
                 }
                 // TabBar 命中切 tab。
@@ -945,19 +947,22 @@ impl App {
                         self.control_split.drag(dx, self.control_area);
                     }
                 }
-                if self.control_v_dragging {
+                if let Some(pane_idx) = self.control_v_dragging {
                     let [_left, _hbar, right] = self.control_split.rects(self.control_area);
-                    let [_top, vbar, _bot] = self.control_stack.rects(right);
-                    let dy: i32 = if m.row > vbar.y { 1 } else if m.row < vbar.y { -1 } else { 0 };
-                    if dy != 0 {
-                        self.control_stack.drag(dy, right);
+                    let seps = self.control_stack.separators(right);
+                    if pane_idx < seps.len() {
+                        let vbar = seps[pane_idx];
+                        let dy: i32 = if m.row > vbar.y { 1 } else if m.row < vbar.y { -1 } else { 0 };
+                        if dy != 0 {
+                            self.control_stack.drag(pane_idx, dy, right);
+                        }
                     }
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 self.observe_dragging = false;
                 self.control_h_dragging = false;
-                self.control_v_dragging = false;
+                self.control_v_dragging = None;
             }
             _ => {}
         }

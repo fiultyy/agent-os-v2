@@ -555,12 +555,16 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
         bar,
     );
 
-    // ── 右堆叠:VSplit(对话 | 输入)resizable(ADR-2 可扩展垂直堆叠)──
-    let [chat_area, vbar, input_area] = app.control_stack.rects(right);
-    f.render_widget(
-        ratatui::widgets::Block::default().style(Style::default().fg(Color::DarkGray)),
-        vbar,
-    );
+    // ── 右堆叠:VerticalStack(对话 | 输入)resizable(ADR-1 N-pane 可扩展垂直堆叠)──
+    let vpanes = app.control_stack.rects(right);
+    let chat_area = vpanes[0];
+    let input_area = vpanes[1];
+    for sep in app.control_stack.separators(right) {
+        f.render_widget(
+            ratatui::widgets::Block::default().style(Style::default().fg(Color::DarkGray)),
+            sep,
+        );
+    }
 
     // 右堆叠区 0(顶):StatusBar(紧凑 1-2 行)+ 对话 turn stream(ScrollView)。
     let right_top = Layout::default()
