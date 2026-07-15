@@ -22,11 +22,13 @@ pub struct ScrollView {
     pub offset: usize,
     pub wrap: bool,
     pub trim: bool,
+    /// true=Block 全边框(默认);false=无边框,内容直铺 area(ADR-5:chat 无边框省 2 行/列)。
+    pub bordered: bool,
 }
 
 impl ScrollView {
     pub fn new(lines: Vec<ratatui::text::Line<'static>>) -> Self {
-        Self { lines, offset: 0, wrap: true, trim: false }
+        Self { lines, offset: 0, wrap: true, trim: false, bordered: true }
     }
     pub fn wrap(mut self, w: bool) -> Self {
         self.wrap = w;
@@ -34,6 +36,10 @@ impl ScrollView {
     }
     pub fn trim(mut self, t: bool) -> Self {
         self.trim = t;
+        self
+    }
+    pub fn bordered(mut self, b: bool) -> Self {
+        self.bordered = b;
         self
     }
     pub fn set_content(&mut self, lines: Vec<ratatui::text::Line<'static>>) {
@@ -61,11 +67,17 @@ impl ScrollView {
         self.scroll_up(viewport.max(1));
     }
 
-    /// 渲染:Block 边框 + Paragraph(scroll+wrap) + 右侧 Scrollbar。
+    /// 渲染:bordered 时画 Block 全边框 + Paragraph(scroll+wrap) + 右侧 Scrollbar;
+    /// 否则不画 Block,inner=area 直接渲染 Paragraph + Scrollbar。
     pub fn render(&mut self, f: &mut Frame, area: Rect) {
-        let block = Block::default().borders(Borders::ALL);
-        let inner = block.inner(area);
-        f.render_widget(block, area);
+        let inner = if self.bordered {
+            let block = Block::default().borders(Borders::ALL);
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+            inner
+        } else {
+            area
+        };
 
         // >65535 行时 offset as u16 截断(65537→1)→ clamp u16::MAX(ScrollbarState 仍保留 usize position)。
         let scroll_y = self.offset.min(u16::MAX as usize) as u16;
