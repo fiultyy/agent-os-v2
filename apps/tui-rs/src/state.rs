@@ -840,7 +840,8 @@ impl App {
                 self.handle_base_mouse(m);
             }
         }
-        false
+        // ADR-3:×(顶栏右,id999)→ quit_requested,run loop 退出。
+        self.quit_requested
     }
 
     /// 弹窗栈顶消费 key。返回 true = 已消费(关闭/聚焦切换)。
@@ -945,13 +946,24 @@ impl App {
                         return;
                     }
                 }
-                // ClickMap 命中:id 0-7 按钮、100+ session 项、200+ 组色块。
+                // ADR-3:顶栏右侧 i(id998→open_props)/×(id999→quit)全局命中(任意 panel)。
+                if let Some(id) = self.clickmap.hit(m.column, m.row) {
+                    if *id == 999 {
+                        self.quit_requested = true;
+                        return;
+                    }
+                    if *id == 998 {
+                        self.open_props();
+                        return;
+                    }
+                }
+                // ClickMap 命中:id 0-7 按钮、100+ session 项、200+ 组色块(仅 Control)。
                 if self.panel == Panel::Control {
                     if let Some(id) = self.clickmap.hit(m.column, m.row) {
                         if *id >= 200 {
-                            // 组色块:id-200 = group_idx → 跳该组首 session。
+                            // ADR-4:组色块 id-200 = group_idx → toggle 折叠/展开(替代裸跳转)。
                             if let Some(group) = self.control_groups.get(*id - 200).cloned() {
-                                self.jump_to_group(&group);
+                                self.toggle_group(&group);
                             }
                         } else if *id >= 100 {
                             // session 项:id-100 = flat index → 切 cursor + fetch_current。
@@ -1097,16 +1109,65 @@ impl App {
 
     /// base panel 键位(P1 保留 + P2 扩展 e=raw exec / p=弹窗)。返回 true = 退出 app。
     fn handle_base_key(&mut self, k: &KeyEvent) -> bool {
-        // Control 输入模式:只捕获文字键(Esc/Enter/Backspace/Char),不触字母快捷键。
-        // 修"p 弹 help"等字母冲突:输入栏打字时 t/s/p/h/f 等不抢占。
-        // Tab/方向键/BackTab 等 fall through 到下面的正常处理(打字时仍可导航)。
+        // ADR-1/ADR-7:Control insert 模式 = textarea 编辑态。
+        // 文字键/Backspace/Enter/Esc 进输入;↑↓ 翻历史;@ 触 mention popup。
+        // ADR-1:多行 textarea 组件待节点 B 注册,此处 turn_msg 兼作缓冲(textarea.text() 对齐)。
+        // Tab/BackTab fall through 到导航(打字时仍可切焦点)。
         if self.panel == Panel::Control && self.insert_mode {
             match k.code {
-                KeyCode::Esc => { self.insert_mode = false; return false; }
-                KeyCode::Enter => { self.do_turn(); self.mark_action("trigger"); return false; }
-                KeyCode::Backspace => { self.turn_msg.pop(); return false; }
-                KeyCode::Char(c) => { self.turn_msg.push(c); return false; }
-                _ => { /* Tab/方向键等 fall through */ }
+                KeyCode::Esc => {
+                    self.insert_mode = false;
+                    self.mentions_open = false;
+                    return false;
+                }
+                KeyCode::Enter => {
+                    // ADR-7:mention popup 开时 Enter = 选候选插入;否则发送 turn。
+                    if self.mentions_open {
+                        // ponytail: select()->Option<String> 由 mentions 组件实现;
+                        // 未注册前关 popup(占位),不发送。
+                        self.mentions_open = false;
+                    } else {
+                        let msg = self.turn_msg.clone();
+                        self.push_history(&msg);
+                        self.do_turn();
+                        self.mark_action("trigger");
+                    }
+                    return false;
+                }
+                KeyCode::Backspace => {
+                    self.turn_msg.pop();
+                    // @mention popup:输入栏变空或 @ 被删 → 关 popup。
+                    if !self.turn_msg.ends_with('@') {
+                        self.mentions_open = false;
+                    }
+                    return false;
+                }
+                KeyCode::Up => {
+                    // ADR-7:历史 ↑ → 回填 turn_msg(textarea.set_text 对齐)。
+                    if let Some(prev) = self.history_prev() {
+                        self.turn_msg = prev.to_string();
+                    }
+                    return false;
+                }
+                KeyCode::Down => {
+                    // ADR-7:历史 ↓ → 末条后清空(写新输入)。
+                    match self.history_next() {
+                        Some(next) => self.turn_msg = next.to_string(),
+                        None => self.turn_msg.clear(),
+                    }
+                    return false;
+                }
+                KeyCode::Char('@') => {
+                    // ADR-7:@ → 触 mention popup(Mentions::trigger()/open())。
+                    self.turn_msg.push('@');
+                    self.mentions_open = true;
+                    return false;
+                }
+                KeyCode::Char(c) => {
+                    self.turn_msg.push(c);
+                    return false;
+                }
+                _ => { /* Tab/BackTab/左右方向键等 fall through */ }
             }
         }
         match k.code {
@@ -1682,11 +1743,13 @@ mod tests {
         assert!(app.action_loading("trigger"), "click should mark trigger as loading");
     }
 
-    /// ADR-3:Control 方向键切 focus(ControlButton idx 在 0..CONTROL_BUTTON_COUNT 间)。
+    /// ADR-3:Control 方向键(normal 模式)切 focus(ControlButton idx 在 0..CONTROL_BUTTON_COUNT 间)。
+    /// insert 模式下 ↑↓ 翻历史(ADR-7),故此测 focus 移动须 normal 模式。
     #[test]
     fn control_arrow_keys_move_focus() {
         let mut app = App::new(crate::kitty::detect());
         app.panel = Panel::Control;
+        app.insert_mode = false; // normal 模式:↑↓ 移 focus(非翻历史)
         app.focus = FocusTarget::ControlButton(0);
         // Down:j 方向键 → ControlButton(1)。
         app.handle_base_key(&KeyEvent::new(KeyCode::Down, crossterm::event::KeyModifiers::empty()));
@@ -1710,19 +1773,18 @@ mod tests {
         assert_eq!(CONTROL_BUTTON_COUNT, 8);
     }
 
-    /// 右主区 tab(对话/flow/属性)切换:next/prev 循环、select 定位。
+    /// 右主区 tab(对话/flow)切换:ADR-3 属性改 props 弹窗,右 tab 缩 2。next/prev 循环、select 定位。
     #[test]
     fn control_right_tab_cycles() {
         let mut app = App::new(crate::kitty::detect());
+        assert_eq!(app.control_right_tabs.titles.len(), 2, "ADR-3:右 tab 2 个(对话/flow,属性走 props)");
         assert_eq!(app.control_right_tabs.active, 0, "默认对话 tab");
         app.control_right_tabs.next();
         assert_eq!(app.control_right_tabs.active, 1, "next → flow");
         app.control_right_tabs.next();
-        assert_eq!(app.control_right_tabs.active, 2, "next → 属性");
-        app.control_right_tabs.next();
         assert_eq!(app.control_right_tabs.active, 0, "next 循环回 对话");
         app.control_right_tabs.prev();
-        assert_eq!(app.control_right_tabs.active, 2, "prev → 属性");
+        assert_eq!(app.control_right_tabs.active, 1, "prev → flow");
         app.control_right_tabs.select(1);
         assert_eq!(app.control_right_tabs.active, 1);
     }
@@ -1739,23 +1801,20 @@ mod tests {
         assert_eq!(app.control_right_tabs.active, 0, "[ → 对话");
     }
 
-    /// 色块组标签点击(clickmap id 200+group_idx)→ 跳该组首 session。
+    /// ADR-4:色块组标签点击(clickmap id 200+group_idx)→ toggle 折叠/展开(非跳转)。
     #[test]
-    fn control_group_tag_click_jumps() {
+    fn control_group_tag_click_toggles() {
         let mut app = App::new(crate::kitty::detect());
         app.panel = Panel::Control;
-        // flat 顺序:sessions_by_harness 排序后 openclaw 在前(取 2 组验证)。
         app.flat = vec![
             Session { harness_type: "claude-code".into(), session_id: "cc-1".into(), harness_id: "h1".into() },
             Session { harness_type: "claude-code".into(), session_id: "cc-2".into(), harness_id: "h2".into() },
             Session { harness_type: "openclaw".into(), session_id: "oc-1".into(), harness_id: "h3".into() },
         ];
-        app.sessions.sessions_by_harness.insert("claude-code".into(), app.flat[0..2].to_vec());
-        app.sessions.sessions_by_harness.insert("openclaw".into(), app.flat[2..3].to_vec());
-        app.cursor = 0; // 当前在 claude-code(cc-1)
-        // control_groups 由 draw_control 写入;这里直接模拟(排序后 claude-code 在前,openclaw 在后)。
         app.control_groups = vec!["claude-code".into(), "openclaw".into()];
-        // 点击 openclaw 色块(id = 200 + 1)。
+        app.cursor = 0;
+        assert!(app.control_collapsed.is_empty(), "默认全展开");
+        // 点击 openclaw 色块(id = 200 + 1)→ 折叠 openclaw 组。
         app.clickmap.clear();
         app.clickmap.register(Rect::new(0, 0, 2, 1), 201);
         let m = MouseEvent {
@@ -1764,7 +1823,11 @@ mod tests {
             modifiers: crossterm::event::KeyModifiers::empty(),
         };
         app.handle_base_mouse(&m);
-        assert_eq!(app.cursor, 2, "点 openclaw 色块 → cursor 跳到该组首 session(flat idx 2 = oc-1)");
+        assert!(app.control_collapsed.contains("openclaw"), "点色块 → openclaw 折叠");
+        assert_eq!(app.cursor, 0, "ADR-4:toggle 不再移动 cursor(仅折叠态)");
+        // 再点一次 → 展开(移除)。
+        app.handle_base_mouse(&m);
+        assert!(!app.control_collapsed.contains("openclaw"), "再点 → 展开");
     }
 
     // ── 输入栏修复自检(ADR:backspace/enter/scroll)──────────────────────
@@ -1818,5 +1881,88 @@ mod tests {
         // i 重新进入 insert
         app.handle_base_key(&KeyEvent::new(KeyCode::Char('i'), crossterm::event::KeyModifiers::empty()));
         assert!(app.insert_mode, "i 重新进入 insert 模式");
+    }
+
+    // ── ADR-1/ADR-3/ADR-7 输入 UX 自检(节点 A 新增)─────────────────────
+
+    /// ADR-7:Enter 发送 turn 后 push 进历史;↑ 翻上一条回填;↓ 翻过末条清空。
+    #[test]
+    fn input_history_nav_up_down() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        app.insert_mode = true;
+        app.turn_msg = "first".into();
+        app.handle_base_key(&KeyEvent::new(KeyCode::Enter, crossterm::event::KeyModifiers::empty()));
+        app.turn_msg = "second".into();
+        app.handle_base_key(&KeyEvent::new(KeyCode::Enter, crossterm::event::KeyModifiers::empty()));
+        assert_eq!(app.input_history, vec!["first".to_string(), "second".to_string()]);
+        app.handle_base_key(&KeyEvent::new(KeyCode::Up, crossterm::event::KeyModifiers::empty()));
+        assert_eq!(app.turn_msg, "second");
+        app.handle_base_key(&KeyEvent::new(KeyCode::Up, crossterm::event::KeyModifiers::empty()));
+        assert_eq!(app.turn_msg, "first");
+        app.handle_base_key(&KeyEvent::new(KeyCode::Up, crossterm::event::KeyModifiers::empty()));
+        assert_eq!(app.turn_msg, "first");
+        app.handle_base_key(&KeyEvent::new(KeyCode::Down, crossterm::event::KeyModifiers::empty()));
+        assert_eq!(app.turn_msg, "second");
+        app.handle_base_key(&KeyEvent::new(KeyCode::Down, crossterm::event::KeyModifiers::empty()));
+        assert!(app.turn_msg.is_empty(), "↓ 过末条 → 清空(写新输入)");
+    }
+
+    /// ADR-7:@ 触 mention popup;Esc 关 popup。
+    #[test]
+    fn at_char_triggers_mention_popup() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        app.insert_mode = true;
+        app.turn_msg.clear();
+        assert!(!app.mentions_open);
+        app.handle_base_key(&KeyEvent::new(KeyCode::Char('@'), crossterm::event::KeyModifiers::empty()));
+        assert_eq!(app.turn_msg, "@");
+        assert!(app.mentions_open, "@ → mention popup 开");
+        app.handle_base_key(&KeyEvent::new(KeyCode::Esc, crossterm::event::KeyModifiers::empty()));
+        assert!(!app.mentions_open);
+    }
+
+    /// ADR-3:×(clickmap id999)→ quit_requested=true;handle() 返 true 退出。
+    #[test]
+    fn quit_button_sets_quit_requested() {
+        let mut app = App::new(crate::kitty::detect());
+        app.clickmap.clear();
+        app.clickmap.register(Rect::new(0, 0, 2, 1), 999);
+        let m = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 1, row: 0,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        let quit = app.handle(&crate::events::AppEvent::Mouse(m));
+        assert!(app.quit_requested, "× → quit_requested=true");
+        assert!(quit, "handle 返 true(run loop 退出)");
+    }
+
+    /// ADR-3:i(clickmap id998)→ open_props 弹窗(props_open=true + popups 栈顶 props)。
+    #[test]
+    fn props_button_opens_props_popup() {
+        let mut app = App::new(crate::kitty::detect());
+        app.clickmap.clear();
+        app.clickmap.register(Rect::new(0, 0, 2, 1), 998);
+        let m = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 1, row: 0,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        app.handle_base_mouse(&m);
+        assert!(app.props_open, "i → props_open=true");
+        assert!(app.popups.iter().any(|x| x.id == "props"), "props 弹窗入栈");
+    }
+
+    /// ADR-4:toggle_group 增删 control_collapsed(折叠/展开)。
+    #[test]
+    fn toggle_group_flips_collapsed() {
+        let mut app = App::new(crate::kitty::detect());
+        assert!(!app.control_collapsed.contains("g1"));
+        app.toggle_group("g1");
+        assert!(app.control_collapsed.contains("g1"), "首次 toggle → 折叠");
+        app.toggle_group("g1");
+        assert!(!app.control_collapsed.contains("g1"), "再 toggle → 展开");
     }
 }
