@@ -172,12 +172,19 @@ class EventStore:
                     (harness_type, session_id, after_timestamp, limit),
                 ).fetchall()
             else:
+                # tail:取最新 limit 条(DESC LIMIT)再正序返回。
+                # 原来直接 ASC LIMIT 返回最旧的 N 条 —— 长生命周期 session(main:main 累积
+                # 1000+ 条)永远只看到最旧历史,近期对话被截断、TUI 显示陈旧。改为返回
+                # 最近 N 条按时间正序,聊天 UI 才能看到当前对话。
                 rows = conn.execute(
                     """
-                    SELECT * FROM observe_events
-                    WHERE harness_type = ? AND session_id = ?
+                    SELECT * FROM (
+                        SELECT * FROM observe_events
+                        WHERE harness_type = ? AND session_id = ?
+                        ORDER BY timestamp DESC
+                        LIMIT ?
+                    )
                     ORDER BY timestamp ASC
-                    LIMIT ?
                     """,
                     (harness_type, session_id, limit),
                 ).fetchall()

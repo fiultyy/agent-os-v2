@@ -16,6 +16,18 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# orche app logging:默认无配置 → harness.* 的 INFO/error 全丢(uvicorn 只收 access log)。
+# 加 FileHandler 到 src.harness 树,落盘 /tmp/orch-harness.log,便于 debug openclaw client。
+_harness_log = logging.getLogger("src.harness")
+if not any(isinstance(h, logging.FileHandler) and getattr(h, "_orch_harness", False)
+           for h in _harness_log.handlers):
+    _fh = logging.FileHandler("/tmp/orch-harness.log")
+    _fh._orch_harness = True
+    _fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    _harness_log.addHandler(_fh)
+_harness_log.setLevel(logging.INFO)
+logging.getLogger("src.harness.openclaw").setLevel(logging.INFO)
+
 from fastapi import FastAPI
 
 from src.memory import (

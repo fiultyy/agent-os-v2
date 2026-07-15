@@ -55,6 +55,15 @@ def serialize_request_frame(
     })
 
 
+def _foreign_session(payload: Dict[str, Any], own_session: str) -> bool:
+    """gateway 把每个 session 的 chat/agent 事件广播给所有 operator 客户端。
+    本 client 只拥有自己的 session_key —— 返回 True 表示该事件属于别的 session,
+    应跳过(否则会被盖错戳 emit 到错误的 observe ingest 连接,被 observe 的
+    session 校验丢弃,导致事件互相串线、大面积丢失)。"""
+    sk = payload.get("sessionKey") or payload.get("session_key")
+    return bool(sk) and sk != own_session
+
+
 # ── Event Mapping: openclaw ChatEvent / agent tool → ObserveEvent ─────
 
 def map_chat_event(
@@ -220,10 +229,14 @@ class OpenClawClient:
                 payload = data.get("payload", {})
 
                 if event_name == "chat":
+                    if _foreign_session(payload, self.session_key):
+                        continue
                     await self._ensure_tick_started(payload)
                     ev = map_chat_event(payload, self.harness_id, self.session_key)
                     await self._dispatch(ev)
                 elif event_name == "agent":
+                    if _foreign_session(payload, self.session_key):
+                        continue
                     await self._ensure_tick_started(payload)
                     ev = map_agent_tool_event(payload, self.harness_id, self.session_key)
                     await self._dispatch(ev)
