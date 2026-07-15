@@ -188,14 +188,174 @@ async def delete_session(
     rec = _sessions.pop(k, None)
     if rec is None:
         raise HTTPException(status_code=404, detail="session not found")
-    try:
-        await rec["client"].stop()
-    except Exception as e:
-        logger.warning("session stop error: %s", e)
+    client = rec["client"]
+    # raw delete first (jsonl transcript / gateway transcript), then stop.
+    # client.delete() calls stop() itself on success; fall back to bare stop
+    # if the client has no delete method or raw delete fails.
+    raw_deleted = False
+    delete_meth = getattr(client, "delete", None)
+    if delete_meth is not None:
+        try:
+            if harness_type == "claude-code":
+                r = await delete_meth(session_id)
+            else:  # claw: delete takes no args
+                r = await delete_meth()
+            raw_deleted = bool(r.get("deleted"))
+        except Exception as e:
+            logger.warning("session raw delete error: %s", e)
+            try:
+                await client.stop()
+            except Exception as e2:
+                logger.warning("session stop fallback error: %s", e2)
+    else:
+        try:
+            await client.stop()
+        except Exception as e:
+            logger.warning("session stop error: %s", e)
     # clear active if it pointed here
     if _active["type"] == harness_type and _active["id"] == session_id:
         _active.update(type="", id="")
-    return {"session_id": session_id, "status": "deleted"}
+    return {"session_id": session_id, "status": "deleted",
+            "raw_deleted": raw_deleted}
+
+
+# ── pickers (option lists for the frontend create/fork dialogs) ───────
+
+@router.get("/claw/agents")
+async def list_claw_agents() -> Dict[str, Any]:
+    """List registered claw agents for the picker.
+
+    Reads ~/.openclaw/openclaw.json → acp.allowedAgents + acp.defaultAgent.
+    Returns {"agents": [...], "default": "..."}; falls back to ["main"].
+    """
+    import json as _json
+    default_agents = ["main"]
+    default_default = "main"
+    try:
+        cfg_path = Path.home() / ".openclaw" / "openclaw.json"
+        with open(cfg_path) as f:
+            cfg = _json.load(f) or {}
+        acp = cfg.get("acp", {}) or {}
+        agents = acp.get("allowedAgents") or default_agents
+        default = acp.get("defaultAgent") or (agents[0] if agents else default_default)
+        return {"agents": agents, "default": default}
+    except Exception as e:
+        logger.warning("list_claw_agents: read cfg failed: %s", e)
+        return {"agents": default_agents, "default": default_default}
+
+
+@router.get("/claude-code/cwds")
+async def list_cc_cwds() -> Dict[str, Any]:
+    """List deduped cwds of registered claude-code sessions for the picker.
+
+    Scans _sessions for harness_type == 'claude-code', collects each client's
+    .cwd (Path), dedupes. Returns {"cwds": [str,...], "default": "<first or DEFAULT_CWD>"}.
+    """
+    from .claude import DEFAULT_CWD
+    seen: list[str] = []
+    for v in _sessions.values():
+        if v.get("harness_type") != "claude-code":
+            continue
+        client = v.get("client")
+        cwd = getattr(client, "cwd", None)
+        if cwd is None:
+            continue
+        s = str(cwd)
+        if s not in seen:
+            seen.append(s)
+    if not seen:
+        return {"cwds": [str(DEFAULT_CWD)], "default": str(DEFAULT_CWD)}
+    return {"cwds": seen, "default": seen[0]}
+
+
+# ── fork (branch a session's context into a new session) ──────────────
+
+class ForkReq(BaseModel):
+    source_session_id: str
+    first_message: str
+    new_session_id: Optional[str] = None  # cc only (new sid comes from stream)
+
+
+@router.post("/{harness_type}/sessions/fork")
+async def fork_session(
+    harness_type: str, req: ForkReq,
+) -> Dict[str, Any]:
+    _validate_type(harness_type)
+    source = req.source_session_id
+    client = _get_client(harness_type, source)
+    if client is None:
+        raise HTTPException(status_code=404, detail="source session not found")
+
+    if harness_type == "claude-code":
+        r = await client.fork(source, req.first_message)
+        new_sid = req.new_session_id or r.get("new_sid")
+        if not new_sid:
+            raise HTTPException(
+                status_code=500,
+                detail=f"fork returned no new_sid: {r}",
+            )
+        # register the new session (new ClaudeClient on same cwd)
+        cwd = str(getattr(client, "cwd", ""))
+        new_client = await _create_claude(new_sid, cwd or None)
+        _sessions[_key(harness_type, new_sid)] = {
+            "client": new_client,
+            "session_id": new_sid,
+            "harness_type": harness_type,
+            "agent_id": None,
+        }
+        return {"new_session_id": new_sid, "source": source,
+                "forked": True, "detail": r}
+
+    # claw: fork() is an ADR-4 stub (returns forked=False)
+    r = await client.fork()
+    if not r.get("forked"):
+        raise HTTPException(
+            status_code=501,
+            detail={"forked": False, "error": r.get("error"),
+                    "key": r.get("key"), "new_key": r.get("new_key")},
+        )
+    new_key = req.new_session_id or r.get("new_key")
+    if not new_key:
+        raise HTTPException(status_code=500, detail=f"fork returned no new_key: {r}")
+    new_client = await _create_claw(new_key, None)
+    _sessions[_key(harness_type, new_key)] = {
+        "client": new_client,
+        "session_id": new_key,
+        "harness_type": harness_type,
+        "agent_id": None,
+    }
+    return {"new_session_id": new_key, "source": source,
+            "forked": True, "detail": r}
+
+
+# ── archive (summarize a session in place) ────────────────────────────
+# ADR-3: drives an existing turn primitive with a summary prompt. The
+# summary lands in the session transcript + observe, same as any turn.
+
+class ArchiveReq(BaseModel):
+    prompt: Optional[str] = None
+
+
+@router.post("/{harness_type}/sessions/{session_id}/archive")
+async def archive_session(
+    harness_type: str, session_id: str, req: ArchiveReq,
+) -> Dict[str, Any]:
+    _validate_type(harness_type)
+    client = _get_client(harness_type, session_id)
+    if client is None:
+        raise HTTPException(status_code=404, detail="session not found")
+
+    prompt = req.prompt or "用要点总结本 session 至今的事实、决策与未决项"
+
+    if harness_type == "claw":
+        if not getattr(client, "running", False):
+            raise HTTPException(status_code=503, detail="claw client not connected yet")
+        await client.send_message(prompt)
+        return {"session_id": session_id, "status": "archived"}
+    # claude-code
+    result = await client.turn(prompt)
+    return {"session_id": session_id, "status": "archived",
+            "tick_id": result.get("tick_id")}
 
 
 # ── flow engine (P2: turn chains / branches / DAG on trigger_turn) ────
