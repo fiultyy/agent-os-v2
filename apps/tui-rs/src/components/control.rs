@@ -1,10 +1,10 @@
-//! Control 区 Cursor 式子组件(ADR-7 第 3 批控件)。
+//! Control 区 Cursor 式子组件(ADR-1/ADR-2/ADR-7 第 3 批控件)。
 //!
 //! 独立 render fn,可复用(后续 Observe/web GUI 消费)。draw_control 组合调用。
-//! - InputBar:turn_msg 输入显示 + trigger/spawn/flow 按钮(复用 ClickMap + trigger_control_button)。
-//! - StatusBar:orche health(●/⚠)+ session + last turn。
+//! - InputBar:turn_msg 输入显示(ADR-1:textarea 无按钮,动作走键盘)。
+//! - status_spans:footer 状态(orche●/session/last),ADR-2 取代独立 StatusBar。
 //! - TurnSeparator:turn 之间视觉分隔(tick_started 开新 turn 块)。
-//! - ToolCallBadge:tool_call/tool_result 视觉标识。
+//! - chat turn 行样式:user/assistant 前缀 + 工具调用弱化。
 //! - turn stream markdown:tick_completed response 经 md_to_text 渲染。
 
 #![allow(dead_code)]
@@ -12,7 +12,7 @@
 use crate::components::markdown;
 use crate::state::{fmt_val, trunc, App, ObserveEvent};
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
@@ -20,7 +20,7 @@ use ratatui::{
 };
 
 /// Control 按钮(label, id, base_color, action_name)。
-/// id 0-7 对应 trigger_control_button。InputBar 在底栏渲染这些按钮。
+/// ADR-1:按钮已从 InputBar 删除(动作走键盘)。本常量保留供 key 路由参考(id→action 映射)。
 pub const CONTROL_BUTTONS: [(&str, usize, Color, &str); 8] = [
     (" [t] trigger ", 0, Color::Green, "trigger"),
     (" [s] spawn   ", 1, Color::Cyan, "spawn"),
@@ -57,21 +57,41 @@ pub fn render_status_bar(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(lines), area);
 }
 
-/// InputBar:turn_msg 输入显示 + trigger/spawn/flow 按钮行。
-/// 按钮通过 ClickMap 注册(id 0-7),复用 trigger_control_button。
-/// 独立 render fn(可复用)。
-pub fn render_input_bar(f: &mut Frame, area: Rect, app: &mut App) {
-    // 3 行:message(1) + 按钮行1(1) + 按钮行2(1)。
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Length(1), Constraint::Length(1)])
-        .split(area);
+/// ADR-2 footer 状态 spans:orche●(online/离线) · session(cursor sid) · last(turn_status)。
+/// 单行 Vec<Span>,供 Footer::render 与按键提示同行(宽度自适应折叠由 Footer 负责)。
+/// 逻辑与 render_status_bar 同源,但输出 spans 而非独立 2 行 widget。
+pub fn status_spans(app: &App) -> Vec<Span<'static>> {
+    let orche = if app.orche_online {
+        Span::styled(" ●", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+    } else {
+        Span::styled(" ⚠offline", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+    };
+    let cur_sid = app
+        .flat
+        .get(app.cursor)
+        .map(|s| trunc(&s.session_id, 16))
+        .unwrap_or_else(|| "(无)".to_string());
+    let status_disp = app
+        .turn_status
+        .clone()
+        .unwrap_or_else(|| "(未触发)".to_string());
+    vec![
+        orche,
+        Span::styled("  session ", Style::default().fg(Color::DarkGray)),
+        Span::styled(cur_sid, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled("  last ", Style::default().fg(Color::DarkGray)),
+        Span::styled(trunc(&status_disp, 40), Style::default().fg(Color::White)),
+    ]
+}
 
-    // message 输入行。
+/// InputBar:turn_msg 输入显示行(ADR-1:无按钮,动作走键盘)。
+/// 占位 render:T-textarea 任务的 Textarea 组件将接管此 area(多行编辑/光标/换行/粘贴)。
+/// 在 Textarea 接入前,本 fn 仅渲染单行 message 提示,保持 draw_control 调用链不断。
+pub fn render_input_bar(f: &mut Frame, area: Rect, app: &mut App) {
     let mode_hint = if app.insert_mode {
         "  [enter 发送 · esc 退快捷键]"
     } else {
-        "  [i 输入 message · t/s/f/G/D/R/p/h/e 快捷键]"
+        "  [i 输入 · t/s/r/e/f/G/D/R 动作]"
     };
     let msg_line = Line::from(vec![
         Span::styled(" ❯ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
@@ -79,33 +99,7 @@ pub fn render_input_bar(f: &mut Frame, area: Rect, app: &mut App) {
         Span::styled("▌", Style::default().fg(Color::Cyan).add_modifier(Modifier::SLOW_BLINK)),
         Span::styled(mode_hint, Style::default().fg(Color::DarkGray)),
     ]);
-    f.render_widget(Paragraph::new(msg_line), chunks[0]);
-
-    // 按钮 2 行(每行 4 按钮):row 0 = id 0-3,row 1 = id 4-7。
-    let quarter = [Constraint::Percentage(25); 4];
-    let btn_rects1 = Layout::default().direction(Direction::Horizontal).constraints(quarter.clone()).split(chunks[1]);
-    let btn_rects2 = Layout::default().direction(Direction::Horizontal).constraints(quarter).split(chunks[2]);
-
-    for (i, (label, id, color, action)) in CONTROL_BUTTONS.iter().enumerate() {
-        let row = i / 4;
-        let col = i % 4;
-        let rect = if row == 0 { btn_rects1[col] } else { btn_rects2[col] };
-        app.clickmap.register(rect, *id);
-        let hovered = app.mouse.in_rect(rect);
-        let focused = matches!(app.focus, crate::state::FocusTarget::ControlButton(x) if x == *id);
-        let loading = !action.is_empty() && app.action_loading(action);
-        let style = if loading {
-            Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::RAPID_BLINK | Modifier::BOLD)
-        } else if focused {
-            Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD)
-        } else if hovered {
-            Style::default().fg(Color::Black).bg(*color).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
-        } else {
-            Style::default().fg(Color::Black).bg(*color).add_modifier(Modifier::BOLD)
-        };
-        let display = if focused { format!("▶{}", label) } else { label.to_string() };
-        f.render_widget(Paragraph::new(display).style(style), rect);
-    }
+    f.render_widget(Paragraph::new(msg_line), area);
 }
 
 /// TurnSeparator:turn 之间视觉分隔(── turn N ──)。独立 fn(可复用)。
@@ -116,6 +110,64 @@ pub fn turn_separator_line(tick_id: &str, idx: usize) -> Line<'static> {
         format!("── turn {} · {} ──", idx + 1, trunc(tick_id, 16))
     };
     Line::from(Span::styled(label, Style::default().fg(Color::DarkGray)))
+}
+
+/// chat turn 行样式:Cursor 式 user/assistant 前缀 + 工具调用弱化(ADR:Control 对话卷轴)。
+/// - tick_started request → user 行(USER ▸)。
+/// - tick_completed response → assistant 行(ASSISTANT ▸ + md 多行,首行带前缀)。
+/// - tool_call/tool_result → 弱化(DarkGray + 缩进,不抢主对话视觉)。
+
+/// user turn 行:tick_started 的 request message 渲染为 `❯ USER ▸ request`。
+pub fn chat_user_line(e: &ObserveEvent) -> Line<'static> {
+    let request = fmt_val(&e.data, "request");
+    Line::from(vec![
+        Span::styled("❯ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled("USER ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled("▸ ", Style::default().fg(Color::DarkGray)),
+        Span::raw(trunc(&request, 80)),
+    ])
+}
+
+/// assistant turn 行:tick_completed response 渲染为 md 多行,首行带 `ASSISTANT ▸` 前缀。
+/// 后续行缩进(对齐 md_response_lines 的 3 空格缩进)。
+pub fn chat_assistant_lines(e: &ObserveEvent) -> Vec<Line<'static>> {
+    let response = fmt_val(&e.data, "response");
+    let prefix_spans: Vec<Span<'static>> = vec![
+        Span::styled("✦ ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+        Span::styled("ASSISTANT ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+        Span::styled("▸ ", Style::default().fg(Color::DarkGray)),
+    ];
+    if response.is_empty() {
+        return vec![Line::from(prefix_spans)];
+    }
+    let text = markdown::md_to_text(&response);
+    let mut out: Vec<Line> = Vec::with_capacity(text.lines.len());
+    for (i, line) in text.lines.into_iter().enumerate() {
+        let mut spans: Vec<Span<'static>> = if i == 0 {
+            prefix_spans.clone()
+        } else {
+            vec![Span::raw("   ")] // 后续行缩进,对齐 md_response_lines
+        };
+        spans.extend(line.spans);
+        out.push(Line::from(spans));
+    }
+    out
+}
+
+/// 工具调用弱化行:tool_call/tool_result 用 DarkGray 缩进呈现(不抢主对话视觉)。
+pub fn chat_tool_line(e: &ObserveEvent) -> Line<'static> {
+    let (glyph, tag, body) = match e.event_type.as_str() {
+        "tool_call" => ("⚒", "tool", fmt_val(&e.data, "tool_name")),
+        "tool_result" => ("◷", "result", fmt_val(&e.data, "result")),
+        _ => return stack_event_line(e),
+    };
+    Line::from(vec![
+        Span::styled(
+            format!("    {} {} ", glyph, tag),
+            Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+        ),
+        Span::styled(trunc(&body, 60), Style::default().fg(Color::DarkGray)),
+    ])
 }
 
 /// ToolCallBadge:tool_call/tool_result 视觉标识行。独立 fn(可复用)。
