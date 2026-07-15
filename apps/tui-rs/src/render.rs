@@ -474,18 +474,8 @@ pub fn draw_stack(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn stack_event_line(e: &ObserveEvent) -> Line<'static> {
-    let (tag, color, body) = match e.event_type.as_str() {
-        "tick_started" => ("START", Color::Green, fmt_val(&e.data, "request")),
-        "tool_call" => ("TOOL▸", Color::Blue, fmt_val(&e.data, "tool_name")),
-        "tool_result" => ("TOOL◂", Color::Blue, fmt_val(&e.data, "result")),
-        "tick_completed" => ("DONE ", Color::Magenta, fmt_val(&e.data, "response")),
-        "token_delta" => ("δ", Color::DarkGray, fmt_val(&e.data, "delta_text")),
-        other => (other, Color::DarkGray, String::new()),
-    };
-    Line::from(vec![
-        Span::styled(format!(" {} ", tag), Style::default().fg(Color::Black).bg(color).add_modifier(Modifier::BOLD)),
-        Span::raw(format!(" {}", trunc(&body, 60))),
-    ])
+    // 第六轮 ADR-7:复用 control::stack_event_line(消除重复,两处共用)。
+    components::control::stack_event_line(e)
 }
 
 pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {

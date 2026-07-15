@@ -127,10 +127,13 @@ pub fn tool_call_badge_line(e: &ObserveEvent) -> Line<'static> {
     ])
 }
 
-/// 通用事件行(fallback,tool_call/tool_result 以外的事件)。提取自 stack_event_line。
-fn stack_event_line(e: &ObserveEvent) -> Line<'static> {
+/// 通用事件行(含 tool_call/tool_result 完整匹配)。
+/// pub 供 render.rs Observe draw_stack 复用(消除重复,两处共用)。
+pub fn stack_event_line(e: &ObserveEvent) -> Line<'static> {
     let (tag, color, body) = match e.event_type.as_str() {
         "tick_started" => ("START", Color::Green, fmt_val(&e.data, "request")),
+        "tool_call" => ("TOOL▸", Color::Blue, fmt_val(&e.data, "tool_name")),
+        "tool_result" => ("TOOL◂", Color::Blue, fmt_val(&e.data, "result")),
         "tick_completed" => ("DONE ", Color::Magenta, fmt_val(&e.data, "response")),
         "token_delta" => ("δ", Color::DarkGray, fmt_val(&e.data, "delta_text")),
         other => (other, Color::DarkGray, String::new()),
@@ -176,7 +179,7 @@ pub fn render_turn_stream(evs: &[ObserveEvent]) -> Vec<Line<'static>> {
             cur_tick = e.tick_id.clone();
             out.push(turn_separator_line(&e.tick_id, turn_idx));
             // tick_started 本身也一行(request message)。
-            out.push(stack_event_line_pub(e));
+            out.push(stack_event_line(e));
             continue;
         }
         if e.event_type == "tool_call" || e.event_type == "tool_result" {
@@ -185,24 +188,19 @@ pub fn render_turn_stream(evs: &[ObserveEvent]) -> Vec<Line<'static>> {
             // response 用 md 渲染(多行)。
             let md_lines = md_response_lines(e);
             if md_lines.is_empty() {
-                out.push(stack_event_line_pub(e));
+                out.push(stack_event_line(e));
             } else {
                 out.extend(md_lines);
             }
         } else {
-            out.push(stack_event_line_pub(e));
+            out.push(stack_event_line(e));
         }
     }
     // 无任何 turn_started 事件:按原 flat 渲染(兜底)。
     if out.is_empty() {
         for e in evs {
-            out.push(stack_event_line_pub(e));
+            out.push(stack_event_line(e));
         }
     }
     out
-}
-
-// pub 版本(模块内 control.rs 的 stack_event_line 需 pub 给 render_turn_stream 调)。
-fn stack_event_line_pub(e: &ObserveEvent) -> Line<'static> {
-    stack_event_line(e)
 }
