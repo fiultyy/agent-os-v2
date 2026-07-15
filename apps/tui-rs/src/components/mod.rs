@@ -14,6 +14,7 @@
 //! - anchor:锚点连接线(AnchorGraph,ratatui canvas 薄封装)
 
 pub mod anchor;
+pub mod control;
 pub mod markdown;
 pub mod mouse;
 pub mod popup;

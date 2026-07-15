@@ -437,6 +437,19 @@ pub struct App {
     pub observe_area: Rect,
     /// 鼠标是否正在拖 observe 分隔条(Drag 延续)。
     pub observe_dragging: bool,
+    // ── Control Cursor 式布局(第六轮 T1/T2,非业务字段)───────────────
+    /// Control tab HSplit(左大纲 | 右堆叠)resizable 状态。
+    pub control_split: HSplit,
+    /// Control tab 右堆叠 VSplit(对话 | 输入)resizable 状态。
+    pub control_stack: crate::components::split::VSplit,
+    /// Control tab 对话区 ScrollView(turn stream 滚动)。
+    pub control_chat_scroll: ScrollView,
+    /// Control tab 区域缓存(draw 算 → handle mouse drag hit 用)。
+    pub control_area: Rect,
+    /// 鼠标是否正在拖 control 主分隔条(HSplit bar)。
+    pub control_h_dragging: bool,
+    /// 鼠标是否正在拖 control 堆叠分隔条(VSplit bar)。
+    pub control_v_dragging: bool,
     /// ClickMap 页面内交互元素命中(Control 按钮 + Observe session 项,ADR-1/ADR-2)。
     pub clickmap: ClickMap<usize>,
     /// ADR-1 T4:WS 直连 observe(弃 REST polling)。WS manager + 事件 channel。
@@ -480,6 +493,12 @@ impl App {
             observe_scroll: ScrollView::new(vec![]),
             observe_area: Rect::default(),
             observe_dragging: false,
+            control_split: HSplit::new(30),
+            control_stack: crate::components::split::VSplit::new(80),
+            control_chat_scroll: ScrollView::new(vec![]),
+            control_area: Rect::default(),
+            control_h_dragging: false,
+            control_v_dragging: false,
             clickmap: ClickMap::new(),
             ws: None,
             focus: FocusTarget::TabBar,
@@ -823,15 +842,23 @@ impl App {
                 self.open_help();
             }
             MouseEventKind::ScrollDown => {
-                if self.panel == Panel::Observe {
-                    self.observe_scroll.scroll_down(1);
+                if self.panel == Panel::Observe || self.panel == Panel::Control {
+                    if self.panel == Panel::Observe {
+                        self.observe_scroll.scroll_down(1);
+                    } else {
+                        self.control_chat_scroll.scroll_down(1);
+                    }
                 } else {
                     self.cursor_down();
                 }
             }
             MouseEventKind::ScrollUp => {
-                if self.panel == Panel::Observe {
-                    self.observe_scroll.scroll_up(1);
+                if self.panel == Panel::Observe || self.panel == Panel::Control {
+                    if self.panel == Panel::Observe {
+                        self.observe_scroll.scroll_up(1);
+                    } else {
+                        self.control_chat_scroll.scroll_up(1);
+                    }
                 } else {
                     self.cursor_up();
                 }
@@ -845,6 +872,19 @@ impl App {
                         return;
                     }
                 }
+                // 第六轮 T1:Control tab 分隔条命中(HSplit 水平 + VSplit 垂直堆叠)。
+                if self.panel == Panel::Control && self.control_area.contains(ratatui::layout::Position { x: m.column, y: m.row }) {
+                    let [_left, hbar, right] = self.control_split.rects(self.control_area);
+                    if hbar.contains(ratatui::layout::Position { x: m.column, y: m.row }) {
+                        self.control_h_dragging = true;
+                        return;
+                    }
+                    let [_top, vbar, _bot] = self.control_stack.rects(right);
+                    if vbar.contains(ratatui::layout::Position { x: m.column, y: m.row }) {
+                        self.control_v_dragging = true;
+                        return;
+                    }
+                }
                 // TabBar 命中切 tab。
                 if let Some(i) = self.tabbar.hit(self.tab_area, m.column, m.row) {
                     self.tabbar.select(i);
@@ -852,9 +892,20 @@ impl App {
                     return;
                 }
                 // ADR-1:Control 按钮 ClickMap 命中 → trigger_control_button(鼠标 + 键盘 Enter 共用,F1 修复)。
+                // 第六轮 T1:Control 左大纲 session 项 ClickMap 命中(id≥100 → 切 cursor)。
                 if self.panel == Panel::Control {
                     if let Some(id) = self.clickmap.hit(m.column, m.row) {
-                        self.trigger_control_button(*id);
+                        if *id >= 100 {
+                            // session 项:id-100 = flat index → 切 cursor + fetch_current。
+                            let idx = *id - 100;
+                            if idx < self.flat.len() {
+                                self.cursor = idx;
+                                self.fetch_current();
+                            }
+                        } else {
+                            // 按钮 id 0-7。
+                            self.trigger_control_button(*id);
+                        }
                         return;
                     }
                 }
@@ -883,9 +934,27 @@ impl App {
                         self.observe_split.drag(dx, self.observe_area);
                     }
                 }
+                // 第六轮 T1:Control tab 分隔条拖拽(HSplit 水平 + VSplit 垂直堆叠)。
+                if self.control_h_dragging {
+                    let [_left, hbar, _right] = self.control_split.rects(self.control_area);
+                    let dx: i32 = if m.column > hbar.x { 1 } else if m.column < hbar.x { -1 } else { 0 };
+                    if dx != 0 {
+                        self.control_split.drag(dx, self.control_area);
+                    }
+                }
+                if self.control_v_dragging {
+                    let [_left, _hbar, right] = self.control_split.rects(self.control_area);
+                    let [_top, vbar, _bot] = self.control_stack.rects(right);
+                    let dy: i32 = if m.row > vbar.y { 1 } else if m.row < vbar.y { -1 } else { 0 };
+                    if dy != 0 {
+                        self.control_stack.drag(dy, right);
+                    }
+                }
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 self.observe_dragging = false;
+                self.control_h_dragging = false;
+                self.control_v_dragging = false;
             }
             _ => {}
         }
