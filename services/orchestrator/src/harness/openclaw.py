@@ -180,6 +180,8 @@ class OpenClawClient:
         self._last_prompt: str = ""
         # optional local callback (e.g. tests / self-check)
         self.on_event: Optional[Callable[[Dict[str, Any]], Any]] = None
+        # pending RPC req→future responses (for delete/fork that need a reply)
+        self._pending: Dict[str, "asyncio.Future[Dict[str, Any]]"] = {}
 
     async def connect(self) -> None:
         """Connect to gateway + observe, run the event loop until stopped."""
@@ -224,6 +226,11 @@ class OpenClawClient:
                 msg = await self.gateway_ws.recv()
                 data = json.loads(msg)
                 if data.get("type") != FRAME_EVENT:
+                    # route res frames to waiting RPC callers (delete/fork)
+                    if data.get("type") == FRAME_RES:
+                        fut = self._pending.pop(data.get("id", ""), None)
+                        if fut is not None and not fut.done():
+                            fut.set_result(data)
                     continue
                 event_name = data.get("event", "")
                 payload = data.get("payload", {})
@@ -363,6 +370,75 @@ class OpenClawClient:
         loop = loop or asyncio.get_event_loop()
         self._connect_task = loop.create_task(self.connect())
         return self._connect_task
+
+    async def _request(
+        self, method: str, params: Dict[str, Any], timeout: float = 15.0,
+    ) -> Dict[str, Any]:
+        """Send a gateway req and await its matching res frame.
+
+        Unlike _send_request (fire-and-forget), this waits for the response.
+        The res frame is routed back by the connect() event loop via the
+        _pending futures map. Returns the raw res dict ({type, id, ok, payload?, error?}).
+        """
+        if not self.gateway_ws or not self.running:
+            raise RuntimeError("gateway not connected")
+        self.req_id += 1
+        req_id = f"req_{self.req_id}"
+        loop = asyncio.get_event_loop()
+        fut: "asyncio.Future[Dict[str, Any]]" = loop.create_future()
+        self._pending[req_id] = fut
+        await self.gateway_ws.send(serialize_request_frame(req_id, method, params))
+        try:
+            return await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError:
+            self._pending.pop(req_id, None)
+            raise
+
+    async def delete(self) -> Dict[str, Any]:
+        """Delete this session's transcript via gateway RPC sessions.delete.
+
+        Mirror of sessions.messages.subscribe call pattern, but awaits the res.
+        Gateway params: {key, agentId?, deleteTranscript?}. deleteTranscript
+        defaults to true server-side. Then stops the client.
+        """
+        if not self.gateway_ws or not self.running:
+            return {"deleted": False, "error": "gateway not connected",
+                    "key": self.session_key}
+        try:
+            res = await self._request(
+                "sessions.delete", {"key": self.session_key},
+            )
+        except Exception as e:
+            logger.error("sessions.delete RPC failed: %s", e)
+            return {"deleted": False, "error": str(e), "key": self.session_key}
+
+        if not res.get("ok"):
+            err = res.get("error", {})
+            logger.error("sessions.delete rejected: %s", err)
+            return {"deleted": False, "error": err, "key": self.session_key}
+
+        await self.stop()
+        return {"deleted": True, "key": self.session_key}
+
+    async def fork(self, new_key: str = None) -> Dict[str, Any]:
+        """Fork this session's context into a new session.
+
+        ADR-4 PARTIAL: openclaw has no native sessions.fork RPC. The closest
+        primitive, sessions.compaction.branch, requires a pre-existing
+        compaction checkpoint (checkpointId is mandatory + must resolve to a
+        real checkpoint) — it cannot be driven directly from a bare session
+        key without first running compaction. Rather than fabricate a fake
+        checkpointId, this returns an explicit not-supported stub. Upstream
+        needs a real sessions.fork RPC; until then callers should fork via the
+        claude client (cc has --fork-session).
+        """
+        return {
+            "forked": False,
+            "error": "claw verbatim fork not supported "
+                     "(ADR-4 defer; try cc)",
+            "key": self.session_key,
+            "new_key": new_key or f"{self.session_key}-fork-{uuid.uuid4().hex[:6]}",
+        }
 
     async def stop(self) -> None:
         self.running = False

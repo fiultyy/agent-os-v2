@@ -49,6 +49,8 @@ class StreamJSONParser:
         self.harness_id = harness_id
         self.session_id = session_id
         self.tick_id = tick_id or str(uuid.uuid4())
+        # session_id captured from the result event (fork uses this)
+        self.captured_sid: Optional[str] = None
 
     def parse_line(self, line: str) -> Optional[Dict[str, Any]]:
         try:
@@ -90,6 +92,10 @@ class StreamJSONParser:
         return None
 
     def _parse_result(self, data: Dict) -> Optional[Dict[str, Any]]:
+        # capture session_id emitted in the terminal result event (used by fork)
+        sid = data.get("session_id")
+        if sid:
+            self.captured_sid = sid
         return tick_completed(
             HARNESS_TYPE, self.harness_id, self.session_id, self.tick_id,
             status="error" if data.get("is_error") else "success",
@@ -241,6 +247,74 @@ class ClaudeClient:
         inst_id = f"{self.harness_id}-{uuid.uuid4().hex[:4]}"
         logger.info("Spawned claude instance: %s", inst_id)
         return {"instance_id": inst_id, "session_id": self.session_id}
+
+    async def fork(self, orig_sid: str, first_msg: str) -> Dict[str, Any]:
+        """Fork an existing claude session and run the first turn.
+
+        `claude --resume <orig_sid> --fork-session -p <first_msg> ...` opens a
+        NEW session id carrying orig_sid's context, then runs first_msg as a
+        one-shot turn. The new session_id is captured from the stream-json
+        result event.
+
+        Blocks until the forked turn completes (unlike turn() which streams in
+        the background) because the caller needs the new_sid to drive it next.
+        Returns {new_sid, tick_id, status}.
+        """
+        new_sid_fallback = str(uuid.uuid4())
+        parser = StreamJSONParser(
+            self.harness_id, orig_sid, tick_id=new_sid_fallback,
+        )
+
+        await self.emitter.emit(
+            tick_started(HARNESS_TYPE, self.harness_id, orig_sid,
+                         tick_id=parser.tick_id, request=first_msg)
+        )
+
+        cmd = [
+            "claude", "--resume", orig_sid, "--fork-session",
+            "-p", first_msg,
+            "--output-format", "stream-json",
+            "--verbose",
+        ]
+        logger.info(
+            "claude fork (tick=%s, from=%s): %s...",
+            parser.tick_id, orig_sid, first_msg[:50],
+        )
+        await self._spawn_and_stream(parser, cmd)
+
+        # _parse_result captured the result event's session_id if present
+        new_sid = parser.captured_sid or new_sid_fallback
+        if not parser.captured_sid:
+            logger.warning(
+                "fork: no session_id in stream-json result, using fallback %s",
+                new_sid,
+            )
+        return {"new_sid": new_sid, "tick_id": parser.tick_id, "status": "forked"}
+
+    async def delete(self, sid: str = None) -> Dict[str, Any]:
+        """Delete a claude session transcript (jsonl) and stop the client.
+
+        The transcript lives at
+        ~/.claude/projects/<slug>/<sid>.jsonl where slug = cwd with "/" → "-".
+        A missing file is treated as already-deleted (deleted=True). Then the
+        client is stopped (processes cancelled, observe WS closed).
+        """
+        target_sid = sid or self.session_id
+        slug = str(self.cwd).replace("/", "-")
+        transcript = Path.home() / ".claude" / "projects" / slug / f"{target_sid}.jsonl"
+        deleted = False
+        try:
+            if os.path.exists(transcript):
+                os.remove(transcript)
+                deleted = True
+            else:
+                deleted = True  # already gone
+        except Exception as e:
+            logger.error("delete: failed to remove %s: %s", transcript, e)
+            return {"deleted": False, "sid": target_sid, "error": str(e)}
+
+        await self.stop()
+        return {"deleted": deleted, "sid": target_sid}
 
     async def stop(self) -> None:
         for t in self._turn_tasks:
