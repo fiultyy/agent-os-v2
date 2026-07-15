@@ -54,6 +54,10 @@ services/orchestrator/data/*.db-shm
 services/orchestrator/data/*.db-wal
 services/orchestrator/data/*.db
 
+# Runtime DB backup files(*.db.bak.*,自动生成的备份)
+*.db.bak.*
+*.db.bak
+
 # Tools / MCP caches
 .serena/
 

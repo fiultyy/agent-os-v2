@@ -917,19 +917,7 @@ impl App {
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                // ADR-2:拖拽分隔条改 pct。
-                if self.observe_dragging {
-                    // dx 近似为鼠标列变化(单步 drag delta)→ HSplit.drag 算 pct delta。
-                    // crossterm Drag 每事件给当前位置,无 prev;用 1/-1 步进近似方向。
-                    // ponytail: 精确需存 last_x 算 dx;单步足够流畅(每像素一个事件)。
-                    let [_left, _bar, _right] = self.observe_split.rects(self.observe_area);
-                    // 方向:鼠标在 bar 右侧→右拖加左 pane;左侧→左拖减。
-                    let bar_x = _bar.x;
-                    let dx: i32 = if m.column > bar_x { 1 } else if m.column < bar_x { -1 } else { 0 };
-                    if dx != 0 {
-                        self.observe_split.drag(dx, self.observe_area);
-                    }
-                }
+                // (Observe 第八轮改全屏卷轴,无 HSplit 分隔条,observe_dragging 已删,不再拖拽。)
                 // 第六轮 T1:Control tab 分隔条拖拽(HSplit 水平 + VSplit 垂直堆叠)。
                 if self.control_h_dragging {
                     let [_left, hbar, _right] = self.control_split.rects(self.control_area);
@@ -951,7 +939,6 @@ impl App {
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                self.observe_dragging = false;
                 self.control_h_dragging = false;
                 self.control_v_dragging = None;
             }
