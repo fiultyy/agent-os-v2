@@ -7,7 +7,7 @@
 //! 仅把外层 draw() 改成分层调度 + 弹窗栈叠加渲染。
 
 use crate::components;
-use crate::state::{fmt_val, trunc, App, FocusTarget, ObserveEvent, Panel, TrackedFlow};
+use crate::state::{fmt_val, trunc, App, FocusTarget, NewKind, ObserveEvent, Panel, TrackedFlow};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -538,11 +538,34 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
     app.control_groups = harnesses.clone();
     let cursor_group = app.flat.get(app.cursor).map(|s| s.harness_type.clone());
 
+    // IT2 节点 C:大纲侧顶部 [+] new 按钮(clickmap id=300)。
+    // 占 sess_col 第 0 行;sessions 列表渲染到下移 1 行的子区域(不重叠)。
+    let new_rect = Rect::new(sess_col.x, sess_col.y, sess_col.width.min(10), 1);
+    {
+        let hovered = app.mouse.in_rect(new_rect);
+        let style = if hovered {
+            Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+        };
+        f.render_widget(
+            Paragraph::new("[+] new").style(style),
+            new_rect,
+        );
+        app.clickmap.register(new_rect, 300);
+    }
+
     // session 列:flat 顺序(已按 harness 排序),去组头,组间空行。
     // 记录每组首 session 行(group_start),供色块对齐渲染到该行。
+    // IT2 节点 C:sessions 从 sess_col.y+1 起([+] new 占第 0 行)。
+    let list_area = Rect {
+        y: sess_col.y + 1,
+        height: sess_col.height.saturating_sub(1),
+        ..sess_col
+    };
     let mut items: Vec<ListItem> = vec![];
     let mut ci = 0usize;
-    let mut row_idx: u16 = 0;
+    let mut row_idx: u16 = 0; // 相对 list_area 内偏移
     let mut group_start: Vec<u16> = vec![];
     let sid_cap = sess_col.width.saturating_sub(6).max(4) as usize;
     for hs in &harnesses {
@@ -562,7 +585,7 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
                 let ev_key = format!("{}/{}", s.harness_type, s.session_id);
                 let ev_n = app.events.get(&ev_key).map(|e| e.len()).unwrap_or(0);
                 let multi_tag = if inst >= 2 { format!("×{}", inst) } else { String::new() };
-                let row_rect = Rect::new(sess_col.x, sess_col.y + row_idx, sess_col.width, 1);
+                let row_rect = Rect::new(list_area.x, list_area.y + row_idx, list_area.width, 1);
                 let hovered = app.mouse.in_rect(row_rect);
                 let is_cursor = ci == app.cursor;
                 let (prefix, st) = if is_cursor {
@@ -593,14 +616,15 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
             "(无 session · r 刷新)", Style::default().fg(Color::DarkGray),
         ))));
     }
-    f.render_widget(List::new(items), sess_col);
+    f.render_widget(List::new(items), list_area);
 
     // 色块列:对齐到每组首 session 行(group_start),光标组反白;clickmap id 200+group_idx。
     for (gi, hs) in harnesses.iter().enumerate() {
         let (tag, color) = harness_tag(hs);
         let is_cursor = cursor_group.as_deref() == Some(hs.as_str());
         let y_off = *group_start.get(gi).unwrap_or(&0);
-        let block_rect = Rect::new(tag_col.x, tag_col.y + y_off, 2, 1);
+        // IT2 节点 C:sessions 下移 1 行([+] new 占首行),色块同步 +1 对齐。
+        let block_rect = Rect::new(tag_col.x, tag_col.y + 1 + y_off, 2, 1);
         if block_rect.y < tag_col.y + tag_col.height {
             let style = if is_cursor {
                 Style::default().bg(color).fg(Color::Black).add_modifier(Modifier::BOLD)
@@ -929,10 +953,51 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 
     // z-order layer 2:modal popup 栈(栈顶最上)。每个弹窗 Clear 遮罩 + Block + 正文。
+    // IT2 节点 C:new/delete 弹窗 body 按 state 实时刷新(picker 选中行/自由输入)。
+    update_action_popup_bodies(app);
     for p in app.popups.iter_mut() {
         components::render_popup(f, area, p);
     }
 
     // 帧末:鼠标光标(ADR-2:最后渲染,黑底黄字高亮)。
     app.mouse.render(f);
+}
+
+/// IT2 节点 C:new/delete 弹窗 body 实时刷新(反映 picker 选中行 / cc 自由输入)。
+/// 在 render_popup 之前调,改 top_popup body 让用户看到当前选中。
+fn update_action_popup_bodies(app: &mut App) {
+    // new 弹窗:按 NewKind 渲染 picker 列表 + 提示。
+    let is_new_top = app.popups.last().map(|p| p.id == "new").unwrap_or(false);
+    if is_new_top {
+        let mut lines: Vec<String> = match app.new_popup {
+            None => vec![
+                "c) claw  d) claude-code".to_string(),
+                "选后 j/k 浏览 · enter 确认 · esc 关".to_string(),
+                "(cc 可键入 cwd)".to_string(),
+            ],
+            Some(NewKind::Claw) => {
+                let mut v = vec!["claw agents:".to_string()];
+                for (i, a) in app.new_candidates.iter().enumerate() {
+                    let mark = if i == app.new_idx { "▸" } else { " " };
+                    v.push(format!("{} {}", mark, a));
+                }
+                v.push("enter 创建 · esc 关".to_string());
+                v
+            }
+            Some(NewKind::Cc) => {
+                let mut v = vec![format!("cc cwd: [{}]", app.new_cc_input)];
+                for (i, c) in app.new_candidates.iter().enumerate() {
+                    let mark = if i == app.new_idx { "▸" } else { " " };
+                    v.push(format!("{} {}", mark, c));
+                }
+                v.push("enter 创建(输入优先)· esc 关".to_string());
+                v
+            }
+        };
+        if let Some(p) = app.popups.last_mut() {
+            // 保持弹窗高度容纳候选列表(候选数 + 3 行提示,clamp 6..20)。
+            p.height = (lines.len() as u16 + 4).clamp(8, 22);
+            p.body = std::mem::take(&mut lines);
+        }
+    }
 }

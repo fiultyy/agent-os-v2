@@ -74,6 +74,69 @@ pub fn fetch_sessions() -> Option<SessionsGrouped> {
         .into_json::<SessionsGrouped>()
         .ok()
 }
+// ── IT2 节点 C session 管理辅助(接节点 B 后端端点)──────────────────
+// 不可达 graceful:返 None / 默认 / false,不 panic。
+
+#[derive(Deserialize)]
+struct AgentsResp { #[allow(dead_code)] default: Option<String>, agents: Vec<String> }
+#[derive(Deserialize)]
+struct CwdsResp { #[allow(dead_code)] default: Option<String>, cwds: Vec<String> }
+
+/// GET /h/claw/agents → agent 列表。失败返 vec!["main"]。
+pub fn fetch_claw_agents() -> Vec<String> {
+    ureq::get(&format!("{}/h/claw/agents", ORCH))
+        .call().ok()
+        .and_then(|r| r.into_json::<AgentsResp>().ok())
+        .map(|a| if a.agents.is_empty() { vec!["main".to_string()] } else { a.agents })
+        .unwrap_or_else(|| vec!["main".to_string()])
+}
+/// GET /h/claude-code/cwds → cwd 列表。失败返空。
+pub fn fetch_cc_cwds() -> Vec<String> {
+    ureq::get(&format!("{}/h/claude-code/cwds", ORCH))
+        .call().ok()
+        .and_then(|r| r.into_json::<CwdsResp>().ok())
+        .map(|a| a.cwds)
+        .unwrap_or_default()
+}
+/// POST /h/claude-code/sessions {cwd} → session_id。失败返 None。
+pub fn create_cc_session_cwd(cwd: &str) -> Option<String> {
+    let resp = ureq::post(&format!("{}/h/claude-code/sessions", ORCH))
+        .send_json(serde_json::json!({ "cwd": cwd })).ok()?;
+    let v: serde_json::Value = resp.into_json().ok()?;
+    v.get("session_id").and_then(|x| x.as_str()).map(|s| s.to_string())
+}
+/// POST /h/{type}/sessions/fork {source_session_id, first_message, new_session_id?}。
+/// → (new_session_id, forked)。claw 501 时 None(ADR-4:claw fork 未实现)。
+pub fn fork_session(ht: &str, source: &str, first_msg: &str) -> Option<(String, bool)> {
+    let resp = ureq::post(&format!("{}/h/{}/sessions/fork", ORCH, ht))
+        .send_json(serde_json::json!({
+            "source_session_id": source,
+            "first_message": first_msg,
+        })).ok()?;
+    let v: serde_json::Value = resp.into_json().ok()?;
+    let new_sid = v.get("new_session_id").and_then(|x| x.as_str())?.to_string();
+    let forked = v.get("forked").and_then(|x| x.as_bool()).unwrap_or(true);
+    Some((new_sid, forked))
+}
+/// POST /h/{type}/sessions/{id}/archive {prompt?} → summary turn 文本。失败 None。
+pub fn archive_session(ht: &str, sid: &str, prompt: Option<&str>) -> Option<String> {
+    let body = match prompt {
+        Some(p) => serde_json::json!({ "prompt": p }),
+        None => serde_json::json!({}),
+    };
+    let resp = ureq::post(&format!("{}/h/{}/sessions/{}/archive", ORCH, ht, sid))
+        .send_json(body).ok()?;
+    resp.into_string().ok()
+}
+/// DELETE /h/{type}/sessions/{id} → raw_deleted bool。失败 false。
+pub fn delete_session_raw(ht: &str, sid: &str) -> bool {
+    ureq::delete(&format!("{}/h/{}/sessions/{}", ORCH, ht, sid))
+        .call().ok()
+        .and_then(|r| r.into_json::<serde_json::Value>().ok())
+        .and_then(|v| v.get("raw_deleted").and_then(|x| x.as_bool()))
+        .unwrap_or(false)
+}
+
 pub fn fetch_events(h: &str, sid: &str) -> Option<Vec<ObserveEvent>> {
     ureq::get(&format!("{}/sessions/{}/{}/events?limit=50", OBSERVE, h, sid))
         .call()
@@ -503,7 +566,22 @@ pub struct App {
     pub control_collapsed: std::collections::HashSet<String>,
     /// ADR-3 props 弹窗激活(open_props 置 true,esc/enter 关)。替代原常驻「属性」tab。
     pub props_open: bool,
+    // ── IT2 节点 C:new/delete 弹窗态(session 管理)──────────────────────
+    /// new 弹窗激活态。None=关;Some(Claw/Cc)=开并已选 harness 类型。
+    pub new_popup: Option<NewKind>,
+    /// new 弹窗 picker 候选(agents 或 cwds,按 new_popup 渲染)。
+    pub new_candidates: Vec<String>,
+    /// new 弹窗 picker 选中索引。
+    pub new_idx: usize,
+    /// new 弹窗 cc 自由输入 cwd(insert 模式键入)。
+    pub new_cc_input: String,
+    /// delete 确认弹窗激活态:Some(sid)=开,等待 y/N。
+    pub delete_popup: Option<String>,
 }
+
+/// IT2 节点 C:new 弹窗 harness 类型选择。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NewKind { Claw, Cc }
 
 impl App {
     pub fn new(term: TermCap) -> Self {
@@ -558,6 +636,11 @@ impl App {
             quit_requested: false,
             control_collapsed: std::collections::HashSet::new(),
             props_open: false,
+            new_popup: None,
+            new_candidates: vec![],
+            new_idx: 0,
+            new_cc_input: String::new(),
+            delete_popup: None,
         }
     }
 
@@ -576,6 +659,12 @@ impl App {
         }
         self.fetch_current();
         self.count_all_instances();
+    }
+    /// IT2 节点 C:new/delete/fork/archive 成功后刷新 session 列表。
+    pub fn refresh_sessions(&mut self) {
+        if let Some(sg) = fetch_sessions() {
+            self.set_sessions(sg);
+        }
     }
     pub fn fetch_current(&mut self) {
         if let Some(s) = self.flat.get(self.cursor) {
@@ -846,6 +935,10 @@ impl App {
 
     /// 弹窗栈顶消费 key。返回 true = 已消费(关闭/聚焦切换)。
     fn handle_popup_key(&mut self, k: &KeyEvent) -> bool {
+        // IT2 节点 C:new/delete 操作弹窗先于通用 Esc/Enter/Tab 处理。
+        if self.handle_action_popup_key(k) {
+            return true;
+        }
         match k.code {
             KeyCode::Esc | KeyCode::Enter => {
                 self.close_top_popup();
@@ -860,6 +953,150 @@ impl App {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// IT2 节点 C:new/delete 弹窗自定义键路由。
+    /// new 弹窗:c/d 选类型、j/k 选候选、enter 确认、esc 关。
+    /// delete 弹窗:y 确认删、n/esc 取消。
+    fn handle_action_popup_key(&mut self, k: &KeyEvent) -> bool {
+        // new 弹窗(栈顶 id="new")
+        if self.popups.last().map(|p| p.id == "new").unwrap_or(false) {
+            return self.handle_new_popup_key(k);
+        }
+        // delete 确认弹窗(栈顶 id="delete")
+        if self.popups.last().map(|p| p.id == "delete").unwrap_or(false) {
+            if let Some(_sid) = self.delete_popup.clone() {
+                match k.code {
+                    KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                        self.close_popup("delete");
+                        self.delete_popup = None;
+                    }
+                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        let sid = self.delete_popup.take().unwrap_or_default();
+                        let ht = self.flat.iter()
+                            .find(|s| s.session_id == sid)
+                            .map(|s| norm_ht(&s.harness_type))
+                            .unwrap_or_else(|| "claw".to_string());
+                        let ok = delete_session_raw(&ht, &sid);
+                        self.turn_status = Some(if ok {
+                            format!("deleted: {}", trunc(&sid, 12))
+                        } else {
+                            format!("delete 失败(orche 不可达?): {}", trunc(&sid, 12))
+                        });
+                        self.close_popup("delete");
+                        self.refresh_sessions();
+                    }
+                    _ => {}
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    /// new 弹窗键路由:c=claw / d=cc / j/k 选 / enter 确认 / esc 关。
+    fn handle_new_popup_key(&mut self, k: &KeyEvent) -> bool {
+        match k.code {
+            KeyCode::Esc => {
+                self.close_popup("new");
+                self.new_popup = None;
+                true
+            }
+            KeyCode::Char('c') => {
+                // 选 claw:fetch agents 填候选。
+                self.new_popup = Some(NewKind::Claw);
+                self.new_candidates = fetch_claw_agents();
+                self.new_idx = 0;
+                true
+            }
+            KeyCode::Char('d') => {
+                // 选 cc:fetch cwds 填候选 + 清自由输入。
+                self.new_popup = Some(NewKind::Cc);
+                self.new_candidates = fetch_cc_cwds();
+                self.new_idx = 0;
+                self.new_cc_input.clear();
+                true
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if self.new_popup.is_some() && self.new_idx + 1 < self.new_candidates.len() {
+                    self.new_idx += 1;
+                }
+                true
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if self.new_idx > 0 {
+                    self.new_idx -= 1;
+                }
+                true
+            }
+            KeyCode::Enter => {
+                self.do_new_session();
+                true
+            }
+            _ => {
+                // cc 自由输入态:可键入 cwd(字母/数字/路径符)。
+                if matches!(self.new_popup, Some(NewKind::Cc)) {
+                    match k.code {
+                        KeyCode::Backspace => { self.new_cc_input.pop(); return true; }
+                        KeyCode::Char(ch) => { self.new_cc_input.push(ch); return true; }
+                        _ => {}
+                    }
+                }
+                false
+            }
+        }
+    }
+
+    /// IT2 节点 C:new 弹窗 enter → 创建 session(按 new_popup 类型)。
+    fn do_new_session(&mut self) {
+        match self.new_popup {
+            Some(NewKind::Claw) => {
+                let agent = self.new_candidates.get(self.new_idx).cloned()
+                    .unwrap_or_else(|| "main".to_string());
+                if let Some(sid) = create_session("claw", Some(&agent)) {
+                    self.turn_status = Some(format!("created claw session: {}", trunc(&sid, 16)));
+                    self.close_popup("new");
+                    self.new_popup = None;
+                    self.refresh_sessions();
+                    self.focus_new_session(&sid);
+                } else {
+                    self.turn_status = Some("create claw session 失败(orche :8001 不可达?)".to_string());
+                }
+            }
+            Some(NewKind::Cc) => {
+                // 自由输入非空优先,否则用选中的 cwd 候选。
+                let cwd = if !self.new_cc_input.is_empty() {
+                    self.new_cc_input.clone()
+                } else {
+                    self.new_candidates.get(self.new_idx).cloned().unwrap_or_default()
+                };
+                if cwd.is_empty() {
+                    self.turn_status = Some("(cwd 为空,键入路径或从候选选)".to_string());
+                    return;
+                }
+                if let Some(sid) = create_cc_session_cwd(&cwd) {
+                    self.turn_status = Some(format!("created cc session: {}", trunc(&sid, 16)));
+                    self.close_popup("new");
+                    self.new_popup = None;
+                    self.refresh_sessions();
+                    self.focus_new_session(&sid);
+                } else {
+                    self.turn_status = Some("create cc session 失败(orche :8001 不可达?)".to_string());
+                }
+            }
+            None => {
+                self.turn_status = Some("(先选类型:c=claw / d=claude-code)".to_string());
+            }
+        }
+    }
+
+    /// new/fork 成功后把 cursor 切到新 session(刷新后按 sid 找 flat 索引)。
+    pub fn focus_new_session(&mut self, sid: &str) {
+        if let Some(idx) = self.flat.iter().position(|s| s.session_id == sid) {
+            self.cursor = idx;
+            self.focus = FocusTarget::ControlSession(idx);
+            self.fetch_current();
         }
     }
 
@@ -957,9 +1194,14 @@ impl App {
                         return;
                     }
                 }
-                // ClickMap 命中:id 0-7 按钮、100+ session 项、200+ 组色块(仅 Control)。
+                // ClickMap 命中:id 0-7 按钮、100+ session 项、200+ 组色块、300=new 按钮(仅 Control)。
                 if self.panel == Panel::Control {
                     if let Some(id) = self.clickmap.hit(m.column, m.row) {
+                        if *id == 300 {
+                            // IT2 节点 C:大纲侧 [+] new 按钮。
+                            self.open_new_popup();
+                            return;
+                        }
                         if *id >= 200 {
                             // ADR-4:组色块 id-200 = group_idx → toggle 折叠/展开(替代裸跳转)。
                             if let Some(group) = self.control_groups.get(*id - 200).cloned() {
@@ -1070,6 +1312,23 @@ impl App {
         self.open_popup(
             Popup::centered("props", " props ", vec![], 60, 16),
         );
+    }
+
+    /// IT2 节点 C:开 new 弹窗(选 claw/cc → picker → 创建)。
+    pub fn open_new_popup(&mut self) {
+        self.new_popup = None;
+        self.new_candidates.clear();
+        self.new_idx = 0;
+        self.new_cc_input.clear();
+        self.open_popup(Popup::centered(
+            "new", " new session ",
+            vec![
+                "c) claw  d) claude-code".to_string(),
+                "选后 j/k 浏览 · enter 确认 · esc 关".to_string(),
+                "(cc 可键入 cwd)".to_string(),
+            ],
+            52, 8,
+        ));
     }
 
     /// ADR-7:输入历史 push(发送 turn 后调)。原生 Vec 兜底(InputHistory 组件待注册)。
@@ -1353,6 +1612,65 @@ impl App {
             }
             KeyCode::Char(']') if self.panel == Panel::Control => {
                 self.control_right_tabs.next();
+                false
+            }
+            // ── IT2 节点 C:session 管理键(normal 模式,光标 session)──────────
+            KeyCode::Char('n') if self.panel == Panel::Control => {
+                self.open_new_popup();
+                false
+            }
+            KeyCode::Char('d') if self.panel == Panel::Control => {
+                // 开 delete 确认弹窗(光标 session)。
+                let sid = self.current_sid();
+                if !sid.starts_with("(无") {
+                    self.delete_popup = Some(sid.clone());
+                    self.open_popup(Popup::centered(
+                        "delete", " delete session ",
+                        vec![format!("删除 {} ?", trunc(&sid, 24)), "y 确认 · N/esc 取消".to_string()],
+                        50, 7,
+                    ));
+                }
+                false
+            }
+            KeyCode::Char('a') if self.panel == Panel::Control => {
+                let (ht, sid) = self.flat.get(self.cursor)
+                    .map(|s| (norm_ht(&s.harness_type), s.session_id.clone()))
+                    .unwrap_or_else(|| ("claw".to_string(), String::new()));
+                if !sid.is_empty() {
+                    match archive_session(&ht, &sid, None) {
+                        Some(msg) => self.turn_status = Some(format!("archived: {}", trunc(&msg.trim(), 40))),
+                        None => self.turn_status = Some(format!("archive 失败(orche 不可达?): {}", trunc(&sid, 12))),
+                    }
+                }
+                false
+            }
+            KeyCode::Char('F') if self.panel == Panel::Control => {
+                // fork:用当前 textarea 文本作 first_msg(空则空串)。
+                let (ht, sid) = self.flat.get(self.cursor)
+                    .map(|s| (norm_ht(&s.harness_type), s.session_id.clone()))
+                    .unwrap_or_else(|| ("claw".to_string(), String::new()));
+                if !sid.is_empty() {
+                    let first_msg = self.textarea.text().to_string();
+                    match fork_session(&ht, &sid, &first_msg) {
+                        Some((new_sid, forked)) if forked => {
+                            self.turn_status = Some(format!("forked → {}", trunc(&new_sid, 16)));
+                            self.refresh_sessions();
+                            self.focus_new_session(&new_sid);
+                        }
+                        Some((_new_sid, _forked)) => {
+                            // forked=false:fork 端点回执但未真 fork。
+                            self.turn_status = Some("fork 未生效(forked=false)".to_string());
+                        }
+                        None => {
+                            // None:claw 501(ADR-4)或 orche 不可达。
+                            self.turn_status = Some(if ht == "claw" {
+                                "claw fork 暂不支持(ADR-4)".to_string()
+                            } else {
+                                "fork 失败(orche 不可达?)".to_string()
+                            });
+                        }
+                    }
+                }
                 false
             }
             // normal 模式下普通字母/退格无动作:打字统一由 insert 模式处理(见函数顶 capture)。
@@ -1988,5 +2306,129 @@ mod tests {
         assert!(app.control_collapsed.contains("g1"), "首次 toggle → 折叠");
         app.toggle_group("g1");
         assert!(!app.control_collapsed.contains("g1"), "再 toggle → 展开");
+    }
+
+    // ── IT2 节点 C 自测:new/delete/fork 键路由 + 弹窗态 ──────────────────
+
+    /// n(normal 模式,Control)→ 开 new 弹窗(id="new" 入栈,new_popup=None 待选类型)。
+    #[test]
+    fn normal_n_opens_new_popup() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        app.insert_mode = false;
+        app.handle_base_key(&KeyEvent::new(KeyCode::Char('n'), crossterm::event::KeyModifiers::empty()));
+        assert!(app.popups.iter().any(|p| p.id == "new"), "n → new 弹窗入栈");
+        assert!(app.new_popup.is_none(), "初始 new_popup=None(未选类型)");
+    }
+
+    /// n(insert 模式)→ 打字进 textarea,不开弹窗(n 被顶 capture 消费)。
+    #[test]
+    fn insert_n_types_not_opens_popup() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        app.insert_mode = true;
+        app.handle_base_key(&KeyEvent::new(KeyCode::Char('n'), crossterm::event::KeyModifiers::empty()));
+        assert!(app.popups.is_empty(), "insert 模式 n 不应弹窗");
+        assert_eq!(app.turn_msg, "n");
+    }
+
+    /// d(normal,Control)有光标 session → 开 delete 确认弹窗(delete_popup=Some(sid))。
+    #[test]
+    fn normal_d_opens_delete_confirm() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        app.insert_mode = false;
+        app.flat = vec![Session {
+            harness_type: "claude-code".into(), session_id: "abc".into(), harness_id: "h".into(),
+        }];
+        app.cursor = 0;
+        app.handle_base_key(&KeyEvent::new(KeyCode::Char('d'), crossterm::event::KeyModifiers::empty()));
+        assert!(app.popups.iter().any(|p| p.id == "delete"), "d → delete 弹窗入栈");
+        assert_eq!(app.delete_popup.as_deref(), Some("abc"));
+    }
+
+    /// new 弹窗 picker:c=claw 选(不触网,orche 离线 → 候选默认 ["main"])。
+    #[test]
+    fn new_popup_claw_pick_sets_candidates() {
+        let mut app = App::new(crate::kitty::detect());
+        app.open_new_popup();
+        // 测试环境 orche 离线,fetch_claw_agents 兜底返 ["main"]。
+        let handled = app.handle_popup_key(&KeyEvent::new(
+            KeyCode::Char('c'), crossterm::event::KeyModifiers::empty()));
+        assert!(handled, "new 弹窗 c 被消费");
+        assert_eq!(app.new_popup, Some(NewKind::Claw));
+        assert!(!app.new_candidates.is_empty(), "fetch 兜底至少 1 候选");
+    }
+
+    /// new 弹窗 j/k 移动选中索引(clamp 边界)。
+    #[test]
+    fn new_popup_jk_moves_picker() {
+        let mut app = App::new(crate::kitty::detect());
+        app.open_new_popup();
+        app.new_popup = Some(NewKind::Claw);
+        app.new_candidates = vec!["a".into(), "b".into(), "c".into()];
+        app.new_idx = 0;
+        app.handle_popup_key(&KeyEvent::new(KeyCode::Char('j'), crossterm::event::KeyModifiers::empty()));
+        assert_eq!(app.new_idx, 1);
+        // k 回 0。
+        app.handle_popup_key(&KeyEvent::new(KeyCode::Char('k'), crossterm::event::KeyModifiers::empty()));
+        assert_eq!(app.new_idx, 0);
+        // k 不下溢(仍 0)。
+        app.handle_popup_key(&KeyEvent::new(KeyCode::Char('k'), crossterm::event::KeyModifiers::empty()));
+        assert_eq!(app.new_idx, 0);
+    }
+
+    /// new 弹窗 esc 关弹窗 + 清 new_popup。
+    #[test]
+    fn new_popup_esc_closes() {
+        let mut app = App::new(crate::kitty::detect());
+        app.open_new_popup();
+        assert!(app.popups.iter().any(|p| p.id == "new"));
+        app.handle_popup_key(&KeyEvent::new(KeyCode::Esc, crossterm::event::KeyModifiers::empty()));
+        assert!(!app.popups.iter().any(|p| p.id == "new"), "esc 关 new 弹窗");
+        assert!(app.new_popup.is_none());
+    }
+
+    /// delete 弹窗 N/esc 取消(不删,弹窗关)。
+    #[test]
+    fn delete_popup_n_cancels() {
+        let mut app = App::new(crate::kitty::detect());
+        app.delete_popup = Some("sid-x".to_string());
+        app.open_popup(Popup::centered("delete", "del", vec![], 40, 5));
+        app.handle_popup_key(&KeyEvent::new(KeyCode::Char('N'), crossterm::event::KeyModifiers::empty()));
+        assert!(!app.popups.iter().any(|p| p.id == "delete"), "N 关 delete 弹窗");
+        assert!(app.delete_popup.is_none(), "取消 → delete_popup 清空");
+    }
+
+    /// F(normal,Control)有光标 session → fork 调用(orche 离线 None → claw 提示 ADR-4)。
+    #[test]
+    fn normal_f_fork_offline_graceful() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        app.insert_mode = false;
+        app.flat = vec![Session {
+            harness_type: "openclaw".into(), session_id: "s1".into(), harness_id: "h".into(),
+        }];
+        app.cursor = 0;
+        app.handle_base_key(&KeyEvent::new(KeyCode::Char('F'), crossterm::event::KeyModifiers::empty()));
+        // openclaw→claw,orche 离线 → None → claw fork 暂不支持(ADR-4)提示。
+        assert!(app.turn_status.as_deref().unwrap_or("").contains("fork"), "F 应设 turn_status 含 fork");
+        assert!(app.popups.is_empty(), "F 不开弹窗");
+    }
+
+    /// clickmap id=300([+] new 按钮)鼠标点击 → 开 new 弹窗。
+    #[test]
+    fn new_button_click_opens_popup() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        app.clickmap.clear();
+        app.clickmap.register(Rect::new(0, 0, 8, 1), 300);
+        let m = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 2, row: 0,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        app.handle_base_mouse(&m);
+        assert!(app.popups.iter().any(|p| p.id == "new"), "id=300 → new 弹窗");
     }
 }
