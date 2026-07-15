@@ -61,9 +61,10 @@ pub fn render_status_bar(f: &mut Frame, area: Rect, app: &App) {
 /// 按钮通过 ClickMap 注册(id 0-7),复用 trigger_control_button。
 /// 独立 render fn(可复用)。
 pub fn render_input_bar(f: &mut Frame, area: Rect, app: &mut App) {
+    // 3 行:message(1) + 按钮行1(1) + 按钮行2(1)。
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Length(1)])
+        .constraints([Constraint::Length(1), Constraint::Length(1), Constraint::Length(1)])
         .split(area);
 
     // message 输入行。
@@ -71,20 +72,19 @@ pub fn render_input_bar(f: &mut Frame, area: Rect, app: &mut App) {
         Span::styled(" ❯ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
         Span::styled(app.turn_msg.clone(), Style::default().fg(Color::White)),
         Span::styled("▌", Style::default().fg(Color::Cyan).add_modifier(Modifier::SLOW_BLINK)),
-        Span::styled("  [t trigger · enter 按钮动作]", Style::default().fg(Color::DarkGray)),
+        Span::styled("  [t trigger · enter 按钮]", Style::default().fg(Color::DarkGray)),
     ]);
     f.render_widget(Paragraph::new(msg_line), chunks[0]);
 
-    // 按钮 2 行(每行 4 按钮)。
-    let btn_row1 = chunks[1];
+    // 按钮 2 行(每行 4 按钮):row 0 = id 0-3,row 1 = id 4-7。
     let quarter = [Constraint::Percentage(25); 4];
-    let btn_rects1 = Layout::default().direction(Direction::Horizontal).constraints(quarter.clone()).split(btn_row1);
+    let btn_rects1 = Layout::default().direction(Direction::Horizontal).constraints(quarter.clone()).split(chunks[1]);
+    let btn_rects2 = Layout::default().direction(Direction::Horizontal).constraints(quarter).split(chunks[2]);
 
     for (i, (label, id, color, action)) in CONTROL_BUTTONS.iter().enumerate() {
         let row = i / 4;
         let col = i % 4;
-        let rects = if row == 0 { &btn_rects1 } else { &btn_rects1 }; // ponytail: 单行 4 按钮(row<4);2 行时需第 2 套 rects。
-        let rect = rects[col];
+        let rect = if row == 0 { btn_rects1[col] } else { btn_rects2[col] };
         app.clickmap.register(rect, *id);
         let hovered = app.mouse.in_rect(rect);
         let focused = matches!(app.focus, crate::state::FocusTarget::ControlButton(x) if x == *id);

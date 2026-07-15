@@ -494,7 +494,7 @@ impl App {
             observe_area: Rect::default(),
             observe_dragging: false,
             control_split: HSplit::new(30),
-            control_stack: crate::components::split::VSplit::new(80),
+            control_stack: crate::components::split::VSplit::new(75),
             control_chat_scroll: ScrollView::new(vec![]),
             control_area: Rect::default(),
             control_h_dragging: false,
