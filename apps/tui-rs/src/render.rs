@@ -16,10 +16,12 @@ use ratatui::{
     Frame,
 };
 
-/// 功能分区边框:Control 右堆叠各 pane + 左大纲的可见边界。cyan bold 标题 + 全边框。
+/// 功能分区:ADR-5 色块 + 顶部描边(去左/右/下全边框省空间)。cyan bold 标题 + 顶线 + bg 色块。
 fn region_block(title: &str) -> Block<'static> {
     Block::default()
-        .borders(Borders::ALL)
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .style(Style::default().bg(Color::Black))
         .title(Line::from(Span::styled(
             title.to_string(),
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
