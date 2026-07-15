@@ -551,7 +551,7 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
     ];
     for (rects, row_data) in [(&btn_rects1, &row1), (&btn_rects2, &row2)] {
         for (label, id, color, action) in row_data.iter() {
-            // row1 id 0-3 → rects[id];row2 id 4-7 → rects[id-4](每行 4 槽)。
+            // row1 id 0-3 → rects[id];row2 id 4-7 → rects[id%4](每行 4 槽)。
             let rect_idx = *id % 4;
             let rect = rects[rect_idx];
             app.clickmap.register(rect, *id);

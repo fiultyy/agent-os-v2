@@ -446,7 +446,7 @@ pub struct App {
     // ── T1/T2 UI 状态(ADR-2/ADR-3,非业务字段)──────────────────────
     /// 键盘焦点目标(ADR-2:统一 focus indicator)。
     pub focus: FocusTarget,
-    /// orche 在线状态(ADR-3:fetch_orche_health 周期预检)。离线时 Control 显提示。
+    /// orche 在线状态(ADR-3:fetch_orche_health 按需预检——进 Control/refresh 触发,非周期 Tick)。离线时 Control 显提示。
     pub orche_online: bool,
     /// 上次按钮点击时间 + action 名(ADR-3:点击 loading 反馈,render 检 <500ms 高亮)。
     pub last_action: Option<(std::time::Instant, &'static str)>,
@@ -782,6 +782,39 @@ impl App {
 
     /// base panel 鼠标:右键弹 context menu / 左键 tab 切 panel / 滚轮列表。
     /// ADR-2:Observe tab 加分隔条拖拽(HSplit.drag)+ turn stream 滚轮(ScrollView)。
+    /// 触发 Control 按钮 id(0-7)动作(鼠标点击 + 键盘 Enter 共用,F1 修复)。
+    fn trigger_control_button(&mut self, id: usize) {
+        match id {
+            0 => { self.do_turn(); self.mark_action("trigger"); }
+            1 => { self.do_spawn(); self.mark_action("spawn"); }
+            2 => {
+                if let Some(sg) = fetch_sessions() {
+                    self.set_sessions(sg);
+                }
+                self.fetch_claw_events();
+                self.orche_online = fetch_orche_health();
+            }
+            3 => self.open_popup(Popup::centered(
+                "raw-exec",
+                " raw exec · spawn harness",
+                vec![
+                    "选 session → spawn claude --resume <sid> / claw TUI 全屏".to_string(),
+                    format!(" 当前 cursor session: {}", self.current_sid()),
+                    " ctrl+d 退出 harness 回 TUI(占位:交互模式生效)".to_string(),
+                ],
+                64,
+                8,
+            )),
+            4 => { self.create_preset_flow(FlowPreset::Chain); self.mark_action("create_chain"); }
+            5 => { self.create_preset_flow(FlowPreset::Branch); self.mark_action("create_branch"); }
+            6 => { self.create_preset_flow(FlowPreset::Dag); self.mark_action("create_dag"); }
+            7 => { self.run_current_flow(); self.mark_action("run_flow"); }
+            _ => {}
+        }
+        // 焦点归该按钮(键盘聚焦框跟随)。
+        self.focus = FocusTarget::ControlButton(id);
+    }
+
     fn handle_base_mouse(&mut self, m: &MouseEvent) {
         // 光标总是跟踪(Moved/Down/Drag Left)。
         self.mouse.track(*m);
@@ -818,39 +851,10 @@ impl App {
                     self.sync_panel_from_tab();
                     return;
                 }
-                // ADR-1:Control 按钮 ClickMap 命中(0=trigger,1=spawn,2=refresh,3=raw-exec,
-                //   4=create-chain,5=create-branch,6=create-dag,7=run-flow — T2 flow 入 Control)。
+                // ADR-1:Control 按钮 ClickMap 命中 → trigger_control_button(鼠标 + 键盘 Enter 共用,F1 修复)。
                 if self.panel == Panel::Control {
-                    if let Some(id) = self.clickmap.hit(m.column, m.row).cloned() {
-                        match id {
-                            0 => { self.do_turn(); self.mark_action("trigger"); }
-                            1 => { self.do_spawn(); self.mark_action("spawn"); }
-                            2 => {
-                                if let Some(sg) = fetch_sessions() {
-                                    self.set_sessions(sg);
-                                }
-                                self.fetch_claw_events();
-                                self.orche_online = fetch_orche_health();
-                            }
-                            3 => self.open_popup(Popup::centered(
-                                "raw-exec",
-                                " raw exec · spawn harness",
-                                vec![
-                                    "选 session → spawn claude --resume <sid> / claw TUI 全屏".to_string(),
-                                    format!(" 当前 cursor session: {}", self.current_sid()),
-                                    " ctrl+d 退出 harness 回 TUI(占位:交互模式生效)".to_string(),
-                                ],
-                                64,
-                                8,
-                            )),
-                            4 => { self.create_preset_flow(FlowPreset::Chain); self.mark_action("create_chain"); }
-                            5 => { self.create_preset_flow(FlowPreset::Branch); self.mark_action("create_branch"); }
-                            6 => { self.create_preset_flow(FlowPreset::Dag); self.mark_action("create_dag"); }
-                            7 => { self.run_current_flow(); self.mark_action("run_flow"); }
-                            _ => {}
-                        }
-                        // ADR-2:点击后焦点归该按钮(键盘聚焦框跟随)。
-                        self.focus = FocusTarget::ControlButton(id);
+                    if let Some(id) = self.clickmap.hit(m.column, m.row) {
+                        self.trigger_control_button(*id);
                         return;
                     }
                 }
@@ -921,6 +925,15 @@ impl App {
             KeyCode::BackTab => {
                 // ADR-2:Shift+Tab 在 TabBar 与当前 panel 元素间切焦点。
                 self.focus = self.focus.cycle(self.panel);
+                false
+            }
+            KeyCode::Enter => {
+                // F1:键盘 Enter 触发聚焦的 Control 按钮(focus==ControlButton(i),鼠标点击共用 trigger_control_button)。
+                if self.panel == Panel::Control {
+                    if let FocusTarget::ControlButton(i) = self.focus {
+                        self.trigger_control_button(i);
+                    }
+                }
                 false
             }
             KeyCode::Char('1') => {
