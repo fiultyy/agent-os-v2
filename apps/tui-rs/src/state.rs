@@ -497,7 +497,8 @@ impl App {
             observe_area: Rect::default(),
             observe_dragging: false,
             control_split: HSplit::new(30),
-            control_stack: crate::components::split::VerticalStack::new(vec![75, 25]),
+            // ADR-1(第八轮):push pane 扩 4 区(对话/输入/flow/属性)。VerticalStack 真扩展验证。
+            control_stack: crate::components::split::VerticalStack::new(vec![40, 20, 20, 20]),
             control_chat_scroll: ScrollView::new(vec![]),
             control_area: Rect::default(),
             control_h_dragging: false,
@@ -1557,5 +1558,19 @@ mod tests {
     fn control_button_count_covers_all_flow_buttons() {
         // 8 按钮:trigger(0)/spawn(1)/refresh(2)/rawexec(3)/chain(4)/branch(5)/dag(6)/run(7)。
         assert_eq!(CONTROL_BUTTON_COUNT, 8);
+    }
+
+    /// ADR-1(第八轮):control_stack pcts 扩 4 pane(对话/输入/flow/属性)。VerticalStack 真扩展验证。
+    #[test]
+    fn control_stack_has_4_panes() {
+        let app = App::new(crate::kitty::detect());
+        assert_eq!(app.control_stack.pcts.len(), 4, "control_stack must have 4 panes (对话/输入/flow/属性)");
+        // push pane 加区不改架构:VerticalStack.rects 返 len==pcts.len()。
+        let panes = app.control_stack.rects(ratatui::layout::Rect::new(0, 0, 80, 40));
+        assert_eq!(panes.len(), 4, "4 panes → 4 rects");
+        // panes 上下堆叠(y 单调递增)。
+        for w in panes.windows(2) {
+            assert!(w[1].y >= w[0].y + w[0].height, "panes stack vertically");
+        }
     }
 }

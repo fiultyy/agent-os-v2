@@ -555,10 +555,13 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
         bar,
     );
 
-    // ── 右堆叠:VerticalStack(对话 | 输入)resizable(ADR-1 N-pane 可扩展垂直堆叠)──
+    // ── 右堆叠:VerticalStack 4 pane(对话 | 输入 | flow | 属性)。ADR-1(第八轮)真扩展验证。
+    // pcts=[40,20,20,20],push pane 加 flow/属性区(不改架构,VerticalStack.rects 按比例分)。
     let vpanes = app.control_stack.rects(right);
     let chat_area = vpanes[0];
     let input_area = vpanes[1];
+    let flow_area = vpanes[2];
+    let props_area = vpanes[3];
     for sep in app.control_stack.separators(right) {
         f.render_widget(
             ratatui::widgets::Block::default().style(Style::default().fg(Color::DarkGray)),
@@ -597,8 +600,79 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
     app.control_chat_scroll.set_content(ev_lines);
     app.control_chat_scroll.render(f, right_top[1]);
 
-    // 右堆叠区 1(底):InputBar(turn_msg + 按钮)。
+    // 右堆叠区 1:InputBar(turn_msg + 按钮)。
     control::render_input_bar(f, input_area, app);
+
+    // 右堆叠区 2:flow 区(flow lane 多实例 observe_lanes + 当前 cursor flow DAG flow_dag_lines)。
+    let mut flow_lines_v: Vec<Line> = vec![
+        Line::from(Span::styled(
+            " flow · lane + DAG".to_string(),
+            Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
+        )),
+    ];
+    // flow lane:cursor session 多实例 observe_lanes(openclaw turn 多实例)。
+    if let Some(evs) = app.events.get(&key) {
+        if !evs.is_empty() {
+            flow_lines_v.extend(observe_lanes(evs));
+        }
+    }
+    // flow DAG:当前 cursor tracked flow(若有)。
+    if let Some(tf) = app.current_flow() {
+        flow_lines_v.push(Line::raw(""));
+        flow_lines_v.extend(flow_dag_lines(tf, app.flow_cursor));
+    } else if flow_lines_v.len() == 1 {
+        // 既无 lane 也无 DAG:占位提示。
+        flow_lines_v.push(Line::from(Span::styled(
+            " (无 flow · f/G/D 创建预设)".to_string(),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    f.render_widget(Paragraph::new(flow_lines_v), flow_area);
+
+    // 右堆叠区 3:属性区(cursor session 详情:sid/harness/实例/事件数/last turn)。
+    let prop_lines = render_props_lines(app);
+    f.render_widget(Paragraph::new(prop_lines), props_area);
+}
+
+/// 属性区:cursor session 详情(sid/harness/实例/事件数/last turn)。读 app 业务字段,不改业务方法。
+fn render_props_lines(app: &App) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
+        " 属性 · cursor session".to_string(),
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    ))];
+    let Some(s) = app.flat.get(app.cursor) else {
+        lines.push(Line::from(Span::styled(
+            " (无 session · r 刷新)".to_string(),
+            Style::default().fg(Color::DarkGray),
+        )));
+        return lines;
+    };
+    let inst = app.instance_count(&s.harness_type, &s.session_id);
+    let ev_key = format!("{}/{}", s.harness_type, s.session_id);
+    let ev_n = app.events.get(&ev_key).map(|e| e.len()).unwrap_or(0);
+    let turn_disp = app.turn_status.clone().unwrap_or_else(|| "(未触发)".to_string());
+    lines.push(Line::from(vec![
+        Span::styled(" sid     ", Style::default().fg(Color::DarkGray)),
+        Span::styled(trunc(&s.session_id, 30), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(" harness ", Style::default().fg(Color::DarkGray)),
+        Span::styled(s.harness_type.clone(), Style::default().fg(Color::Yellow)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(" 实例    ", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{}", inst), Style::default().fg(if inst >= 2 { Color::Yellow } else { Color::White }).add_modifier(Modifier::BOLD)),
+        Span::styled(if inst >= 2 { "  (×N multi)" } else { "" }, Style::default().fg(Color::DarkGray)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(" 事件    ", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{}", ev_n), Style::default().fg(Color::Yellow)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(" last    ", Style::default().fg(Color::DarkGray)),
+        Span::styled(trunc(&turn_disp, 40), Style::default().fg(Color::White)),
+    ]));
+    lines
 }
 
 // ═══ Home 占位面板 ════════════════════════════════════════════════
