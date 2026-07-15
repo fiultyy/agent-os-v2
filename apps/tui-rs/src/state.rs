@@ -373,6 +373,8 @@ pub enum FocusTarget {
     TabBar,
     /// Control tab 按钮索引(trigger/spawn/refresh/rawexec/flow-create-chain/...)。
     ControlButton(usize),
+    /// Control tab 左大纲 session 列表索引(F3:键盘焦点 cursor 导航)。
+    ControlSession(usize),
     /// Observe tab session 列表。
     ObserveSession,
     /// Flows tab flow 列表索引。
@@ -389,11 +391,12 @@ impl FocusTarget {
     pub fn cycle(self, panel: Panel) -> Self {
         match self {
             FocusTarget::TabBar => match panel {
-                Panel::Control => FocusTarget::ControlButton(0),
+                Panel::Control => FocusTarget::ControlSession(0), // F3:大纲首(左大纲主)
                 Panel::Observe => FocusTarget::ObserveSession,
                 Panel::Flows => FocusTarget::FlowsFlow(0),
                 Panel::Home => FocusTarget::TabBar, // Home 无可聚焦元素,停在 TabBar
             },
+            FocusTarget::ControlSession(_) if panel == Panel::Control => FocusTarget::ControlButton(0), // F3:大纲 → 输入栏按钮
             _ => FocusTarget::TabBar,
         }
     }
@@ -1043,12 +1046,11 @@ impl App {
                     self.observe_scroll.scroll_down(1);
                     self.focus = FocusTarget::ObserveSession;
                 } else if self.panel == Panel::Control {
-                    // ADR-2:Control panel 方向键在按钮间切焦点(不触发动作,只移动聚焦框)。
-                    let next = match self.focus {
-                        FocusTarget::ControlButton(i) => (i + 1).min(CONTROL_BUTTON_COUNT - 1),
-                        _ => 0,
-                    };
-                    self.focus = FocusTarget::ControlButton(next);
+                    // F3:Control 方向键——大纲区(ControlSession)切 cursor;输入栏(ControlButton)切按钮。
+                    match self.focus {
+                        FocusTarget::ControlSession(_) => { self.cursor_down(); self.focus = FocusTarget::ControlSession(self.cursor); }
+                        _ => { let next = match self.focus { FocusTarget::ControlButton(i) => (i + 1).min(CONTROL_BUTTON_COUNT - 1), _ => 0 }; self.focus = FocusTarget::ControlButton(next); }
+                    }
                 } else {
                     self.cursor_down();
                     self.focus = FocusTarget::ObserveSession;
@@ -1063,11 +1065,11 @@ impl App {
                     self.observe_scroll.scroll_up(1);
                     self.focus = FocusTarget::ObserveSession;
                 } else if self.panel == Panel::Control {
-                    let prev = match self.focus {
-                        FocusTarget::ControlButton(i) => i.saturating_sub(1),
-                        _ => 0,
-                    };
-                    self.focus = FocusTarget::ControlButton(prev);
+                    // F3:Control 方向键——大纲区(ControlSession)切 cursor;输入栏(ControlButton)切按钮。
+                    match self.focus {
+                        FocusTarget::ControlSession(_) => { self.cursor_up(); self.focus = FocusTarget::ControlSession(self.cursor); }
+                        _ => { let prev = match self.focus { FocusTarget::ControlButton(i) => i.saturating_sub(1), _ => 0 }; self.focus = FocusTarget::ControlButton(prev); }
+                    }
                 } else {
                     self.cursor_up();
                     self.focus = FocusTarget::ObserveSession;
@@ -1453,8 +1455,10 @@ mod tests {
     /// ADR-2:FocusTarget::cycle 在 TabBar 与 panel 元素间切。
     #[test]
     fn focus_target_cycles_tabbar_and_panel() {
-        // Control panel:TabBar → ControlButton(0)。
-        assert_eq!(FocusTarget::TabBar.cycle(Panel::Control), FocusTarget::ControlButton(0));
+        // F3:Control panel 三态——TabBar → ControlSession(0)(大纲首)。
+        assert_eq!(FocusTarget::TabBar.cycle(Panel::Control), FocusTarget::ControlSession(0));
+        // ControlSession → ControlButton(0)(大纲 → 输入栏按钮)。
+        assert_eq!(FocusTarget::ControlSession(0).cycle(Panel::Control), FocusTarget::ControlButton(0));
         // 从 ControlButton 回 TabBar。
         assert_eq!(FocusTarget::ControlButton(0).cycle(Panel::Control), FocusTarget::TabBar);
         // Observe:TabBar → ObserveSession。
@@ -1471,13 +1475,14 @@ mod tests {
         let mut app = App::new(crate::kitty::detect());
         app.panel = Panel::Control;
         app.focus = FocusTarget::TabBar;
-        // Shift+Tab:TabBar → ControlButton(0)。
         let ev = crate::events::AppEvent::Key(KeyEvent::new(KeyCode::BackTab, crossterm::event::KeyModifiers::SHIFT));
+        // F3:Shift+Tab 三态——TabBar → ControlSession(0) → ControlButton(0) → TabBar。
         app.handle(&ev);
-        assert_eq!(app.focus, FocusTarget::ControlButton(0), "BackTab should cycle focus to ControlButton(0)");
-        // 再 Shift+Tab:ControlButton(0) → TabBar。
+        assert_eq!(app.focus, FocusTarget::ControlSession(0), "BackTab TabBar → ControlSession(0)");
         app.handle(&ev);
-        assert_eq!(app.focus, FocusTarget::TabBar, "BackTab again should cycle back to TabBar");
+        assert_eq!(app.focus, FocusTarget::ControlButton(0), "BackTab ControlSession → ControlButton(0)");
+        app.handle(&ev);
+        assert_eq!(app.focus, FocusTarget::TabBar, "BackTab ControlButton → TabBar");
     }
 
     /// ADR-3:mark_action + action_loading(<500ms 高亮窗口)。

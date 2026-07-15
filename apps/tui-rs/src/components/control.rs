@@ -171,13 +171,15 @@ pub fn render_turn_stream(evs: &[ObserveEvent]) -> Vec<Line<'static>> {
     let mut cur_tick: String = String::new();
 
     for e in evs {
-        // tick_started 开新 turn 块(若不同 tick_id)。
-        if e.event_type == "tick_started" {
+        // tick_started 开新 turn 块(仅当 tick_id 不同 —— F1 修复:原只查 empty 不比较 tick_id,防御连续相同 tick_id)。
+        if e.event_type == "tick_started" && e.tick_id != cur_tick {
             if !cur_tick.is_empty() {
                 turn_idx += 1;
             }
             cur_tick = e.tick_id.clone();
             out.push(turn_separator_line(&e.tick_id, turn_idx));
+        }
+        if e.event_type == "tick_started" {
             // tick_started 本身也一行(request message)。
             out.push(stack_event_line(e));
             continue;

@@ -401,8 +401,7 @@ pub fn draw_stack(f: &mut Frame, area: Rect, app: &mut App) {
     // ADR-2:HSplit resizable 替代固定 Layout(session 树 | turn stream)。
     let [left, bar, right] = app.observe_split.rects(area);
     app.observe_area = area; // 缓存供 events 鼠标拖拽命中
-    // ADR-2:每帧 clear + 注册 session 列表项 Rect(参考 widgets_demo ClickMap 模式)。
-    app.clickmap.clear();
+    // clickmap.clear() 在顶层 draw() 统一做(第三轮 minor 修复),此处不重复(F2)。
 
     // ── 左:session 树(harness 分组 + ×N 多实例标记)──
     let mut items: Vec<ListItem> = vec![];
