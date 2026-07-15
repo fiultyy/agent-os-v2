@@ -486,6 +486,24 @@ pub struct App {
     /// Control 输入模式:true=所有字母进 turn_msg(输入栏可自由打字,不受 t/s/p/h 等快捷键抢占);
     /// Esc 退出到快捷键模式(此时 t/s/f/G/D/R/p/h 等生效),`i` 再进入。默认 true:进 Control 即可打字。
     pub insert_mode: bool,
+    // ── ADR-1/ADR-7 输入 UX(节点 A 新增)──────────────────────────────
+    /// ADR-1 多行 textarea 输入。组件由节点 B 在 components::textarea 注册;
+    /// 未注册前 turn_msg 兼作文本缓冲(本字段占位,待 mod 注册后启用)。
+    // pub textarea: crate::components::textarea::Textarea,
+    /// ADR-7 输入历史(↑/↓ 翻历史)。原生 Vec + 索引兜底(InputHistory 组件待节点 B 注册)。
+    pub input_history: Vec<String>,
+    /// 历史浏览游标(None=不在浏览历史,写新输入;Some(i)=指向 input_history[i])。
+    pub history_cursor: Option<usize>,
+    /// ADR-7 @mention 候选弹窗激活态。true=用户打了 @,mention popup 开;
+    /// 组件由节点 B 在 components::mentions 注册,本 bool 兼作 gate。
+    pub mentions_open: bool,
+    /// ADR-3:×(顶栏右)→ quit_requested=true,run loop 退出(替代裸 q 的语义化退出)。
+    pub quit_requested: bool,
+    /// ADR-4 左侧折叠树:已折叠组名集合(HashSet)。toggle_group 增删;
+    /// 默认空集=全展开。draw_control 读此判 header 展开态。
+    pub control_collapsed: std::collections::HashSet<String>,
+    /// ADR-3 props 弹窗激活(open_props 置 true,esc/enter 关)。替代原常驻「属性」tab。
+    pub props_open: bool,
 }
 
 impl App {
@@ -521,9 +539,9 @@ impl App {
             control_area: Rect::default(),
             control_h_dragging: false,
             control_right_tabs: TabBar::new(vec![
+                // ADR-3:属性改 props 弹窗(i 键),右 tab 缩 2(对话/flow)。
                 " 对话 ".to_string(),
                 " flow ".to_string(),
-                " 属性 ".to_string(),
             ]),
             right_tab_area: Rect::default(),
             control_groups: vec![],
@@ -534,6 +552,12 @@ impl App {
             last_action: None,
             pending_spawn: None,
             insert_mode: true,
+            input_history: vec![],
+            history_cursor: None,
+            mentions_open: false,
+            quit_requested: false,
+            control_collapsed: std::collections::HashSet::new(),
+            props_open: false,
         }
     }
 
@@ -1014,6 +1038,60 @@ impl App {
         if let Some(idx) = self.flat.iter().position(|s| s.harness_type == group) {
             self.cursor = idx;
             self.fetch_current();
+        }
+    }
+
+    /// ADR-4:折叠/展开某组(toggle)。header 点击或键盘 toggle 调用。
+    /// 在 control_collapsed HashSet 里增/删组名;draw_control 读此判展开态。
+    pub fn toggle_group(&mut self, group: &str) {
+        if !self.control_collapsed.insert(group.to_string()) {
+            // insert 返 false = 已存在 → 移除(展开)。
+            self.control_collapsed.remove(group);
+        }
+    }
+
+    /// ADR-3:`i`(顶栏右)开 props 弹窗(替代常驻「属性」tab)。
+    /// 置 props_open=true;render 据此画 props modal;esc/enter 关。
+    /// ponytail: props 内容暂复用 help 弹窗样式(render 侧 gate),待节点 B 接 props 组件。
+    pub fn open_props(&mut self) {
+        self.props_open = true;
+        self.open_popup(
+            Popup::centered("props", " props ", vec![], 60, 16),
+        );
+    }
+
+    /// ADR-7:输入历史 push(发送 turn 后调)。原生 Vec 兜底(InputHistory 组件待注册)。
+    pub fn push_history(&mut self, msg: &str) {
+        if !msg.is_empty() {
+            self.input_history.push(msg.to_string());
+            self.history_cursor = None; // 回到新输入态
+        }
+    }
+
+    /// ADR-7:历史 ↑(上一条)。None 时从末条开始;到首条停。
+    pub fn history_prev(&mut self) -> Option<&str> {
+        if self.input_history.is_empty() {
+            return None;
+        }
+        let idx = match self.history_cursor {
+            None => self.input_history.len() - 1, // 首次从末条开始
+            Some(0) => return None,               // 已到首条,停(不越界)
+            Some(i) => i - 1,                      // i >= 1,saturate safety
+        };
+        self.history_cursor = Some(idx);
+        self.input_history.get(idx).map(|s| s.as_str())
+    }
+
+    /// ADR-7:历史 ↓(下一条)。到末条后回 None(清空输入栏写新输入)。
+    pub fn history_next(&mut self) -> Option<&str> {
+        let idx = self.history_cursor?;
+        let next = idx + 1;
+        if next >= self.input_history.len() {
+            self.history_cursor = None;
+            None
+        } else {
+            self.history_cursor = Some(next);
+            self.input_history.get(next).map(|s| s.as_str())
         }
     }
 

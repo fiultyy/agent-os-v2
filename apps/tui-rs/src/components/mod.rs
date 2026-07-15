@@ -15,7 +15,9 @@
 
 pub mod anchor;
 pub mod control;
+pub mod input_history;
 pub mod markdown;
+pub mod mentions;
 pub mod mouse;
 pub mod popup;
 pub mod position;
