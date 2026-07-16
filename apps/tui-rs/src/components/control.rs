@@ -188,15 +188,10 @@ pub fn render_turn_stream(evs: &[ObserveEvent]) -> Vec<Line<'static>> {
             Some(g) => g,
             None => continue,
         };
-        // turn 间空行分隔(首个 turn 前不加)。
+        // turn 间纯空行分隔(首个 turn 前不加)。不加 turn 标识,干净。
         if i > 0 {
             out.push(Line::raw(""));
         }
-        // 轻量 turn 头:只显序号(── turn N ──),不显内部 tick_id。
-        out.push(Line::from(Span::styled(
-            format!("── turn {} ──", i + 1),
-            Style::default().fg(Color::DarkGray),
-        )));
 
         // 2) user cell:首个 tick_started 的 request。
         let mut user_rendered = false;
