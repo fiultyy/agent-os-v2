@@ -12,9 +12,19 @@
 
 use ratatui::{
     layout::Rect,
+    style::{Color, Modifier, Style},
+    text::Span,
     widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
     Frame,
 };
+
+/// 边框模式:None=无边框直铺;Top=顶部描边+bg(与 region_block 视觉一致);Full=全边框。
+/// IT4:chat 从 bordered(bool) 升级为 border_mode,与 region_block 的 TOP+bg 描边统一。
+pub enum BorderMode {
+    None,
+    Top,
+    Full,
+}
 
 /// 可滚动视图:内容 + 偏移 + wrap/trim。render 画 Paragraph(scroll) + Scrollbar。
 pub struct ScrollView {
@@ -22,13 +32,18 @@ pub struct ScrollView {
     pub offset: usize,
     pub wrap: bool,
     pub trim: bool,
-    /// true=Block 全边框(默认);false=无边框,内容直铺 area(ADR-5:chat 无边框省 2 行/列)。
+    /// true=Block 全边框;false=无边框,内容直铺 area(ADR-5:chat 无边框省 2 行/列)。
+    /// IT4:border_mode 优先;bordered 保留作回退(既有调用 / widgets_demo)。
     pub bordered: bool,
+    /// IT4 新:None/Top/Full 三态。None 时回退到 bordered 语义(向后兼容)。
+    pub border_mode: Option<BorderMode>,
+    /// Top/Full 模式的标题(可选)。
+    pub title: Option<String>,
 }
 
 impl ScrollView {
     pub fn new(lines: Vec<ratatui::text::Line<'static>>) -> Self {
-        Self { lines, offset: 0, wrap: true, trim: false, bordered: true }
+        Self { lines, offset: 0, wrap: true, trim: false, bordered: true, border_mode: None, title: None }
     }
     pub fn wrap(mut self, w: bool) -> Self {
         self.wrap = w;
@@ -40,6 +55,16 @@ impl ScrollView {
     }
     pub fn bordered(mut self, b: bool) -> Self {
         self.bordered = b;
+        self
+    }
+    /// IT4:设 Top/Full/None 边框模式(优先于 bordered)。Top = 顶线 + bg + 可选标题,
+    /// 与 render::region_block 视觉一致(Black bg + DarkGray 顶线 + Cyan bold 标题)。
+    pub fn border_mode(mut self, m: BorderMode) -> Self {
+        self.border_mode = Some(m);
+        self
+    }
+    pub fn title<S: Into<String>>(mut self, t: S) -> Self {
+        self.title = Some(t.into());
         self
     }
     pub fn set_content(&mut self, lines: Vec<ratatui::text::Line<'static>>) {
@@ -66,11 +91,34 @@ impl ScrollView {
     pub fn page_up(&mut self, viewport: usize) {
         self.scroll_up(viewport.max(1));
     }
+    /// IT4:滚到底部(offset=total-1)。do_turn 发送后 + tail 跟随调用。
+    pub fn scroll_to_bottom(&mut self) {
+        self.offset = self.total().saturating_sub(1);
+    }
 
-    /// 渲染:bordered 时画 Block 全边框 + Paragraph(scroll+wrap) + 右侧 Scrollbar;
-    /// 否则不画 Block,inner=area 直接渲染 Paragraph + Scrollbar。
+    /// 渲染:按 border_mode(None 回退 bordered)画 Block(Top=顶线+bg+标题 / Full=全边框 /
+    /// None=无边框直铺)+ Paragraph(scroll+wrap) + 右侧 Scrollbar。
     pub fn render(&mut self, f: &mut Frame, area: Rect) {
-        let inner = if self.bordered {
+        // mode=None 回退 bordered 兼容(既有 widgets_demo / observe_scroll.bordered=false)。
+        let use_top = matches!(self.border_mode, Some(BorderMode::Top));
+        let use_full = matches!(self.border_mode, Some(BorderMode::Full))
+            || (self.border_mode.is_none() && self.bordered);
+        let inner = if use_top {
+            // 与 render::region_block 同款:DarkGray 顶线 + Black bg + Cyan bold 标题。
+            let mut block = Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(Color::DarkGray))
+                .style(Style::default().bg(Color::Black));
+            if let Some(t) = &self.title {
+                block = block.title(ratatui::text::Line::from(Span::styled(
+                    t.clone(),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                )));
+            }
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+            inner
+        } else if use_full {
             let block = Block::default().borders(Borders::ALL);
             let inner = block.inner(area);
             f.render_widget(block, area);
@@ -140,5 +188,32 @@ mod tests {
         // 内容缩短时 clamp,不越界。
         v.set_content(vec![Line::from("a"); 3]);
         assert_eq!(v.offset, 2, "offset clamps to new total-1");
+    }
+
+    /// IT4:scroll_to_bottom 锁到 total-1(do_turn 发送后 + tail 跟随调用)。
+    #[test]
+    fn scroll_to_bottom_locks_max() {
+        let mut v = ScrollView::new(vec![Line::from("a"); 30]);
+        v.scroll_down(3);
+        assert_eq!(v.offset, 3);
+        v.scroll_to_bottom();
+        assert_eq!(v.offset, 29, "locks to total-1");
+        // 空内容安全:total=0 → saturating_sub → 0。
+        let mut e = ScrollView::new(vec![]);
+        e.scroll_to_bottom();
+        assert_eq!(e.offset, 0);
+    }
+
+    /// IT4:border_mode/title builder 链式设置。
+    #[test]
+    fn border_mode_title_builders() {
+        let v = ScrollView::new(vec![])
+            .border_mode(BorderMode::Top)
+            .title(" 对话 ");
+        assert!(matches!(v.border_mode, Some(BorderMode::Top)));
+        assert_eq!(v.title.as_deref(), Some(" 对话 "));
+        // None 回退 bordered=false → 直铺;bordered=true → 全边框。
+        let n = ScrollView::new(vec![]).bordered(false);
+        assert!(n.border_mode.is_none() && !n.bordered);
     }
 }

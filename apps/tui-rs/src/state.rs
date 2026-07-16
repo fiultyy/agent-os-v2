@@ -520,6 +520,9 @@ pub struct App {
     pub control_split: HSplit,
     /// Control 对话区 ScrollView(turn stream 滚动)。
     pub control_chat_scroll: ScrollView,
+    /// IT4:chat tail 跟随。true=有新事件自动滚底;do_turn 发送置 true,PgUp/上滚置 false,
+    /// PgDn/scroll_to_bottom 置 true。默认 true(进 Control 即跟最新)。
+    pub chat_follow_tail: bool,
     /// Control 区域缓存(draw 算 → handle mouse drag hit 用)。
     pub control_area: Rect,
     /// 鼠标正在拖 control 主分隔条(左|右 HSplit bar)。
@@ -616,7 +619,10 @@ impl App {
             observe_area: Rect::default(),
             observe_dragging: false,
             control_split: HSplit::new(22),
-            control_chat_scroll: ScrollView::new(vec![]),
+            control_chat_scroll: ScrollView::new(vec![])
+                .border_mode(crate::components::scrollbar::BorderMode::Top)
+                .title(" 对话 "),
+            chat_follow_tail: true,
             control_area: Rect::default(),
             control_h_dragging: false,
             control_right_tabs: TabBar::new(vec![
@@ -728,6 +734,20 @@ impl App {
         }
         // 发送后清空输入栏(Enter/t 发送即清,Cursor 式 chat 语义)。
         self.turn_msg.clear();
+        // IT4:发送后聚焦最新——置 tail=true(后续 drain_ws/render 跟随滚底)+ 立即滚底兜底。
+        self.chat_follow_tail = true;
+        self.control_chat_scroll.scroll_to_bottom();
+    }
+
+    /// IT4:PgUp/PgDn 翻页步长——近似 chat body 可视高度(term 高 - status/tabs/input 外层 ≈ 一半)。
+    /// ponytail: 粗估够用,精确需 body_area 缓存(无独立字段);step 偏大/小只影响翻页手感。
+    fn page_viewport(&self) -> usize {
+        (self.size.1 as usize / 2).max(1)
+    }
+    /// IT4:chat offset 是否在接近底部(tail 跟随判定:PgDn 滚到近底→重新跟尾)。
+    fn near_bottom(&self) -> bool {
+        let total = self.control_chat_scroll.lines.len();
+        total <= 1 || self.control_chat_scroll.offset + self.page_viewport() >= total.saturating_sub(1)
     }
 
     /// spawn 多实例(s 键)。claude-code:POST /spawn 同 sid 多 PTY;
@@ -1487,6 +1507,18 @@ impl App {
                 KeyCode::Tab | KeyCode::BackTab => {
                     // 焦点导航键 fall through(打字时仍可 Tab 切焦点)。
                 }
+                KeyCode::PageDown => {
+                    // IT4:打字时 PgDn 滚 chat(到接近底→重新跟尾)。
+                    self.control_chat_scroll.page_down(self.page_viewport());
+                    if self.near_bottom() { self.chat_follow_tail = true; }
+                    return false;
+                }
+                KeyCode::PageUp => {
+                    // IT4:打字时 PgUp 滚 chat(脱离跟尾,读历史)。
+                    self.control_chat_scroll.page_up(self.page_viewport());
+                    self.chat_follow_tail = false;
+                    return false;
+                }
                 _ => {
                     // 编辑键(Backspace/Left/Right/Char/Home/End/...)交 textarea 处理。
                     use crate::components::textarea::TextareaOp;
@@ -1510,6 +1542,25 @@ impl App {
             }
         }
         match k.code {
+            // IT4:PgDn/PgUp 滚动。Control=chat 卷轴;Observe=turn stream。
+            KeyCode::PageDown => {
+                if self.panel == Panel::Observe {
+                    self.observe_scroll.page_down(self.page_viewport());
+                } else {
+                    self.control_chat_scroll.page_down(self.page_viewport());
+                    if self.near_bottom() { self.chat_follow_tail = true; }
+                }
+                false
+            }
+            KeyCode::PageUp => {
+                if self.panel == Panel::Observe {
+                    self.observe_scroll.page_up(self.page_viewport());
+                } else {
+                    self.control_chat_scroll.page_up(self.page_viewport());
+                    self.chat_follow_tail = false;
+                }
+                false
+            }
             KeyCode::Char('q') => true,
             KeyCode::Tab => {
                 self.tabbar.next();
@@ -2557,4 +2608,58 @@ mod tests {
         app.handle_base_mouse(&m);
         assert!(app.popups.iter().any(|p| p.id == "new"), "id=300 → new 弹窗");
     }
+
+    /// IT4 ②③:do_turn 发送后 chat_follow_tail=true 且 offset 滚底。
+    /// do_turn 触发网络(fetch_current 等),ws=None/offline graceful,不影响 tail/scroll 副作用。
+    #[test]
+    fn do_turn_sets_tail_and_scrolls_bottom() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        // 预灌 chat 内容,offset 在顶。
+        app.control_chat_scroll.set_content(vec![ratatui::text::Line::from("a"); 40]);
+        app.control_chat_scroll.offset = 0;
+        app.chat_follow_tail = false;
+        app.turn_msg.clear();
+        app.do_turn();
+        assert!(app.chat_follow_tail, "do_turn sets tail=true");
+        assert_eq!(app.control_chat_scroll.offset, 39, "scroll_to_bottom locks to total-1");
+    }
+
+    /// IT4 ③:PgUp 脱离跟尾(tail=false),PgDn 近底重新跟尾(tail=true)。normal 模式。
+    #[test]
+    fn pageup_breaks_tail_pagedown_near_bottom_refollows() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        app.insert_mode = false;
+        app.control_chat_scroll.set_content(vec![ratatui::text::Line::from("a"); 100]);
+        app.control_chat_scroll.scroll_to_bottom(); // 起点:在底,tail=true
+        assert!(app.chat_follow_tail);
+        // PgUp:脱离跟尾。
+        app.handle_base_key(&KeyEvent::new(KeyCode::PageUp, crosysterm_keymods()));
+        assert!(!app.chat_follow_tail, "PgUp breaks tail");
+        assert!(app.control_chat_scroll.offset < 99, "PgUp moved offset up");
+        // 手动滚回近底后 PgDn:重新跟尾。
+        app.control_chat_scroll.scroll_to_bottom();
+        app.handle_base_key(&KeyEvent::new(KeyCode::PageDown, crosysterm_keymods()));
+        assert!(app.chat_follow_tail, "PgDn near bottom refollows tail");
+    }
+
+    /// IT4 ③:insert 模式 PgUp/PgDn 也能滚 chat(打字时不被 _ 分支吞)。
+    #[test]
+    fn insert_mode_pageup_pagedown_scroll_chat() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        app.insert_mode = true;
+        app.control_chat_scroll.set_content(vec![ratatui::text::Line::from("a"); 100]);
+        app.control_chat_scroll.scroll_to_bottom();
+        let before = app.control_chat_scroll.offset;
+        app.handle_base_key(&KeyEvent::new(KeyCode::PageUp, crosysterm_keymods()));
+        assert!(app.control_chat_scroll.offset < before, "insert PgUp scrolls chat up");
+        assert!(!app.chat_follow_tail);
+    }
+
+    fn crosysterm_keymods() -> crossterm::event::KeyModifiers {
+        crossterm::event::KeyModifiers::empty()
+    }
 }
+
