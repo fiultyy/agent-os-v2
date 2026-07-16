@@ -1136,7 +1136,17 @@ impl App {
             Some(NewKind::Claw) => {
                 let agent = self.new_candidates.get(self.new_idx).cloned()
                     .unwrap_or_else(|| "main".to_string());
-                if let Some(sid) = create_session("claw", Some(&agent)) {
+                // claw "new session" = 为 agent 开新对话(唯一 conv)。裸 agent 名 →
+                // orche 固定 agent:<a>:main(routes.py),同 agent 已存在 → exists 短路不
+                // 新建(create_session 不查 status → focus 到旧 session)。故生成唯一 conv
+                // key(agent:<a>:<ts>),orche 见 ":" 用之 → 必新建。
+                let agent_base = agent.split(':').nth(1).unwrap_or(&agent);
+                let conv = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| format!("t{:x}", d.as_secs() % 0x1000000))
+                    .unwrap_or_else(|_| "new".to_string());
+                let key = format!("agent:{}:{}", agent_base, conv);
+                if let Some(sid) = create_session("claw", Some(&key)) {
                     self.turn_status = Some(format!("created claw session: {}", trunc(&sid, 16)));
                     self.close_popup("new");
                     self.new_popup = None;
@@ -1503,19 +1513,16 @@ impl App {
 
     /// IT2 节点 C:开 new 弹窗(选 claw/cc → picker → 创建)。
     pub fn open_new_popup(&mut self) {
-        self.new_popup = None;
-        self.new_candidates.clear();
+        // 默认选 claw + 预 fetch:tui-popup 首次 render 按初始 body 固定 area,若初始
+        // body 小(None 态 ~3 行)area 固定小,后续按 c 选 claw body 增到全部候选 area
+        // 不扩 → 只显顶部第一个(如 claw-02)。故打开即默认 claw + fetch,首次 render
+        // body(update_action_popup_bodies 在 render_popup 前填)就含全部候选 → area 足够。
+        // 用户仍可按 d 切 cc(body 行数 ≤ claw 时不截断)。
+        self.new_popup = Some(NewKind::Claw);
+        self.new_candidates = fetch_claw_agents();
         self.new_idx = 0;
         self.new_cc_input.clear();
-        self.open_popup(Popup::centered(
-            "new", " new session ",
-            vec![
-                "c) claw  d) claude-code".to_string(),
-                "选后 j/k 浏览 · enter 确认 · esc 关".to_string(),
-                "(cc 可键入 cwd)".to_string(),
-            ],
-            52, 8,
-        ));
+        self.open_popup(Popup::centered("new", " new session ", vec![], 56, 22));
     }
 
     /// ADR-7:输入历史 push(发送 turn 后调)。原生 Vec 兜底(InputHistory 组件待注册)。
@@ -2788,7 +2795,10 @@ mod tests {
         app.insert_mode = false;
         app.handle_base_key(&KeyEvent::new(KeyCode::Char('n'), crossterm::event::KeyModifiers::empty()));
         assert!(app.popups.iter().any(|p| p.id == "new"), "n → new 弹窗入栈");
-        assert!(app.new_popup.is_none(), "初始 new_popup=None(未选类型)");
+        // 默认 claw + 预 fetch:首次 render body 即含全部候选(修 tui-popup area 首次
+        // 固定——初始小 body 致 area 小,后续选 claw body 增 area 不扩只显顶部 claw-02)
+        assert_eq!(app.new_popup, Some(NewKind::Claw), "默认 claw");
+        assert!(!app.new_candidates.is_empty(), "预 fetch(失败 fallback main)");
     }
 
     /// n(insert 模式)→ 打字进 textarea,不开弹窗(n 被顶 capture 消费)。
