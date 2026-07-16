@@ -740,9 +740,12 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
 
     // ── 右区(IT6-③ 状态栏整合进 input):右TabBar(顶线) + body(按 tab) + 输入+状态 ──
     // 去掉独立 2 行 StatusBar,orche●/session/last 并入底部输入区省空间,右区 = tabs+body+input。
+    // IT7 ①:输入区高度动态 = base 3(状态+输入+提示) + max(0, textarea.line_count()-1) 额外行,cap 8。
+    let lc = app.textarea.line_count() as u16;
+    let input_h = (3 + lc.saturating_sub(1)).min(8);
     let right_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(1), Constraint::Length(4)])
+        .constraints([Constraint::Length(2), Constraint::Min(1), Constraint::Length(input_h)])
         .split(right);
     let [tabs_area, body_area, input_area] = [right_chunks[0], right_chunks[1], right_chunks[2]];
 
@@ -844,33 +847,53 @@ fn render_props_lines(app: &App) -> Vec<Line<'static>> {
 
 // ═══ Home 占位面板 ════════════════════════════════════════════════
 
-/// Home dashboard 三块真数据(ADR-1):session 总览 + flow 状态 + cursor 摘要。
-/// read-only 读 App 业务字段,用 position::percent_line 显活跃指标。
+/// Home dashboard 三张结构化卡片(ADR-5 region_block:TOP 描边 + bg + cyan 标题)。
+/// 布局:[Sessions 50% | Flows 50%](上半) + [Cursor Session 全宽](下半)。
+/// read-only 读 App 业务字段。cursor 所在 harness 组高亮。
 pub fn draw_home(f: &mut Frame, area: Rect, app: &App) {
     use crate::components::position;
+    use crate::state::harness_tag;
 
-    // ── block 1: session 总览(harness 分组 + 多实例 ×N)──
-    let mut session_lines: Vec<Line> = vec![Line::from(Span::styled(
-        " Sessions · harness 分组".to_string(),
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-    ))];
+    // 上半左右分 [Sessions | Flows],下半全宽 [Cursor]。
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(7)])
+        .split(area);
+    let top = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(rows[0]);
 
+    // ── 卡片 1(左上):Sessions · harness 分组,色块 + 组名 + 计数 + multi;cursor 组高亮 ──
+    let cursor_ht = app.flat.get(app.cursor).map(|s| s.harness_type.as_str()).unwrap_or("");
     let mut harnesses: Vec<&String> = app.sessions.sessions_by_harness.keys().collect();
     harnesses.sort();
     let total_sessions = app.flat.len();
+    let mut session_lines: Vec<Line> = Vec::new();
     for hs in &harnesses {
         let n = app.sessions.sessions_by_harness.get(*hs).map(|v| v.len()).unwrap_or(0);
-        // 多实例标记:该 harness 下有多少 session 是 ×N 多实例。
         let multi_count = app.sessions.sessions_by_harness.get(*hs).map(|ss| {
             ss.iter().filter(|s| app.instance_count(&s.harness_type, &s.session_id) >= 2).count()
         }).unwrap_or(0);
         let multi_tag = if multi_count > 0 {
-            format!("  (×N multi: {})", multi_count)
+            format!("  ×{} multi", multi_count)
         } else { String::new() };
-        session_lines.push(Line::from(vec![
-            Span::styled(format!("  ▾ {:<14}", hs), Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD)),
+        let (tag, color) = harness_tag(hs);
+        let is_cur = *hs == cursor_ht;
+        let mut spans = vec![
+            Span::styled(format!(" {} ", tag), Style::default().fg(Color::Black).bg(color).add_modifier(Modifier::BOLD)),
+            Span::raw(" "),
+            Span::styled(
+                format!("{:<14}", hs),
+                Style::default().fg(if is_cur { Color::Yellow } else { Color::White })
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(format!(" {} sessions{}", n, multi_tag)),
-        ]));
+        ];
+        if is_cur {
+            spans.push(Span::styled("  ◀ cursor", Style::default().fg(Color::Yellow)));
+        }
+        session_lines.push(Line::from(spans));
     }
     if total_sessions == 0 {
         session_lines.push(Line::from(Span::styled(
@@ -883,8 +906,12 @@ pub fn draw_home(f: &mut Frame, area: Rect, app: &App) {
         if total_sessions > 0 { Some(app.cursor) } else { None },
         total_sessions,
     ));
+    f.render_widget(
+        Paragraph::new(session_lines).block(region_block(" Sessions · harness 分组 ")),
+        top[0],
+    );
 
-    // ── block 2: flow 状态(running/completed/failed 计数)──
+    // ── 卡片 2(右上):Flows · 4 状态计数(running/completed/failed/pending)+ total ──
     let mut running = 0;
     let mut completed = 0;
     let mut failed = 0;
@@ -898,36 +925,40 @@ pub fn draw_home(f: &mut Frame, area: Rect, app: &App) {
         }
     }
     let flow_lines = vec![
-        Line::from(Span::styled(
-            " Flows · 状态".to_string(),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        )),
         Line::from(vec![
-            Span::styled("  ● running   ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-            Span::raw(format!("{}", running)),
+            Span::styled(" ● ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled("running  ", Style::default().fg(Color::Green)),
+            Span::styled(format!("{}", running), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(vec![
-            Span::styled("  ✓ completed ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-            Span::raw(format!("{}", completed)),
+            Span::styled(" ✓ ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            Span::styled("completed ", Style::default().fg(Color::Magenta)),
+            Span::styled(format!("{}", completed), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(vec![
-            Span::styled("  ✗ failed    ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-            Span::raw(format!("{}", failed)),
+            Span::styled(" ✗ ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled("failed   ", Style::default().fg(Color::Red)),
+            Span::styled(format!("{}", failed), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(vec![
-            Span::styled("  ○ pending   ", Style::default().fg(Color::Yellow)),
-            Span::raw(format!("{}", pending)),
+            Span::styled(" ○ ", Style::default().fg(Color::Yellow)),
+            Span::styled("pending  ", Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{}", pending), Style::default().fg(Color::White)),
         ]),
         Line::raw(""),
         Line::from(vec![
-            Span::styled("  total ", Style::default().fg(Color::DarkGray)),
+            Span::styled(" total ", Style::default().fg(Color::DarkGray)),
             Span::styled(format!("{}", app.flows.len()), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
         ]),
     ];
+    f.render_widget(
+        Paragraph::new(flow_lines).block(region_block(" Flows · 状态 ")),
+        top[1],
+    );
 
-    // ── block 3: cursor session 摘要(最近 turn_status + 事件数)──
+    // ── 卡片 3(下半全宽):Cursor session 摘要(2 行紧凑:sid/harness/实例 + events/last)──
     let cur_session = app.flat.get(app.cursor);
-    let cur_sid = cur_session.map(|s| trunc(&s.session_id, 24)).unwrap_or_else(|| "(无)".to_string());
+    let cur_sid = cur_session.map(|s| trunc(&s.session_id, 30)).unwrap_or_else(|| "(无)".to_string());
     let cur_ht = cur_session.map(|s| s.harness_type.as_str()).unwrap_or("—");
     let cur_key = cur_session.map(|s| format!("{}/{}", s.harness_type, s.session_id)).unwrap_or_default();
     let event_count = app.events.get(&cur_key).map(|e| e.len()).unwrap_or(0);
@@ -935,42 +966,26 @@ pub fn draw_home(f: &mut Frame, area: Rect, app: &App) {
     let turn_disp = app.turn_status.clone().unwrap_or_else(|| "(未触发)".to_string());
 
     let cursor_lines = vec![
-        Line::from(Span::styled(
-            " Cursor session".to_string(),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        )),
         Line::from(vec![
-            Span::styled("  session  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(" sid     ", Style::default().fg(Color::DarkGray)),
             Span::styled(cur_sid, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("  ({})", cur_ht), Style::default().fg(Color::DarkGray)),
-        ]),
-        Line::from(vec![
-            Span::styled("  events   ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{}", event_count), Style::default().fg(Color::Yellow)),
+            Span::styled(format!("   ({})", cur_ht), Style::default().fg(Color::DarkGray)),
             Span::styled(
-                if inst_n >= 2 { format!("  ×{} instances", inst_n) } else { String::new() },
+                if inst_n >= 2 { format!("   ×{} instances", inst_n) } else { String::new() },
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
-            Span::styled("  last turn", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!(" {}", trunc(&turn_disp, 50)), Style::default().fg(Color::White)),
+            Span::styled(" events  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{}", event_count), Style::default().fg(Color::Yellow)),
+            Span::styled("   last ", Style::default().fg(Color::DarkGray)),
+            Span::styled(trunc(&turn_disp, 40), Style::default().fg(Color::White)),
         ]),
     ];
-
-    // 三块布局:左右分栏(session 总览 | flow 状态)+ 底部 cursor 摘要全宽。
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(7)])
-        .split(cols[0]);
-
-    f.render_widget(Paragraph::new(session_lines), rows[0]);
-    f.render_widget(Paragraph::new(flow_lines), cols[1]);
-    f.render_widget(Paragraph::new(cursor_lines), rows[1]);
+    f.render_widget(
+        Paragraph::new(cursor_lines).block(region_block(" Cursor Session ")),
+        rows[1],
+    );
 }
 
 // ═══ 分层 draw:顶栏 TabBar → 主区 panel → 底栏 hint → 弹窗栈 → MouseCursor ═══
@@ -1056,46 +1071,94 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     for p in app.popups.iter_mut() {
         components::render_popup(f, area, p);
     }
+    // IT7 ②:new 弹窗渲染后 area 已回填 → 注册可点击区到 popup_clickmap。
+    register_new_popup_clickmap(app);
 
     // 帧末:鼠标光标(ADR-2:最后渲染,黑底黄字高亮)。
     app.mouse.render(f);
 }
 
-/// IT2 节点 C:new/delete 弹窗 body 实时刷新(反映 picker 选中行 / cc 自由输入)。
+/// IT2 节点 C / IT7 ②:new 弹窗 body 实时刷新(反映 picker 选中行 / cc 自由输入)。
 /// 在 render_popup 之前调,改 top_popup body 让用户看到当前选中。
+/// IT7 ②:统一布局——行 0 = [claw]/[cc] harness 按钮,行末 = [Create]/[Cancel] 按钮,
+/// 中间为 picker 候选行。clickmap id 见 register_new_popup_clickmap。
 fn update_action_popup_bodies(app: &mut App) {
-    // new 弹窗:按 NewKind 渲染 picker 列表 + 提示。
     let is_new_top = app.popups.last().map(|p| p.id == "new").unwrap_or(false);
     if is_new_top {
-        let mut lines: Vec<String> = match app.new_popup {
-            None => vec![
-                "c) claw  d) claude-code".to_string(),
-                "选后 j/k 浏览 · enter 确认 · esc 关".to_string(),
-                "(cc 可键入 cwd)".to_string(),
-            ],
+        // 行 0:harness 选择按钮(可点击 700/701)。已选高亮 [x],未选 [ ]。
+        let claw_mark = if matches!(app.new_popup, Some(NewKind::Claw)) { "[x]claw" } else { "[ ]claw" };
+        let cc_mark = if matches!(app.new_popup, Some(NewKind::Cc)) { "[x]cc" } else { "[ ]cc" };
+        let mut lines: Vec<String> = vec![format!(" {}  {}   (或键 c/d)", claw_mark, cc_mark)];
+        match app.new_popup {
+            None => {
+                lines.push("(选类型后显候选)".to_string());
+            }
             Some(NewKind::Claw) => {
-                let mut v = vec!["claw agents:".to_string()];
+                lines.push("claw agents:".to_string());
                 for (i, a) in app.new_candidates.iter().enumerate() {
                     let mark = if i == app.new_idx { "▸" } else { " " };
-                    v.push(format!("{} {}", mark, a));
+                    lines.push(format!("{} {}", mark, a));
                 }
-                v.push("enter 创建 · esc 关".to_string());
-                v
             }
             Some(NewKind::Cc) => {
-                let mut v = vec![format!("cc cwd: [{}]", app.new_cc_input)];
+                lines.push(format!("cc cwd: [{}]", app.new_cc_input));
                 for (i, c) in app.new_candidates.iter().enumerate() {
                     let mark = if i == app.new_idx { "▸" } else { " " };
-                    v.push(format!("{} {}", mark, c));
+                    lines.push(format!("{} {}", mark, c));
                 }
-                v.push("enter 创建(输入优先)· esc 关".to_string());
-                v
             }
-        };
+        }
+        // 行末:Create / Cancel 按钮(可点击 790/791)。
+        lines.push(" [Create]  [Cancel]".to_string());
         if let Some(p) = app.popups.last_mut() {
-            // 保持弹窗高度容纳候选列表(候选数 + 3 行提示,clamp 6..20)。
             p.height = (lines.len() as u16 + 4).clamp(8, 22);
             p.body = std::mem::take(&mut lines);
         }
+    }
+}
+
+/// IT7 ②:new 弹窗渲染后注册可点击区到 popup_clickmap。
+/// 弹窗 area 已回填(tui-popup render_ref 后);body 行 i 位于 area.y+1+i(跳 title 边框)。
+/// id: 700=claw 701=cc 710+i=claw agent 720+i=cc cwd 790=Create 791=Cancel。
+fn register_new_popup_clickmap(app: &mut App) {
+    app.popup_clickmap.clear();
+    let is_new_top = app.popups.last().map(|p| p.id == "new").unwrap_or(false);
+    if !is_new_top {
+        return;
+    }
+    let Some(area) = app.popups.last().and_then(|p| p.state.area().as_ref().copied()) else {
+        return;
+    };
+    let inner_x = area.x + 1; // 跳左竖边框
+    let inner_w = area.width.saturating_sub(2);
+    // body 行索引(相对弹窗):row 0 = harness 按钮,1 = header,2.. = 候选,末行 = Create/Cancel。
+    let body = app.popups.last().map(|p| p.body.clone()).unwrap_or_default();
+    let body_len = body.len();
+    let row_y = |i: usize| -> u16 { area.y + 1 + i as u16 }; // title 占顶边框,首行 = area.y+1
+    // 行 0:[x]claw  [x]cc —— 按文本长度切两段(claw 段前半,cc 段后半)。
+    if body_len >= 1 {
+        let y = row_y(0);
+        app.popup_clickmap.register(Rect::new(inner_x, y, 8, 1), 700); // [x]claw
+        app.popup_clickmap.register(Rect::new(inner_x + 9, y, 6, 1), 701); // [x]cc
+    }
+    // 候选行:header 在 row 1,候选从 row 2 起。claw→710+i,cc→720+i。
+    let cand_start = 2usize;
+    for (i, _line) in body.iter().enumerate().skip(cand_start) {
+        if i + 1 >= body_len {
+            break; // 末行是 Create/Cancel
+        }
+        let y = row_y(i);
+        let id = match app.new_popup {
+            Some(NewKind::Claw) => 710 + (i - cand_start),
+            Some(NewKind::Cc) => 720 + (i - cand_start),
+            None => continue,
+        };
+        app.popup_clickmap.register(Rect::new(inner_x, y, inner_w, 1), id);
+    }
+    // 末行:[Create] [Cancel]。
+    if body_len >= 1 {
+        let last_y = row_y(body_len - 1);
+        app.popup_clickmap.register(Rect::new(inner_x + 1, last_y, 8, 1), 790); // [Create]
+        app.popup_clickmap.register(Rect::new(inner_x + 11, last_y, 8, 1), 791); // [Cancel]
     }
 }

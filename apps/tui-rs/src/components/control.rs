@@ -90,20 +90,42 @@ pub fn status_spans(app: &App) -> Vec<Span<'static>> {
 pub fn render_input_bar(f: &mut Frame, area: Rect, app: &mut App) {
     // 行 0:状态(orche●/session/last),复用 status_spans 单行。
     let status_line = Line::from(status_spans(app));
-    // 行 1:输入(❯ + turn_msg + ▌ 光标)。
-    let msg_line = Line::from(vec![
-        Span::styled(" ❯ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::styled(app.turn_msg.clone(), Style::default().fg(Color::White)),
-        Span::styled("▌", Style::default().fg(Color::Cyan).add_modifier(Modifier::SLOW_BLINK)),
-    ]);
-    // 行 2:模式提示。
+    // IT7 ①:输入多行(按 '\n' 拆成多行 Line)。❯ 前缀在首行,光标 ▌ 在末行尾。
+    let mut input_lines: Vec<Line> = Vec::new();
+    let text = app.textarea.text();
+    for (i, raw) in text.split('\n').enumerate() {
+        if i == 0 {
+            input_lines.push(Line::from(vec![
+                Span::styled(" ❯ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled(raw.to_string(), Style::default().fg(Color::White)),
+            ]));
+        } else {
+            input_lines.push(Line::from(vec![
+                Span::styled("   ", Style::default().fg(Color::Cyan)),
+                Span::styled(raw.to_string(), Style::default().fg(Color::White)),
+            ]));
+        }
+    }
+    // 末行追加光标 ▌(若 text 为空,首行也要有 ❯ + ▌)。
+    if input_lines.is_empty() {
+        input_lines.push(Line::from(vec![
+            Span::styled(" ❯ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        ]));
+    }
+    let last = input_lines.last_mut().unwrap();
+    last.spans.push(Span::styled("▌", Style::default().fg(Color::Cyan).add_modifier(Modifier::SLOW_BLINK)));
+
+    // 行 末:模式提示。
     let mode_hint = if app.insert_mode {
-        "  [enter 发送 · esc 退快捷键]"
+        "  [enter 发送 · shift/alt+enter 换行 · esc 退快捷键]"
     } else {
         "  [i 输入 · t/s/r/e/f/G/D/R 动作]"
     };
     let mode_line = Line::from(Span::styled(mode_hint, Style::default().fg(Color::DarkGray)));
-    f.render_widget(Paragraph::new(vec![status_line, msg_line, mode_line]), area);
+    let mut all = vec![status_line];
+    all.extend(input_lines);
+    all.push(mode_line);
+    f.render_widget(Paragraph::new(all), area);
 }
 
 /// TurnSeparator:turn 之间视觉分隔(── turn N ──,只显序号,不显内部 tick_id)。独立 fn(可复用)。
@@ -305,6 +327,7 @@ mod tests {
             tick_id: tick.to_string(),
             harness_id: "h".to_string(),
             data: d,
+            event_id: String::new(),
         }
     }
 

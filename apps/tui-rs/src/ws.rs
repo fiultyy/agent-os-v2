@@ -60,14 +60,16 @@ pub enum WsMsg {
 }
 
 /// observe broadcast 的 JSON 形状(ObserveEvent.to_dict,见 events.py:48)。
-/// 复用 state.rs ObserveEvent 的字段(event_type/tick_id/harness_id/data);
-/// 额外字段(event_id/session_id/timestamp)serde 忽略(无 deny_unknown_fields)。
+/// 复用 state.rs ObserveEvent 的字段(event_type/tick_id/harness_id/data/event_id);
+/// 额外字段(session_id/timestamp)serde 忽略(无 deny_unknown_fields)。
 #[derive(Deserialize)]
 struct WsPayload {
     event_type: String,
     tick_id: String,
     harness_id: String,
     data: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    event_id: String,
 }
 
 impl From<WsPayload> for ObserveEvent {
@@ -77,6 +79,7 @@ impl From<WsPayload> for ObserveEvent {
             tick_id: p.tick_id,
             harness_id: p.harness_id,
             data: p.data,
+            event_id: p.event_id,
         }
     }
 }
@@ -259,6 +262,7 @@ mod tests {
         assert_eq!(p.data["status"], "success");
         let ev: ObserveEvent = p.into();
         assert_eq!(ev.event_type, "tick_completed");
+        assert_eq!(ev.event_id, "e1", "IT7: event_id 应透传到 ObserveEvent");
     }
 
     #[test]
@@ -279,6 +283,15 @@ mod tests {
         let raw = r#"{"type":"pong"}"#;
         let res: Result<WsPayload, _> = serde_json::from_str(raw);
         assert!(res.is_err(), "pong has no event_type, should fail to parse as WsPayload");
+    }
+
+    /// IT7:测试用 mock——从外部注入 rx(drain_ws 去重测试用)。
+    #[cfg(test)]
+    impl WsManager {
+        pub fn mock(rx: Receiver<WsMsg>) -> Self {
+            let (cmd_tx, _cmd_rx) = mpsc::channel::<WsCmd>();
+            Self { cmd_tx, rx, handle: None }
+        }
     }
 
     #[test]

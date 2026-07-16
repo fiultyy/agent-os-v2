@@ -33,6 +33,8 @@ pub enum AppEvent {
     Tick,
     /// 退出 app。
     Quit,
+    /// IT7 ④:终端 bracketed paste(crossterm Event::Paste)。state 层 insert 到 textarea / 弹窗输入。
+    Paste(String),
 }
 
 /// 轮询一次 crossterm 事件,超时返回 `Tick`。
@@ -44,6 +46,8 @@ pub fn poll_once(interval: Duration) -> AppEvent {
             Ok(Event::Key(k)) => AppEvent::Key(k),
             Ok(Event::Mouse(m)) => AppEvent::Mouse(m),
             Ok(Event::Resize(w, h)) => AppEvent::Resize(w, h),
+            // IT7 ④:bracketed paste(终端进 paste mode 后整段文本一次投递)。
+            Ok(Event::Paste(s)) => AppEvent::Paste(s),
             Ok(_) => AppEvent::Tick,
             Err(_) => AppEvent::Tick,
         }

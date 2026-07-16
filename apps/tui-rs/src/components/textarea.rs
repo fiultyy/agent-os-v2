@@ -61,6 +61,11 @@ impl Textarea {
         &self.text
     }
 
+    /// IT7:cursor byte offset(测试 / state 层行移逻辑读)。
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
     pub fn set_text(&mut self, s: &str) {
         self.text = s.to_string();
         // clamp cursor 到末尾(char 边界)。
@@ -76,6 +81,31 @@ impl Textarea {
     fn insert_char(&mut self, c: char) {
         self.text.insert(self.cursor, c);
         self.cursor += c.len_utf8();
+    }
+
+    /// IT7 ④:插入任意字符串到 cursor(粘贴 / multiline)。cursor 移到末尾(char 边界)。
+    pub fn insert_text(&mut self, s: &str) {
+        if s.is_empty() {
+            return;
+        }
+        self.text.insert_str(self.cursor, s);
+        self.cursor += s.len();
+    }
+
+    /// IT7 ①:逻辑行数 = text 中 '\n' 数 + 1(单行返 1,空返 1)。
+    /// render.rs draw_control 用此算输入区高度(每行 +1,cap 8)。
+    pub fn line_count(&self) -> usize {
+        self.text.matches('\n').count() + 1
+    }
+
+    /// IT7 ①:cursor 所在逻辑行的起点 byte offset(向前找最近的 '\n'+1,行首 =0)。
+    fn line_start(&self) -> usize {
+        self.text[..self.cursor].rfind('\n').map(|i| i + 1).unwrap_or(0)
+    }
+
+    /// IT7 ①:cursor 所在逻辑行的终点 byte offset(向后找最近的 '\n',无则末尾)。
+    fn line_end(&self) -> usize {
+        self.text[self.cursor..].find('\n').map(|i| self.cursor + i).unwrap_or(self.text.len())
     }
 
     /// 删除 cursor 前一个 char(Backspace)。cursor 已在 0 时 no-op。
@@ -136,7 +166,7 @@ impl Textarea {
     /// - Enter:Send(不清 text)。
     /// - Backspace:删前一 char。
     /// - Left/Right:移 cursor。
-    /// - Up/Down:TODO 真实行移;当前 Up=Home,Down=End(单行缓冲近似)。
+    /// - Up/Down:IT7 ① 真实逻辑行移(上一行/下一行行首);首/末行返 None 交调用方(翻历史)。
     /// - Home/End:移到行首/行末。
     /// - Ctrl+V:Paste(占位空串,crossterm 粘贴事件高级特性 defer)。
     pub fn handle_key(&mut self, k: &KeyEvent) -> TextareaOp {
@@ -163,14 +193,26 @@ impl Textarea {
                 TextareaOp::Right
             }
             KeyCode::Up => {
-                // TODO: 真实行移(需多行 buffer + wrap 感知);当前 Up=Home。
-                self.move_home();
-                TextareaOp::Up
+                // IT7 ①:多行行移。cursor 已在第一逻辑行(line_start==0)→ Up(留给调用方翻历史);
+                // 否则移到上一逻辑行行首。简化:Up 不保列(任务规格:上一行行首)。
+                if self.line_start() == 0 {
+                    TextareaOp::None
+                } else {
+                    let prev_line_end = self.text[..self.line_start().saturating_sub(1)]
+                        .rfind('\n').map(|i| i + 1).unwrap_or(0);
+                    self.cursor = prev_line_end;
+                    TextareaOp::Up
+                }
             }
             KeyCode::Down => {
-                // TODO: 真实行移;当前 Down=End。
-                self.move_end();
-                TextareaOp::Down
+                // IT7 ①:cursor 已在最后一逻辑行(line_end==len)→ Down(留给调用方翻历史);
+                // 否则移到下一逻辑行行首。
+                if self.line_end() >= self.text.len() {
+                    TextareaOp::None
+                } else {
+                    self.cursor = self.line_end() + 1; // 跳过 '\n' 到下一行行首
+                    TextareaOp::Down
+                }
             }
             KeyCode::Home => {
                 self.move_home();
@@ -330,5 +372,71 @@ mod tests {
         assert_eq!(t.cursor, 3, "left moves by char not byte (3=after 你)");
         t.handle_key(&KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
         assert_eq!(t.text(), "好");
+    }
+
+    // ── IT7 ① 多行 + ④ 粘贴 ──────────────────────────────────────────
+    #[test]
+    fn line_count_counts_newlines() {
+        let mut t = Textarea::new();
+        assert_eq!(t.line_count(), 1, "empty = 1 line");
+        t.set_text("abc");
+        assert_eq!(t.line_count(), 1, "single line");
+        t.set_text("a\nb");
+        assert_eq!(t.line_count(), 2, "two lines");
+        t.set_text("a\nb\nc");
+        assert_eq!(t.line_count(), 3, "three lines");
+        t.set_text("\n\n");
+        assert_eq!(t.line_count(), 3, "trailing newlines count");
+    }
+
+    #[test]
+    fn insert_text_inserts_at_cursor() {
+        let mut t = Textarea::new();
+        t.set_text("ac"); // cursor at end (2)
+        t.cursor = 1; // between a and c
+        t.insert_text("b");
+        assert_eq!(t.text(), "abc");
+        assert_eq!(t.cursor, 2, "cursor advanced past inserted text");
+        // multiline paste at cursor 2 (between "ab" and "c"): "ab"+"xy\nz"+"c".
+        t.insert_text("xy\nz");
+        assert_eq!(t.text(), "abxy\nzc");
+        assert_eq!(t.line_count(), 2);
+    }
+
+    #[test]
+    fn insert_text_empty_noop() {
+        let mut t = Textarea::new();
+        t.set_text("abc");
+        t.insert_text("");
+        assert_eq!(t.text(), "abc");
+    }
+
+    #[test]
+    fn shift_enter_then_up_down_moves_between_lines() {
+        let mut t = Textarea::new();
+        // 建 "line1\nline2":打 line1 → Shift+Enter → line2。
+        for c in "line1".chars() {
+            t.handle_key(&KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        t.handle_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        for c in "line2".chars() {
+            t.handle_key(&KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert_eq!(t.text(), "line1\nline2");
+        assert_eq!(t.line_count(), 2);
+        // cursor 在末尾(line2 尾)→ Down 返 None(已在末行)。
+        let op = t.handle_key(&KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(op, TextareaOp::None, "Down on last line = None");
+        // Up → 移到 line1 行首(byte 0)。
+        let op = t.handle_key(&KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(op, TextareaOp::Up);
+        assert_eq!(t.cursor, 0, "Up moves to prev line start");
+        // 再 Up → 在首行 → None。
+        let op = t.handle_key(&KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(op, TextareaOp::None, "Up on first line = None");
+        // Down → 下一行 line2 行首(byte offset 6 = "line1\n".len())。
+        let op = t.handle_key(&KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(op, TextareaOp::Down);
+        assert_eq!(t.cursor, 6, "Down moves to next line start");
     }
 }

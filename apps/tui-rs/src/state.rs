@@ -61,6 +61,10 @@ pub struct ObserveEvent {
     /// ADR-5:同 (harness_type, session_id) 可被多个 harness_id 驱动 = 多实例。
     pub harness_id: String,
     pub data: HashMap<String, serde_json::Value>,
+    /// IT7:observe 服务端 event_id(去重)。REST/WS 时序重叠时同一事件会重复,
+    /// drain_ws 据 event_id 去重。serde default="" 兼容旧数据(空不过滤)。
+    #[serde(default)]
+    pub event_id: String,
 }
 #[derive(Deserialize)]
 struct EventsResp {
@@ -585,6 +589,10 @@ pub struct App {
     pub new_cc_input: String,
     /// delete 确认弹窗激活态:Some(sid)=开,等待 y/N。
     pub delete_popup: Option<String>,
+    /// IT7 ②:new 弹窗可点击区 clickmap(独立于 base clickmap,模态激活时 hit-test)。
+    /// id: 700=claw btn 701=cc btn 710+i=claw agent 行 720+i=cc cwd 行 790=Create 791=Cancel。
+    /// render 时按 popup area 注册,handle_popup_mouse hit。
+    pub popup_clickmap: ClickMap<usize>,
 }
 
 /// IT2 节点 C:new 弹窗 harness 类型选择。
@@ -661,6 +669,7 @@ impl App {
             new_idx: 0,
             new_cc_input: String::new(),
             delete_popup: None,
+            popup_clickmap: ClickMap::new(),
         }
     }
 
@@ -972,6 +981,18 @@ impl App {
                 }
                 self.handle_base_mouse(m);
             }
+            AppEvent::Paste(s) => {
+                // IT7 ④:bracketed paste 路由。
+                // new 弹窗 cc 模式开 → 粘进 new_cc_input;否则 Control insert 模式 → textarea。
+                if self.popups.last().map(|p| p.id == "new").unwrap_or(false)
+                    && matches!(self.new_popup, Some(NewKind::Cc))
+                {
+                    self.new_cc_input.push_str(&s);
+                } else if self.panel == Panel::Control && self.insert_mode {
+                    self.textarea.insert_text(&s);
+                    self.turn_msg = self.textarea.text().to_string();
+                }
+            }
         }
         // ADR-3:×(顶栏右,id999)→ quit_requested,run loop 退出。
         self.quit_requested
@@ -1145,9 +1166,54 @@ impl App {
     }
 
     /// 弹窗栈顶消费 mouse:tui-popup PopupState.handle_mouse_event(拖拽)。
+    /// IT7 ②:new 弹窗左键点击优先 popup_clickmap hit-test(700/701/710+i/720+i/790/791)。
     fn handle_popup_mouse(&mut self, m: &MouseEvent) {
+        if m.kind == MouseEventKind::Down(MouseButton::Left)
+            && self.popups.last().map(|p| p.id == "new").unwrap_or(false)
+        {
+            if let Some(id) = self.popup_clickmap.hit(m.column, m.row).copied() {
+                self.handle_new_popup_click(id);
+                return;
+            }
+        }
         if let Some(p) = self.popups.last_mut() {
             p.state.handle_mouse_event(*m);
+        }
+    }
+
+    /// IT7 ②:new 弹窗可点击区命中 → 对应操作。
+    /// 700=选 claw 701=选 cc 710+i=选 claw agent 720+i=选 cc cwd 790=Create 791=Cancel。
+    fn handle_new_popup_click(&mut self, id: usize) {
+        match id {
+            700 => {
+                self.new_popup = Some(NewKind::Claw);
+                self.new_candidates = fetch_claw_agents();
+                self.new_idx = 0;
+            }
+            701 => {
+                self.new_popup = Some(NewKind::Cc);
+                self.new_candidates = fetch_cc_cwds();
+                self.new_idx = 0;
+                self.new_cc_input.clear();
+            }
+            790 => self.do_new_session(),
+            791 => {
+                self.close_popup("new");
+                self.new_popup = None;
+            }
+            n if (710..720).contains(&n) => {
+                let i = n - 710;
+                if i < self.new_candidates.len() {
+                    self.new_idx = i;
+                }
+            }
+            n if (720..730).contains(&n) => {
+                let i = n - 720;
+                if i < self.new_candidates.len() {
+                    self.new_idx = i;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1484,6 +1550,14 @@ impl App {
                     return false;
                 }
                 KeyCode::Up => {
+                    // IT7 ①:多行时优先 textarea 行内移(首行返 None 再翻历史)。
+                    if self.textarea.line_count() > 1 {
+                        let op = self.textarea.handle_key(k);
+                        self.turn_msg = self.textarea.text().to_string();
+                        if op != crate::components::textarea::TextareaOp::None {
+                            return false;
+                        }
+                    }
                     // ADR-7:历史 ↑ → 回填 textarea(textarea.set_text + turn_msg 兼容)。
                     if let Some(prev) = self.history_prev() {
                         let s = prev.to_string();
@@ -1493,6 +1567,14 @@ impl App {
                     return false;
                 }
                 KeyCode::Down => {
+                    // IT7 ①:多行时优先 textarea 行内移(末行返 None 再翻历史)。
+                    if self.textarea.line_count() > 1 {
+                        let op = self.textarea.handle_key(k);
+                        self.turn_msg = self.textarea.text().to_string();
+                        if op != crate::components::textarea::TextareaOp::None {
+                            return false;
+                        }
+                    }
                     // ADR-7:历史 ↓ → 末条后清空(写新输入)。
                     match self.history_next() {
                         Some(next) => {
@@ -1848,6 +1930,14 @@ impl App {
                 crate::ws::WsMsg::Event { key, ev } => {
                     // 累积 turn 事件(同 fetch_events 效果:events[key].push + 实例去重计数)。
                     let evs = self.events.entry(key.clone()).or_default();
+                    // IT7:去重——REST fetch_events(替换)+ WS drain_ws(追加)时序重叠时,
+                    // 同 event_id 事件会重复。非空 event_id 已存在则 skip(continue)。
+                    // 空 event_id(旧数据/无 id)不过滤,保持兼容。
+                    if !ev.event_id.is_empty()
+                        && evs.iter().any(|e| e.event_id == ev.event_id)
+                    {
+                        continue;
+                    }
                     // 限制单 key 事件数(同 REST limit=50 语义,防无限增长)。
                     if evs.len() >= 200 {
                         evs.remove(0);
@@ -2155,6 +2245,7 @@ mod tests {
                 }));
                 d
             },
+            event_id: String::new(),
         };
         app.apply_flow_event("flow_test1", &ev);
         let tf = &app.flows[0];
@@ -2186,6 +2277,7 @@ mod tests {
                 d.insert("flow_payload".to_string(), serde_json::json!({}));
                 d
             },
+            event_id: String::new(),
         };
         app.apply_flow_event("flow_test2", &ev);
         assert_eq!(app.flows[0].status.as_ref().unwrap().status, "completed");
@@ -2200,6 +2292,55 @@ mod tests {
         app.handle(&crate::events::AppEvent::Tick);
         // events 仍空(无 WS,无 fetch_claw_events)。
         assert!(app.events.is_empty(), "Tick with no WS should not fetch events via REST");
+    }
+
+    // ── IT7:WS 事件 event_id 去重(REST fetch + WS drain 时序重叠)──────
+
+    fn ev_with(id: &str, harness_id: &str) -> ObserveEvent {
+        ObserveEvent {
+            event_type: "tick_completed".to_string(),
+            tick_id: "t1".to_string(),
+            harness_id: harness_id.to_string(),
+            data: HashMap::new(),
+            event_id: id.to_string(),
+        }
+    }
+
+    /// IT7:drain_ws 对非空 event_id 已存在事件去重(skip)。
+    #[test]
+    fn drain_ws_dedups_by_event_id() {
+        use crate::ws::{WsManager, WsMsg};
+        use std::sync::mpsc;
+        let (tx, rx) = mpsc::channel::<WsMsg>();
+        let mut app = App::new(crate::kitty::detect());
+        app.ws = Some(WsManager::mock(rx));
+        let key = "openclaw/agent:main:main".to_string();
+        // 预置 REST 已拉到的事件 e1(模拟 fetch_events 替换进 events[key])。
+        app.events.entry(key.clone()).or_default().push(ev_with("e1", "h1"));
+        // WS 推送:e1 重复 + e2 新增。
+        tx.send(WsMsg::Event { key: key.clone(), ev: ev_with("e1", "h1") }).unwrap();
+        tx.send(WsMsg::Event { key: key.clone(), ev: ev_with("e2", "h1") }).unwrap();
+        app.drain_ws();
+        let evs = &app.events[&key];
+        assert_eq!(evs.len(), 2, "e1 应去重,e2 新增,共 2 条");
+        assert!(evs.iter().all(|e| e.event_id != "e1" || evs.iter().filter(|x| x.event_id == "e1").count() == 1));
+    }
+
+    /// IT7:空 event_id(旧数据)不去重,保持兼容(每个都 push)。
+    #[test]
+    fn drain_ws_keeps_empty_event_id() {
+        use crate::ws::{WsManager, WsMsg};
+        use std::sync::mpsc;
+        let (tx, rx) = mpsc::channel::<WsMsg>();
+        let mut app = App::new(crate::kitty::detect());
+        app.ws = Some(WsManager::mock(rx));
+        let key = "claude-code/s1".to_string();
+        tx.send(WsMsg::Event { key: key.clone(), ev: ev_with("", "h1") }).unwrap();
+        tx.send(WsMsg::Event { key: key.clone(), ev: ev_with("", "h2") }).unwrap();
+        app.drain_ws();
+        assert_eq!(app.events[&key].len(), 2, "空 event_id 不过滤,两条都保留");
+        // 多实例计数仍按 harness_id 去重(h1+h2=2)。
+        assert_eq!(app.instances.get(&key).copied().unwrap_or(0), 2);
     }
 
     // ── T1/T2 自测(ADR-1/ADR-2/ADR-3:焦点循环 + loading + UI 状态)──────
@@ -2712,6 +2853,110 @@ mod tests {
 
     fn crosysterm_keymods() -> crossterm::event::KeyModifiers {
         crossterm::event::KeyModifiers::empty()
+    }
+
+    // ── IT7 ④ 粘贴 ──────────────────────────────────────────────────
+    /// AppEvent::Paste 在 Control insert 模式 → textarea 插入 + turn_msg 同步。
+    #[test]
+    fn paste_into_textarea_control_insert() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        app.insert_mode = true;
+        app.handle(&crate::events::AppEvent::Paste("pasted text".into()));
+        assert_eq!(app.textarea.text(), "pasted text");
+        assert_eq!(app.turn_msg, "pasted text");
+    }
+
+    /// AppEvent::Paste 非 Control panel → 不插(忽略)。
+    #[test]
+    fn paste_ignored_outside_control() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Home;
+        app.handle(&crate::events::AppEvent::Paste("x".into()));
+        assert_eq!(app.textarea.text(), "", "Home panel ignores paste");
+    }
+
+    /// new 弹窗 cc 模式开 → Paste 粘进 new_cc_input。
+    #[test]
+    fn paste_into_new_cc_input() {
+        let mut app = App::new(crate::kitty::detect());
+        app.open_new_popup();
+        app.new_popup = Some(NewKind::Cc);
+        app.handle(&crate::events::AppEvent::Paste("/home/x".into()));
+        assert_eq!(app.new_cc_input, "/home/x");
+    }
+
+    // ── IT7 ② 弹窗可点击 ────────────────────────────────────────────
+    /// new 弹窗 popup_clickmap hit 700/701/790/791/710+i → 对应操作。
+    #[test]
+    fn new_popup_click_selects_harness() {
+        let mut app = App::new(crate::kitty::detect());
+        app.open_new_popup();
+        // 700 = 选 claw。
+        app.handle_new_popup_click(700);
+        assert_eq!(app.new_popup, Some(NewKind::Claw));
+        // 701 = 选 cc。
+        app.handle_new_popup_click(701);
+        assert_eq!(app.new_popup, Some(NewKind::Cc));
+    }
+
+    #[test]
+    fn new_popup_click_cancel_closes() {
+        let mut app = App::new(crate::kitty::detect());
+        app.open_new_popup();
+        assert!(app.popups.iter().any(|p| p.id == "new"));
+        app.handle_new_popup_click(791); // Cancel
+        assert!(!app.popups.iter().any(|p| p.id == "new"), "791 关 new 弹窗");
+        assert!(app.new_popup.is_none());
+    }
+
+    #[test]
+    fn new_popup_click_candidate_sets_idx() {
+        let mut app = App::new(crate::kitty::detect());
+        app.open_new_popup();
+        app.new_popup = Some(NewKind::Claw);
+        app.new_candidates = vec!["a".into(), "b".into(), "c".into()];
+        app.new_idx = 0;
+        // 710 + 2 = 第三个候选 → idx 2。
+        app.handle_new_popup_click(712);
+        assert_eq!(app.new_idx, 2);
+        // 越界 id(710+5)→ 不变。
+        app.handle_new_popup_click(715);
+        assert_eq!(app.new_idx, 2, "out-of-range idx ignored");
+    }
+
+    /// modal 激活时鼠标命中 popup_clickmap → handle_popup_mouse 路由到点击操作。
+    #[test]
+    fn new_popup_mouse_left_click_routes_to_clickmap() {
+        let mut app = App::new(crate::kitty::detect());
+        app.open_new_popup();
+        // 模拟 render 注册:在 (0,0) 注册 701(cc 按钮)。
+        app.popup_clickmap.register(Rect::new(0, 0, 6, 1), 701);
+        let m = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 2, row: 0,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        assert!(app.modal_active());
+        app.handle_popup_mouse(&m);
+        assert_eq!(app.new_popup, Some(NewKind::Cc), "点击 701 → 选 cc");
+    }
+
+    // ── IT7 ① textarea 多行 Up/Down 在 handle_base_key 委托 ──────────
+    /// 多行 textarea:Up/Down 先走 textarea 行移(不翻历史)。
+    #[test]
+    fn multiline_up_down_delegates_to_textarea() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        app.insert_mode = true;
+        app.textarea.set_text("ab\ncd");
+        app.turn_msg = "ab\ncd".into();
+        // cursor 在末尾(cd 尾)→ Down 返 None → 翻历史(空历史 → no-op,cursor 不变)。
+        app.handle_base_key(&KeyEvent::new(KeyCode::Down, crosysterm_keymods()));
+        assert_eq!(app.textarea.cursor(), app.textarea.text().len(), "Down on last line keeps cursor");
+        // Up → 移到 line1 行首(byte 0)。
+        app.handle_base_key(&KeyEvent::new(KeyCode::Up, crosysterm_keymods()));
+        assert_eq!(app.textarea.cursor(), 0, "Up moves to first line start");
     }
 }
 
