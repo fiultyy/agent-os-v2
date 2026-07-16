@@ -84,22 +84,26 @@ pub fn status_spans(app: &App) -> Vec<Span<'static>> {
     ]
 }
 
-/// InputBar:turn_msg 输入显示行(ADR-1:无按钮,动作走键盘)。
-/// 占位 render:T-textarea 任务的 Textarea 组件将接管此 area(多行编辑/光标/换行/粘贴)。
-/// 在 Textarea 接入前,本 fn 仅渲染单行 message 提示,保持 draw_control 调用链不断。
+/// InputBar(IT6-③:整合 StatusBar):底部输入区多行 = [状态行] + [输入行] + [模式提示行]。
+/// 原 render_status_bar 的独立 2 行 status 已并入此处顶行,右区无独立 statusbar 省空间。
+/// area = region_block(" 输入 · message ") 的 inner(已剥顶线);行 0=状态、行 1=输入、行 2=模式。
 pub fn render_input_bar(f: &mut Frame, area: Rect, app: &mut App) {
+    // 行 0:状态(orche●/session/last),复用 status_spans 单行。
+    let status_line = Line::from(status_spans(app));
+    // 行 1:输入(❯ + turn_msg + ▌ 光标)。
+    let msg_line = Line::from(vec![
+        Span::styled(" ❯ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(app.turn_msg.clone(), Style::default().fg(Color::White)),
+        Span::styled("▌", Style::default().fg(Color::Cyan).add_modifier(Modifier::SLOW_BLINK)),
+    ]);
+    // 行 2:模式提示。
     let mode_hint = if app.insert_mode {
         "  [enter 发送 · esc 退快捷键]"
     } else {
         "  [i 输入 · t/s/r/e/f/G/D/R 动作]"
     };
-    let msg_line = Line::from(vec![
-        Span::styled(" ❯ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::styled(app.turn_msg.clone(), Style::default().fg(Color::White)),
-        Span::styled("▌", Style::default().fg(Color::Cyan).add_modifier(Modifier::SLOW_BLINK)),
-        Span::styled(mode_hint, Style::default().fg(Color::DarkGray)),
-    ]);
-    f.render_widget(Paragraph::new(msg_line), area);
+    let mode_line = Line::from(Span::styled(mode_hint, Style::default().fg(Color::DarkGray)));
+    f.render_widget(Paragraph::new(vec![status_line, msg_line, mode_line]), area);
 }
 
 /// TurnSeparator:turn 之间视觉分隔(── turn N ──)。独立 fn(可复用)。

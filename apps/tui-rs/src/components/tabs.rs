@@ -19,7 +19,7 @@
 use ratatui::{
     layout::{Position, Rect},
     style::{Color, Modifier, Style},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, Tabs, Widget},
     Frame,
 };
@@ -31,11 +31,55 @@ pub struct TabBar {
     pub active: usize,
     /// 窗口起始索引(分页用,私有:render 维护,hit 经 windowed_start 重算)。
     first_visible: usize,
+    /// 每 tab 前景色(IT6-④ 主 tag 栏配色区分)。空 vec = 全默认(不染色)。
+    /// active tab 始终走 highlight_style(Yellow 反白),非 active 才取 tab_colors[i]。
+    pub tab_colors: Vec<Color>,
+    /// IT6-②:true=只顶线描边(region_block 同款),false=全边框(默认,顶栏 Home/Flows 用)。
+    /// 顶线模式内宽=area.width(无边框列),全边框内宽=width-2。
+    pub top_border: bool,
 }
 
 impl TabBar {
     pub fn new(titles: Vec<String>) -> Self {
-        Self { titles, active: 0, first_visible: 0 }
+        Self { titles, active: 0, first_visible: 0, tab_colors: vec![], top_border: false }
+    }
+
+    /// IT6-④:给每个 tab 配不同前景色(与 titles 等长)。active 仍走 Yellow 高亮。
+    pub fn colors(mut self, cs: Vec<Color>) -> Self {
+        self.tab_colors = cs;
+        self
+    }
+
+    /// IT6-②:切顶线描边模式(右区 对话/flow tab 与 region_block 视觉一致)。
+    pub fn top_border(mut self) -> Self {
+        self.top_border = true;
+        self
+    }
+
+    /// tab 内容区(Rect)+ 可用列宽(cap)。全边框=内缩 1 列两侧,顶线=只下移 1 行不缩列。
+    fn inner_and_cap(&self, area: Rect) -> (Rect, usize) {
+        if self.top_border {
+            (Rect::new(area.x, area.y + 1, area.width, area.height.saturating_sub(1)), area.width as usize)
+        } else {
+            let inner = Block::bordered().inner(area);
+            (inner, inner.width as usize)
+        }
+    }
+
+    /// IT6-②:全边框(顶栏 Home/Flows,带 i/×)或顶线描边(右区 对话/flow,region_block 同款)。
+    fn render_block(&self, title: String) -> Block<'static> {
+        if self.top_border {
+            Block::default()
+                .borders(ratatui::widgets::Borders::TOP)
+                .border_style(Style::default().fg(Color::DarkGray))
+                .style(Style::default().bg(Color::Black))
+                .title(ratatui::text::Line::from(Span::styled(
+                    title,
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                )))
+        } else {
+            Block::bordered().title(title)
+        }
     }
 
     pub fn next(&mut self) {
@@ -65,11 +109,11 @@ impl TabBar {
         t.chars().count() + 2
     }
 
-    /// 从 start 起窗口能容纳的 tab 数(cap = Block 内宽)。
+    /// 从 start 起窗口能容纳的 tab 数(cap = 内容区列宽)。
     /// divider 仅画在 tab 之间(首 tab 无前导,末 tab 无尾随)→ need = 首个 cw,其余 1+cw。
     /// 修复:旧实现对每个 tab 都 +1 divider(含末 tab),多算 1 列 → 少显一个 tab + 假 >。
     fn visible_count_at(&self, start: usize, area: Rect) -> usize {
-        let cap = area.width.saturating_sub(2) as usize; // Block::bordered 内宽 = width - 2
+        let cap = self.inner_and_cap(area).1;
         let (mut used, mut n) = (0usize, 0usize);
         for t in self.titles.iter().skip(start) {
             let cw = Self::cell_width(t);
@@ -118,12 +162,21 @@ impl TabBar {
         let start = self.windowed_start(area);
         self.first_visible = start;
         let n = self.visible_count_at(start, area);
+        // IT6-④:非 active tab 用 tab_colors[i] 染色(Home=Green/Flows=Blue/Observe=Cyan/Control=Magenta)。
+        // active tab 由下方 highlight_style(Yellow 反白)接管,染色不影响命中宽度(Line 字节数不变)。
         let window: Vec<Line> = self
             .titles
             .iter()
+            .enumerate()
             .skip(start)
             .take(n)
-            .map(|s| Line::from(s.as_str()))
+            .map(|(i, s)| {
+                let color = self.tab_colors.get(i).copied();
+                match color {
+                    Some(c) => Line::from(Span::styled(s.as_str(), Style::default().fg(c))),
+                    None => Line::from(s.as_str()),
+                }
+            })
             .collect();
         let local_active = self.active.saturating_sub(start).min(n.saturating_sub(1));
         let (has_left, has_right) = (start > 0, start + n < self.titles.len());
@@ -133,7 +186,7 @@ impl TabBar {
             if has_right { " >" } else { "" }
         );
         Tabs::new(window)
-            .block(Block::bordered().title(title))
+            .block(self.render_block(title))
             .highlight_style(
                 Style::default()
                     .fg(Color::Black)
@@ -149,7 +202,7 @@ impl TabBar {
             if let Some(idx) = self.hit(area, col, row) {
                 if idx != self.active {
                     // 算悬停 tab 的 x 范围(同 hit 逻辑),覆写该范围 cell 加 UNDERLINED。
-                    let inner = Block::bordered().inner(area);
+                    let inner = self.inner_and_cap(area).0;
                     let last_visible = start + n - 1;
                     let mut x = inner.x;
                     for (i, t) in self.titles.iter().enumerate().skip(start).take(n) {
@@ -180,7 +233,7 @@ impl TabBar {
         if !area.contains(Position { x: col, y: row }) {
             return None;
         }
-        let inner = Block::bordered().inner(area);
+        let inner = self.inner_and_cap(area).0;
         if col < inner.x || row < inner.y || row >= inner.y + inner.height {
             return None;
         }
@@ -277,5 +330,44 @@ mod tests {
         // area width 16 → cap=14 → 两 tab 实占 6+1+7=14 ≤ 14 应容纳 2(旧实现 +1 末 divider → 15>14 只显 1)。
         let n = b.visible_count_at(0, Rect::new(0, 0, 16, 3));
         assert_eq!(n, 2, "no phantom divider on last tab → both fit at width 16");
+    }
+
+    /// IT6-②:top_border 模式下,顶行(row 0)=描边行不算 tab 内容;内容从 row 1 起,
+    /// 且无左右边框列(全宽)。hit 在 row 0 应 miss,row 1 点到 tab 文本应命中。
+    #[test]
+    fn top_border_hit_skips_top_line_uses_full_width() {
+        let b = TabBar::new(vec!["aaa".into(), "bbb".into()]).top_border();
+        let area = Rect::new(0, 0, 20, 2); // 顶线 row0 + tab 内容 row1
+        // row 0 = 顶线描边,不算 tab 内容。
+        assert_eq!(b.hit(area, 1, 0), None, "top border row not a tab");
+        // row 1,col 0..4 = "aaa"(cw=5:3 chars+2 pad)→ 命中 idx 0。
+        assert_eq!(b.hit(area, 1, 1), Some(0), "first tab hit at row1 (full width, no border col)");
+        // "bbb" 从 col 6 起(cw 5 + 1 divider)。col 7 命中 idx 1。
+        assert_eq!(b.hit(area, 7, 1), Some(1), "second tab hit");
+        // cap = full width(20)无边框列 → 两 tab 都在窗口内。
+        assert_eq!(b.visible_count_at(0, area), 2, "top_border: full width cap fits both");
+    }
+
+    /// IT6-②:top_border 内宽 = area.width(无边框列);全边框内宽 = width-2。
+    /// 同一 area,top_border 容纳更多字符宽 tab。
+    #[test]
+    fn top_border_inner_wider_than_full_border() {
+        let area = Rect::new(0, 0, 10, 3);
+        let full = TabBar::new(vec!["a".into()]);
+        let topb = TabBar::new(vec!["a".into()]).top_border();
+        let (_, cap_full) = full.inner_and_cap(area);
+        let (_, cap_top) = topb.inner_and_cap(area);
+        assert_eq!(cap_full, 8, "full border inner width = 10-2");
+        assert_eq!(cap_top, 10, "top border inner width = full 10");
+    }
+
+    /// IT6-④:colors builder 设置 tab_colors;active tab 不受影响(仍 Yellow)。
+    #[test]
+    fn colors_builder_sets_per_tab_colors() {
+        let b = TabBar::new(vec!["Home".into(), "Flows".into()])
+            .colors(vec![Color::Green, Color::Blue]);
+        assert_eq!(b.tab_colors, vec![Color::Green, Color::Blue]);
+        // active 默认 0,染色不影响 active 索引。
+        assert_eq!(b.active, 0);
     }
 }

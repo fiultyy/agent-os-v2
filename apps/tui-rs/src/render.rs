@@ -738,14 +738,13 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
         bar,
     );
 
-    // ── 右区:StatusBar(恒显) + 右TabBar + body(按 tab) + 输入栏(恒显) ──
+    // ── 右区(IT6-③ 状态栏整合进 input):右TabBar(顶线) + body(按 tab) + 输入+状态 ──
+    // 去掉独立 2 行 StatusBar,orche●/session/last 并入底部输入区省空间,右区 = tabs+body+input。
     let right_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Length(3), Constraint::Min(1), Constraint::Length(5)])
+        .constraints([Constraint::Length(2), Constraint::Min(1), Constraint::Length(4)])
         .split(right);
-    let [status_area, tabs_area, body_area, input_area] = [right_chunks[0], right_chunks[1], right_chunks[2], right_chunks[3]];
-
-    control::render_status_bar(f, status_area, app);
+    let [tabs_area, body_area, input_area] = [right_chunks[0], right_chunks[1], right_chunks[2]];
 
     let hover = if app.mouse.visible { Some((app.mouse.x, app.mouse.y)) } else { None };
     app.control_right_tabs.render_with_hover(f, tabs_area, hover);

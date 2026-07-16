@@ -611,6 +611,12 @@ impl App {
                 "Flows".to_string(),
                 "Observe".to_string(),
                 "Control".to_string(),
+            ])
+            .colors(vec![
+                ratatui::style::Color::Green,
+                ratatui::style::Color::Blue,
+                ratatui::style::Color::Cyan,
+                ratatui::style::Color::Magenta,
             ]),
             mouse: MouseCursor::default(),
             tab_area: Rect::default(),
@@ -629,7 +635,8 @@ impl App {
                 // ADR-3:属性改 props 弹窗(i 键),右 tab 缩 2(对话/flow)。
                 " 对话 ".to_string(),
                 " flow ".to_string(),
-            ]),
+            ])
+            .top_border(),
             right_tab_area: Rect::default(),
             control_groups: vec![],
             clickmap: ClickMap::new(),
