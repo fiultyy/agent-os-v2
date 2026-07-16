@@ -117,7 +117,7 @@ pub fn render_input_bar(f: &mut Frame, area: Rect, app: &mut App) {
 
     // 行 末:模式提示。
     let mode_hint = if app.insert_mode {
-        "  [enter 发送 · shift/alt+enter 换行 · esc 退快捷键]"
+        "  [enter 发送 · ctrl+j 换行 · esc 退快捷键]"
     } else {
         "  [i 输入 · t/s/r/e/f/G/D/R 动作]"
     };
