@@ -35,6 +35,37 @@ router = APIRouter(prefix="/h", tags=["harness"])
 
 VALID_TYPES = {"claw", "claude-code"}
 
+# observe-service REST base (sessions are persisted in SQLite there; the TUI's
+# source of truth). orche delete must sync here or the count drifts.
+OBSERVE_REST_URL = "http://localhost:8002"
+
+# routes use "claw" as the harness key, but the openclaw client registers with
+# observe under harness_type="openclaw". Map so the DELETE hits the right row.
+_OBSERVE_HARNESS_TYPE = {"claw": "openclaw", "claude-code": "claude-code"}
+
+
+async def _observe_delete_session(harness_type: str, session_id: str) -> bool:
+    """Best-effort DELETE of a session record from observe-service.
+
+    Non-fatal: if observe is unreachable the orche delete still succeeds.
+    Runs the blocking http call off the event loop via asyncio.to_thread.
+    """
+    ob_type = _OBSERVE_HARNESS_TYPE.get(harness_type, harness_type)
+    url = f"{OBSERVE_REST_URL}/sessions/{ob_type}/{session_id}"
+
+    def _do_delete() -> bool:
+        import urllib.request
+        try:
+            req = urllib.request.Request(url, method="DELETE")
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                return 200 <= resp.status < 300
+        except Exception as e:
+            logger.warning("observe session delete failed (%s/%s): %s",
+                           ob_type, session_id, e)
+            return False
+
+    return await asyncio.to_thread(_do_delete)
+
 # active session (frontend focus = send target, NOT a lock)
 _active: Dict[str, str] = {"type": "", "id": ""}
 
@@ -215,8 +246,11 @@ async def delete_session(
     # clear active if it pointed here
     if _active["type"] == harness_type and _active["id"] == session_id:
         _active.update(type="", id="")
+    # sync the delete to observe (its SQLite is the TUI's session source of
+    # truth). best-effort: failure here does NOT fail the orche delete.
+    ob_deleted = await _observe_delete_session(harness_type, session_id)
     return {"session_id": session_id, "status": "deleted",
-            "raw_deleted": raw_deleted}
+            "raw_deleted": raw_deleted, "observe_deleted": ob_deleted}
 
 
 # ── pickers (option lists for the frontend create/fork dialogs) ───────
