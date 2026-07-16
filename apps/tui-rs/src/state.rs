@@ -1189,6 +1189,7 @@ impl App {
                         self.observe_scroll.scroll_down(1);
                     } else {
                         self.control_chat_scroll.scroll_down(1);
+                        self.chat_follow_tail = true;
                     }
                 } else {
                     self.cursor_down();
@@ -1200,6 +1201,7 @@ impl App {
                         self.observe_scroll.scroll_up(1);
                     } else {
                         self.control_chat_scroll.scroll_up(1);
+                        self.chat_follow_tail = false;
                     }
                 } else {
                     self.cursor_up();

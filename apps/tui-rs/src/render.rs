@@ -769,11 +769,8 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
                 ))]
             };
             app.control_chat_scroll.set_content(ev_lines);
-            // IT4:tail 跟随——新帧灌内容后,若 follow_tail 则滚到底(set_content 只 clamp 不追底)。
-            // do_turn 置 tail=true;WS 新事件流入 → 下一帧自动跟最新。PgUp 脱离 → tail=false 停留。
-            if app.chat_follow_tail {
-                app.control_chat_scroll.scroll_to_bottom();
-            }
+            // ScrollView.render 内部按 follow_tail_flag 自动追底(内容超视口→最后一页,不超→从顶)。
+            app.control_chat_scroll.follow_tail_flag = app.chat_follow_tail;
             app.control_chat_scroll.render(f, body_area);
         }
         1 => {

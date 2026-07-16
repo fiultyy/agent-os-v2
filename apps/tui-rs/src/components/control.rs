@@ -106,14 +106,12 @@ pub fn render_input_bar(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_widget(Paragraph::new(vec![status_line, msg_line, mode_line]), area);
 }
 
-/// TurnSeparator:turn 之间视觉分隔(── turn N ──)。独立 fn(可复用)。
-pub fn turn_separator_line(tick_id: &str, idx: usize) -> Line<'static> {
-    let label = if tick_id.is_empty() {
-        format!("── turn {} ──", idx + 1)
-    } else {
-        format!("── turn {} · {} ──", idx + 1, trunc(tick_id, 16))
-    };
-    Line::from(Span::styled(label, Style::default().fg(Color::DarkGray)))
+/// TurnSeparator:turn 之间视觉分隔(── turn N ──,只显序号,不显内部 tick_id)。独立 fn(可复用)。
+pub fn turn_separator_line(_tick_id: &str, idx: usize) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("── turn {} ──", idx + 1),
+        Style::default().fg(Color::DarkGray),
+    ))
 }
 
 /// 通用事件行(Observe draw_stack 复用,逐事件平铺渲染)。
@@ -194,13 +192,11 @@ pub fn render_turn_stream(evs: &[ObserveEvent]) -> Vec<Line<'static>> {
         if i > 0 {
             out.push(Line::raw(""));
         }
-        // 轻量 turn 头(可选 tick_id 提示,dim,仅当非空)。
-        if !tick.is_empty() {
-            out.push(Line::from(Span::styled(
-                format!("── {} ──", trunc(tick, 16)),
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
+        // 轻量 turn 头:只显序号(── turn N ──),不显内部 tick_id。
+        out.push(Line::from(Span::styled(
+            format!("── turn {} ──", i + 1),
+            Style::default().fg(Color::DarkGray),
+        )));
 
         // 2) user cell:首个 tick_started 的 request。
         let mut user_rendered = false;

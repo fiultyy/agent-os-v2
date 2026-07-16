@@ -39,11 +39,13 @@ pub struct ScrollView {
     pub border_mode: Option<BorderMode>,
     /// Top/Full 模式的标题(可选)。
     pub title: Option<String>,
+    /// follow_tail:render 时自动追底(显最后一页);false=用户自由滚。
+    pub follow_tail_flag: bool,
 }
 
 impl ScrollView {
     pub fn new(lines: Vec<ratatui::text::Line<'static>>) -> Self {
-        Self { lines, offset: 0, wrap: true, trim: false, bordered: true, border_mode: None, title: None }
+        Self { lines, offset: 0, wrap: true, trim: false, bordered: true, border_mode: None, title: None, follow_tail_flag: true }
     }
     pub fn wrap(mut self, w: bool) -> Self {
         self.wrap = w;
@@ -95,6 +97,12 @@ impl ScrollView {
     pub fn scroll_to_bottom(&mut self) {
         self.offset = self.total().saturating_sub(1);
     }
+    /// follow_tail:render 时若 true,自动追底(offset=total-viewport_height)。
+    /// 内容不超视口 → offset=0(从顶向下增长);超视口 → 显最后一页(新内容可见)。
+    /// ScrollUp/PgUp 置 false(自由滚);ScrollDown/PgDn/do_turn 置 true(追新)。
+    pub fn follow_tail(&mut self, follow: bool) {
+        self.follow_tail_flag = follow;
+    }
 
     /// 渲染:按 border_mode(None 回退 bordered)画 Block(Top=顶线+bg+标题 / Full=全边框 /
     /// None=无边框直铺)+ Paragraph(scroll+wrap) + 右侧 Scrollbar。
@@ -126,6 +134,12 @@ impl ScrollView {
         } else {
             area
         };
+
+        // follow_tail:内容超视口 → 显最后一页(offset=total-viewport_height,新内容可见)。
+        // 内容不超视口 → offset=0(从顶向下增长,不跳底)。用户 ScrollUp/PgUp → follow=false(自由滚)。
+        if self.follow_tail_flag {
+            self.offset = self.total().saturating_sub(inner.height as usize);
+        }
 
         // >65535 行时 offset as u16 截断(65537→1)→ clamp u16::MAX(ScrollbarState 仍保留 usize position)。
         let scroll_y = self.offset.min(u16::MAX as usize) as u16;
