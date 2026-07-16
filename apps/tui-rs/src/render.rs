@@ -1009,8 +1009,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 
     // ADR-3:顶栏右端 i(id998→open_props)/×(id999→quit_requested)按钮。
-    // 两个 3x1 色块,右对齐到顶栏;clickmap register 全局命中(state.handle_base_mouse 已路由)。
+    // IT5 ①:clickmap 区域覆盖顶栏全高(top.height=3:边框行+tab 行+边框行),
+    // 防止点 tab 行(row 1)时 miss id 999/998 被当 tab 点击。文本仍渲染在 row 0(原 3x1 色块)。
     let top = chunks[0];
+    let quit_hit = Rect::new(top.right().saturating_sub(3), top.y, 3, top.height);
+    let info_hit = Rect::new(top.right().saturating_sub(6), top.y, 3, top.height);
+    // 视觉色块仍只在 row 0(边框行),避免覆盖 tab 文本。
     let quit_rect = Rect::new(top.right().saturating_sub(3), top.y, 3, 1);
     let info_rect = Rect::new(top.right().saturating_sub(6), top.y, 3, 1);
     f.render_widget(
@@ -1023,11 +1027,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             .alignment(ratatui::layout::Alignment::Center),
         info_rect,
     );
-    app.clickmap.register(quit_rect, 999);
-    app.clickmap.register(info_rect, 998);
 
     // 顶层统一 clear clickmap(不依赖各 panel 互斥 clear;Flows 等无 clickmap 的 tab 也 clean,修 minor 2/3)。
+    // IT5 ①:clear 移到 999/998 register 之前——否则顶栏按钮注册被清掉,鼠标命中失效。
     app.clickmap.clear();
+    // 999/998 注册在 clear 之后,持久到下一帧;rect 在顶栏(top.y..),与主区 tree(Chunks[1])无重叠。
+    app.clickmap.register(quit_hit, 999);
+    app.clickmap.register(info_hit, 998);
 
     // 主区:按 active tab 分发(ADR-1)。
     match app.panel {

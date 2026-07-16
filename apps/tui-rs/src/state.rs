@@ -933,6 +933,16 @@ impl App {
                 self.drain_ws();
             }
             AppEvent::Key(k) => {
+                // IT5 ③:启动时 observe 不可达 → flat 空。首次按键懒重试(非 Tick REST 轮询,
+                // 不违 ADR-1 T4;用户驱动,observe 起来后一次自愈,无需重启 TUI)。
+                // ponytail: ureq 无超时;flat 有数据后此分支每键恒 false,O(1) 跳过。
+                if self.flat.is_empty() {
+                    if let Some(sg) = fetch_sessions() {
+                        if !sg.sessions_by_harness.is_empty() {
+                            self.set_sessions(sg);
+                        }
+                    }
+                }
                 if self.modal_active() {
                     if self.handle_popup_key(k) {
                         return false;
@@ -1487,7 +1497,11 @@ impl App {
                     }
                     return false;
                 }
-                KeyCode::Enter => {
+                // IT5 ②:部分终端把 Enter 发成 Char('\r') 或 Char('\n')(非 KeyCode::Enter),
+                // 会落到 _ arm 被 textarea insert 当普通字符插入,turn 永不发送。此处统一兼容。
+                // ponytail: terminal 直发 Char('\r'/'\n') 不带 SHIFT/ALT(裸回车),故统一走 Send;
+                // 多行 Shift+Enter 仍由 textarea.handle_key(KeyCode::Enter+SHIFT) 在 _ arm 路径处理。
+                KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n') => {
                     // ADR-7:mention popup 开时 Enter = 选候选插入;否则发送 turn。
                     if self.mentions_open {
                         // ponytail: select()->Option<String> 由 mentions 组件实现;
@@ -2440,6 +2454,34 @@ mod tests {
         assert!(app.mentions_open, "@ → mention popup 开");
         app.handle_base_key(&KeyEvent::new(KeyCode::Esc, crossterm::event::KeyModifiers::empty()));
         assert!(!app.mentions_open);
+    }
+
+    /// IT5 ②:Enter 以 Char('\r') / Char('\n') 到达时也触发 Send(不被 textarea 当普通字符插入)。
+    /// 发送成功的判据:textarea + turn_msg 被清(do_turn 尾部 clear);若当普通字符插入,
+    /// textarea 会含 '\r'/文本未清。turn_status 取决于 orche 在线与否,不强断言。
+    #[test]
+    fn enter_as_char_cr_triggers_send() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        app.insert_mode = true;
+        app.textarea.set_text("hello");
+        assert_eq!(app.textarea.text(), "hello");
+        // 终端把 Enter 发成 Char('\r')。
+        app.handle_base_key(&KeyEvent::new(KeyCode::Char('\r'), crossterm::event::KeyModifiers::empty()));
+        assert!(app.textarea.text().is_empty(), "Char('\\r') → 发送后 textarea 清空(非插入 '\\r')");
+        assert!(app.turn_msg.is_empty(), "Char('\\r') → turn_msg 清空(do_turn 执行)");
+    }
+
+    /// IT5 ②:Char('\n') 同理触发 Send。
+    #[test]
+    fn enter_as_char_lf_triggers_send() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        app.insert_mode = true;
+        app.textarea.set_text("world");
+        app.handle_base_key(&KeyEvent::new(KeyCode::Char('\n'), crossterm::event::KeyModifiers::empty()));
+        assert!(app.textarea.text().is_empty(), "Char('\\n') → 发送后 textarea 清空(非插入 '\\n')");
+        assert!(app.turn_msg.is_empty(), "Char('\\n') → turn_msg 清空(do_turn 执行)");
     }
 
     /// ADR-3:×(clickmap id999)→ quit_requested=true;handle() 返 true 退出。
