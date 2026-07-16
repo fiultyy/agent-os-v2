@@ -19,6 +19,7 @@ pub mod input_history;
 pub mod markdown;
 pub mod mentions;
 pub mod mouse;
+pub mod paste_burst;
 pub mod popup;
 pub mod position;
 pub mod raw_exec;

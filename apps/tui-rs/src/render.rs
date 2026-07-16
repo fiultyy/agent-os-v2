@@ -741,8 +741,11 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
     // ── 右区(IT6-③ 状态栏整合进 input):右TabBar(顶线) + body(按 tab) + 输入+状态 ──
     // 去掉独立 2 行 StatusBar,orche●/session/last 并入底部输入区省空间,右区 = tabs+body+input。
     // IT7 ①:输入区高度动态 = base 3(状态+输入+提示) + max(0, textarea.line_count()-1) 额外行,cap 8。
-    let lc = app.textarea.line_count() as u16;
-    let input_h = (3 + lc.saturating_sub(1)).min(8);
+    // bug1 根治:area 高度按 wrap 后行数(desired_height),非逻辑行 line_count。
+    // ponytail: input_inner 宽 ≈ right.width-2(border);垂直 layout input 占右区全宽,估算够用。
+    let dh = app.textarea.desired_height(right.width.saturating_sub(2).max(1));
+    // input_h = dh(wrap 行)+ status(1)+ mode(1)+ border(2)= dh+4(render_input_bar 在 inner 上 [1,Min,1])
+    let input_h = (dh + 4).min(12);
     let right_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(2), Constraint::Min(1), Constraint::Length(input_h)])

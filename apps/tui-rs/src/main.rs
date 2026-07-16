@@ -22,7 +22,7 @@ mod ws;
 use crate::events::{poll_once, AppEvent};
 use crate::state::{fetch_events, fetch_sessions, App};
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture},
+    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -113,7 +113,7 @@ fn main() -> io::Result<()> {
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -131,7 +131,7 @@ fn main() -> io::Result<()> {
     let res = run(&mut terminal, app);
 
     disable_raw_mode()?;
-    execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
+    execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture, DisableBracketedPaste)?;
     if let Err(e) = res {
         eprintln!("error: {}", e);
     }

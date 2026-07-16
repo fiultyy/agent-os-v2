@@ -88,44 +88,53 @@ pub fn status_spans(app: &App) -> Vec<Span<'static>> {
 /// 原 render_status_bar 的独立 2 行 status 已并入此处顶行,右区无独立 statusbar 省空间。
 /// area = region_block(" 输入 · message ") 的 inner(已剥顶线);行 0=状态、行 1=输入、行 2=模式。
 pub fn render_input_bar(f: &mut Frame, area: Rect, app: &mut App) {
-    // 行 0:状态(orche●/session/last),复用 status_spans 单行。
-    let status_line = Line::from(status_spans(app));
-    // IT7 ①:输入多行(按 '\n' 拆成多行 Line)。❯ 前缀在首行,光标 ▌ 在末行尾。
-    let mut input_lines: Vec<Line> = Vec::new();
-    let text = app.textarea.text();
-    for (i, raw) in text.split('\n').enumerate() {
-        if i == 0 {
-            input_lines.push(Line::from(vec![
-                Span::styled(" ❯ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::styled(raw.to_string(), Style::default().fg(Color::White)),
-            ]));
-        } else {
-            input_lines.push(Line::from(vec![
-                Span::styled("   ", Style::default().fg(Color::Cyan)),
-                Span::styled(raw.to_string(), Style::default().fg(Color::White)),
-            ]));
+    use ratatui::layout::{Constraint, Direction, Layout};
+    // 布局:[status(1)] [textarea wrap] [模式提示(1)] —— area 高度已由 render.rs desired_height 算好。
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)])
+        .split(area);
+    let [status_area, ta_area, mode_area] = [chunks[0], chunks[1], chunks[2]];
+
+    // 状态行(orche●/session/last)
+    f.render_widget(Paragraph::new(Line::from(status_spans(app))), status_area);
+
+    // ❯ 前缀画在 ta_area 列 0;textarea 内容右移 prefix_w 对齐。
+    // ponytail: prefix 固定 " ❯ "(空格+❯+空格=3 列),硬编码 prefix_w=3。
+    const PREFIX_W: u16 = 3;
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " ❯ ",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )),
+        Rect::new(ta_area.x, ta_area.y, PREFIX_W, 1),
+    );
+    // textarea 内容区:右移 PREFIX_W,宽度减(codex 式 wrap 渲染 + 精确光标)
+    let ta_inner = Rect {
+        x: ta_area.x + PREFIX_W,
+        y: ta_area.y,
+        width: ta_area.width.saturating_sub(PREFIX_W),
+        height: ta_area.height,
+    };
+    let buf = f.buffer_mut();
+    app.textarea.render(ta_inner, buf, &mut app.textarea_state);
+    // 精确光标(bug3 根治):cursor_pos_with_state 算屏幕 cell → REVERSED
+    if let Some((cx, cy)) = app.textarea.cursor_pos_with_state(ta_inner, &app.textarea_state) {
+        if let Some(cell) = buf.cell_mut((cx, cy)) {
+            cell.set_style(Style::default().add_modifier(Modifier::REVERSED));
         }
     }
-    // 末行追加光标 ▌(若 text 为空,首行也要有 ❯ + ▌)。
-    if input_lines.is_empty() {
-        input_lines.push(Line::from(vec![
-            Span::styled(" ❯ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        ]));
-    }
-    let last = input_lines.last_mut().unwrap();
-    last.spans.push(Span::styled("▌", Style::default().fg(Color::Cyan).add_modifier(Modifier::SLOW_BLINK)));
 
-    // 行 末:模式提示。
+    // 模式提示行
     let mode_hint = if app.insert_mode {
         "  [enter 发送 · ctrl+j 换行 · esc 退快捷键]"
     } else {
         "  [i 输入 · t/s/r/e/f/G/D/R 动作]"
     };
-    let mode_line = Line::from(Span::styled(mode_hint, Style::default().fg(Color::DarkGray)));
-    let mut all = vec![status_line];
-    all.extend(input_lines);
-    all.push(mode_line);
-    f.render_widget(Paragraph::new(all), area);
+    f.render_widget(
+        Paragraph::new(Span::styled(mode_hint, Style::default().fg(Color::DarkGray))),
+        mode_area,
+    );
 }
 
 /// TurnSeparator:turn 之间视觉分隔(── turn N ──,只显序号,不显内部 tick_id)。独立 fn(可复用)。

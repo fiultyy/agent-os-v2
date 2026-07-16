@@ -23,6 +23,10 @@ rat-event = "2"            # 事件限定符类型:Regular/Popup/Dialog(模态�
 pulldown-cmark = "0.13"
 # ADR-1 T4:WS 直连 observe(弃 REST polling)。tungstenite 纯 Rust 同步 WS,无 tokio(匹配 ratatui 同步模型)。
 tungstenite = "0.26"
+# codex 式 textarea:wrap 折行(textwrap)+ grapheme 光标(unicode-segmentation)+ 显示宽度(unicode-width 0.1 对齐 ratatui 0.28)
+textwrap = "0.16"
+unicode-segmentation = "1"
+unicode-width = "0.1"
 
 [profile.release]
 opt-level = 2

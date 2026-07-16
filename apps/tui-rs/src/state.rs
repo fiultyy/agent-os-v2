@@ -560,6 +560,10 @@ pub struct App {
     // ── ADR-1/ADR-7 输入 UX(节点 A 新增)──────────────────────────────
     /// ADR-1 多行 textarea 输入(codex 式编辑器)。turn_msg 保留作 do_turn 兼容缓冲。
     pub textarea: crate::components::textarea::Textarea,
+    /// codex 式 textarea state(跨帧 scroll,精确光标 render 用)。
+    pub textarea_state: crate::components::textarea::TextareaState,
+    /// codex PasteBurst:tmux 无 bracketed paste 时靠时序启发式识别粘贴(burst 内 \n 插入非发送)。
+    pub paste_burst: crate::components::paste_burst::PasteBurst,
     /// ADR-7 输入历史(↑/↓ 翻历史)。原生 Vec + 索引兜底(InputHistory 组件已注册但 state 仍用 Vec)。
     pub input_history: Vec<String>,
     /// 历史浏览游标(None=不在浏览历史,写新输入;Some(i)=指向 input_history[i])。
@@ -656,6 +660,8 @@ impl App {
             pending_spawn: None,
             insert_mode: true,
             textarea: crate::components::textarea::Textarea::new(),
+            textarea_state: crate::components::textarea::TextareaState::default(),
+            paste_burst: crate::components::paste_burst::PasteBurst::default(),
             input_history: vec![],
             history_cursor: None,
             mentions_open: false,
@@ -948,6 +954,15 @@ impl App {
                 // flow 事件经 WS 推送(drain_ws → app.flows[i].status)。
                 // fetch_claw_events/refresh_flows 不再在 Tick 调(保留方法定义,业务不变)。
                 self.drain_ws();
+                // PasteBurst flush:超时 burst 一次性插入(tmux 无 bracketed 时粘贴靠此时序 flush)
+                if self.panel == Panel::Control && self.insert_mode {
+                    use crate::components::paste_burst::FlushResult;
+                    let now = std::time::Instant::now();
+                    if let FlushResult::Paste(s) = self.paste_burst.flush_if_due(now) {
+                        self.textarea.insert_text(&s);
+                        self.turn_msg = self.textarea.text().to_string();
+                    }
+                }
             }
             AppEvent::Key(k) => {
                 // IT5 ③:启动时 observe 不可达 → flat 空。首次按键懒重试(非 Tick REST 轮询,
@@ -991,6 +1006,8 @@ impl App {
                 } else if self.panel == Panel::Control && self.insert_mode {
                     self.textarea.insert_text(&s);
                     self.turn_msg = self.textarea.text().to_string();
+                    // bracketed paste 已整段给 textarea,清 burst 状态(避免与 burst 冲突)
+                    self.paste_burst.clear_after_explicit_paste();
                 }
             }
         }
@@ -1543,42 +1560,47 @@ impl App {
         // textarea.handle_key 直接 mutate text+cursor;Enter=Send 发送 turn(发送后 clear)。
         // Tab/BackTab fall through 到导航(打字时仍可切焦点)。
         if self.panel == Panel::Control && self.insert_mode {
+            use crate::components::paste_burst::{CharDecision, FlushResult};
+            use crossterm::event::KeyModifiers;
+            let now = std::time::Instant::now();
+            // 先 flush 到期的 burst(超时 → 一次性插入整段 paste)
+            match self.paste_burst.flush_if_due(now) {
+                FlushResult::Paste(s) => {
+                    self.textarea.insert_text(&s);
+                    self.turn_msg = self.textarea.text().to_string();
+                }
+                FlushResult::None => {}
+            }
             match k.code {
                 KeyCode::Esc => {
                     self.insert_mode = false;
                     self.mentions_open = false;
+                    self.paste_burst.clear_window_after_non_char();
                     return false;
                 }
                 KeyCode::Up => {
-                    // IT7 ①:多行时优先 textarea 行内移(首行返 None 再翻历史)。
+                    // 多行(含 \n)→ textarea 逻辑行移;单行 → 翻历史
                     if self.textarea.line_count() > 1 {
-                        let op = self.textarea.handle_key(k);
+                        self.textarea.move_cursor_up();
                         self.turn_msg = self.textarea.text().to_string();
-                        if op != crate::components::textarea::TextareaOp::None {
-                            return false;
-                        }
+                        return false;
                     }
-                    // ADR-7:历史 ↑ → 回填 textarea(textarea.set_text + turn_msg 兼容)。
-                    if let Some(prev) = self.history_prev() {
-                        let s = prev.to_string();
+                    if let Some(h) = self.history_prev() {
+                        let s = h.to_string();
                         self.turn_msg = s.clone();
                         self.textarea.set_text(&s);
                     }
                     return false;
                 }
                 KeyCode::Down => {
-                    // IT7 ①:多行时优先 textarea 行内移(末行返 None 再翻历史)。
                     if self.textarea.line_count() > 1 {
-                        let op = self.textarea.handle_key(k);
+                        self.textarea.move_cursor_down();
                         self.turn_msg = self.textarea.text().to_string();
-                        if op != crate::components::textarea::TextareaOp::None {
-                            return false;
-                        }
+                        return false;
                     }
-                    // ADR-7:历史 ↓ → 末条后清空(写新输入)。
                     match self.history_next() {
-                        Some(next) => {
-                            let s = next.to_string();
+                        Some(h) => {
+                            let s = h.to_string();
                             self.turn_msg = s.clone();
                             self.textarea.set_text(&s);
                         }
@@ -1589,53 +1611,131 @@ impl App {
                     }
                     return false;
                 }
-                // IT5 ②:部分终端把 Enter 发成 Char('\r') 或 Char('\n')(非 KeyCode::Enter),
-                // 会落到 _ arm 被 textarea insert 当普通字符插入,turn 永不发送。此处统一兼容。
-                // ponytail: terminal 直发 Char('\r'/'\n') 不带 SHIFT/ALT(裸回车),故统一走 Send;
-                // 多行 Shift+Enter 仍由 textarea.handle_key(KeyCode::Enter+SHIFT) 在 _ arm 路径处理。
+                // Enter/\\r/\\n(终端兼容):burst 内 → 插入换行非发送;否则 Send
                 KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n') => {
-                    // ADR-7:mention popup 开时 Enter = 选候选插入;否则发送 turn。
                     if self.mentions_open {
-                        // ponytail: select()->Option<String> 由 mentions 组件实现;
-                        // 未注册前关 popup(占位),不发送。
                         self.mentions_open = false;
-                    } else {
-                        // Enter = Send:把 textarea 文本作 message 发送,再 clear。
-                        let msg = self.textarea.text().to_string();
-                        self.push_history(&msg);
-                        self.turn_msg = msg; // do_turn 读 turn_msg(兼容)
-                        self.do_turn();
-                        self.textarea.clear();
-                        self.mark_action("trigger");
+                        return false;
                     }
+                    if k.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
+                        self.textarea.insert_newline();
+                        self.turn_msg = self.textarea.text().to_string();
+                        return false;
+                    }
+                    // PasteBurst:burst 内 \\n → 累积进 buffer(不发送)
+                    if self.paste_burst.append_newline_if_active(now) {
+                        return false;
+                    }
+                    // burst 窗口边缘(刚结束 120ms 内)→ 插 \\n(避免粘贴尾 Enter 误发)
+                    if self.paste_burst.newline_should_insert_instead_of_submit(now) {
+                        self.textarea.insert_newline();
+                        self.paste_burst.extend_window(now);
+                        self.turn_msg = self.textarea.text().to_string();
+                        return false;
+                    }
+                    // 真 Send
+                    let msg = self.textarea.text().to_string();
+                    self.push_history(&msg);
+                    self.turn_msg = msg;
+                    self.do_turn();
+                    self.textarea.clear();
+                    self.paste_burst.clear_after_explicit_paste();
+                    self.mark_action("trigger");
                     return false;
                 }
                 KeyCode::Tab | KeyCode::BackTab => {
-                    // 焦点导航键 fall through(打字时仍可 Tab 切焦点)。
+                    // fall through 到焦点导航
                 }
                 KeyCode::PageDown => {
-                    // IT4:打字时 PgDn 滚 chat(到接近底→重新跟尾)。
                     self.control_chat_scroll.page_down(self.page_viewport());
                     if self.near_bottom() { self.chat_follow_tail = true; }
                     return false;
                 }
                 KeyCode::PageUp => {
-                    // IT4:打字时 PgUp 滚 chat(脱离跟尾,读历史)。
                     self.control_chat_scroll.page_up(self.page_viewport());
                     self.chat_follow_tail = false;
                     return false;
                 }
+                KeyCode::Char('j') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                    // Ctrl+J 换行(tmux 可靠透传)
+                    if let Some(p) = self.paste_burst.flush_before_modified_input() {
+                        self.textarea.insert_text(&p);
+                    }
+                    self.textarea.insert_newline();
+                    self.paste_burst.clear_window_after_non_char();
+                    self.turn_msg = self.textarea.text().to_string();
+                    return false;
+                }
+                KeyCode::Char(c) if c != '\r' && c != '\n' => {
+                    let has_ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+                    let has_alt = k.modifiers.contains(KeyModifiers::ALT);
+                    if has_ctrl || has_alt {
+                        // Ctrl/Alt 组合键:flush burst,组合键暂忽略(Ctrl+J 已上面处理)
+                        if let Some(p) = self.paste_burst.flush_before_modified_input() {
+                            self.textarea.insert_text(&p);
+                            self.turn_msg = self.textarea.text().to_string();
+                        }
+                        self.paste_burst.clear_window_after_non_char();
+                        return false;
+                    }
+                    if !c.is_ascii() {
+                        // 非 ASCII(IME)直接插入,不进 burst
+                        if let Some(p) = self.paste_burst.flush_before_modified_input() {
+                            self.textarea.insert_text(&p);
+                        }
+                        self.textarea.insert_text(&c.to_string());
+                        self.turn_msg = self.textarea.text().to_string();
+                        return false;
+                    }
+                    // ASCII 普通字符 → PasteBurst 决策
+                    match self.paste_burst.on_plain_char(c, now) {
+                        CharDecision::Typed(_) => {
+                            // 非 burst:立即插入 textarea(乐观显示)
+                            self.textarea.insert_text(&c.to_string());
+                            self.turn_msg = self.textarea.text().to_string();
+                            if c == '@' {
+                                self.mentions_open = true;
+                            }
+                            return false;
+                        }
+                        CharDecision::BufferAppend => {
+                            self.paste_burst.append_char_to_buffer(c, now);
+                            return false;
+                        }
+                        CharDecision::BeginBuffer { retro_chars } => {
+                            // retro-grab:抠 textarea cursor 前 retro_chars 字符进 buffer。
+                            // 任何快速 ≥3 字符(8ms 内)即判 burst(人打字 >50ms 不触发);
+                            // ponytail: 去 codex decide_begin_buffer 的 looks_pastey 门槛(≥16/含空白),
+                            //   因 tmux 无 bracketed,短粘贴也要 burst 才能拦 \n;代价:快速打字偶发闪烁。
+                            let cur = self.textarea.cursor();
+                            let txt = self.textarea.text().to_string();
+                            let safe_cur = cur.min(txt.len());
+                            let before = &txt[..safe_cur];
+                            let start_byte = crate::components::paste_burst::retro_start_index(
+                                before,
+                                retro_chars as usize,
+                            );
+                            let grabbed = before[start_byte..].to_string();
+                            if start_byte < safe_cur {
+                                self.textarea.replace_range_raw(start_byte..safe_cur, "");
+                            }
+                            self.paste_burst.begin_with_retro_grabbed(grabbed, now);
+                            self.paste_burst.append_char_to_buffer(c, now);
+                            return false;
+                        }
+                    }
+                }
                 _ => {
-                    // 编辑键(Backspace/Left/Right/Char/Home/End/...)交 textarea 处理。
+                    // 编辑键(Backspace/Delete/Left/Right/Home/End):flush burst + textarea
+                    if let Some(p) = self.paste_burst.flush_before_modified_input() {
+                        self.textarea.insert_text(&p);
+                    }
                     use crate::components::textarea::TextareaOp;
                     let op = self.textarea.handle_key(k);
-                    // 同步 turn_msg(do_turn 兼容读 turn_msg)。
+                    self.paste_burst.clear_window_after_non_char();
                     self.turn_msg = self.textarea.text().to_string();
-                    // @mention popup:@ 出现 → 开 popup;@ 被删 → 关 popup。
                     match op {
-                        TextareaOp::Insert(c) if c == '@' => {
-                            self.mentions_open = true;
-                        }
+                        TextareaOp::Insert(cc) if cc == '@' => self.mentions_open = true,
                         TextareaOp::Backspace => {
                             if !self.turn_msg.ends_with('@') {
                                 self.mentions_open = false;
@@ -2954,9 +3054,9 @@ mod tests {
         // cursor 在末尾(cd 尾)→ Down 返 None → 翻历史(空历史 → no-op,cursor 不变)。
         app.handle_base_key(&KeyEvent::new(KeyCode::Down, crosysterm_keymods()));
         assert_eq!(app.textarea.cursor(), app.textarea.text().len(), "Down on last line keeps cursor");
-        // Up → 移到 line1 行首(byte 0)。
+        // Up → codex 保列:cd 行 col 2 → ab 行 col 2 = ab 末(byte 2,非旧行首语义)。
         app.handle_base_key(&KeyEvent::new(KeyCode::Up, crosysterm_keymods()));
-        assert_eq!(app.textarea.cursor(), 0, "Up moves to first line start");
+        assert_eq!(app.textarea.cursor(), 2, "Up 保列移到上一行 ab 末");
     }
 }
 
