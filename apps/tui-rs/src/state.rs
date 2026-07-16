@@ -138,7 +138,8 @@ pub fn delete_session_raw(ht: &str, sid: &str) -> bool {
 }
 
 pub fn fetch_events(h: &str, sid: &str) -> Option<Vec<ObserveEvent>> {
-    ureq::get(&format!("{}/sessions/{}/{}/events?limit=50", OBSERVE, h, sid))
+    // IT6:limit 50→200,与 drain_ws cap=200 对齐(原 50 截断长 session)。
+    ureq::get(&format!("{}/sessions/{}/{}/events?limit=200", OBSERVE, h, sid))
         .call()
         .ok()?
         .into_json::<EventsResp>()

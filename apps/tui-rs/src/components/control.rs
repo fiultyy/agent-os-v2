@@ -116,80 +116,8 @@ pub fn turn_separator_line(tick_id: &str, idx: usize) -> Line<'static> {
     Line::from(Span::styled(label, Style::default().fg(Color::DarkGray)))
 }
 
-/// chat turn 行样式:Cursor 式 user/assistant 前缀 + 工具调用弱化(ADR:Control 对话卷轴)。
-/// - tick_started request → user 行(USER ▸)。
-/// - tick_completed response → assistant 行(ASSISTANT ▸ + md 多行,首行带前缀)。
-/// - tool_call/tool_result → 弱化(DarkGray + 缩进,不抢主对话视觉)。
-
-/// user turn 行:tick_started 的 request message 渲染为 `❯ USER ▸ request`。
-pub fn chat_user_line(e: &ObserveEvent) -> Line<'static> {
-    let request = fmt_val(&e.data, "request");
-    Line::from(vec![
-        Span::styled("❯ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::styled("USER ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::styled("▸ ", Style::default().fg(Color::DarkGray)),
-        Span::raw(trunc(&request, 80)),
-    ])
-}
-
-/// assistant turn 行:tick_completed response 渲染为 md 多行,首行带 `ASSISTANT ▸` 前缀。
-/// 后续行缩进(对齐 md_response_lines 的 3 空格缩进)。
-pub fn chat_assistant_lines(e: &ObserveEvent) -> Vec<Line<'static>> {
-    let response = fmt_val(&e.data, "response");
-    let prefix_spans: Vec<Span<'static>> = vec![
-        Span::styled("✦ ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-        Span::styled("ASSISTANT ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-        Span::styled("▸ ", Style::default().fg(Color::DarkGray)),
-    ];
-    if response.is_empty() {
-        return vec![Line::from(prefix_spans)];
-    }
-    let text = markdown::md_to_text(&response);
-    let mut out: Vec<Line> = Vec::with_capacity(text.lines.len());
-    for (i, line) in text.lines.into_iter().enumerate() {
-        let mut spans: Vec<Span<'static>> = if i == 0 {
-            prefix_spans.clone()
-        } else {
-            vec![Span::raw("   ")] // 后续行缩进,对齐 md_response_lines
-        };
-        spans.extend(line.spans);
-        out.push(Line::from(spans));
-    }
-    out
-}
-
-/// 工具调用弱化行:tool_call/tool_result 用 DarkGray 缩进呈现(不抢主对话视觉)。
-pub fn chat_tool_line(e: &ObserveEvent) -> Line<'static> {
-    let (glyph, tag, body) = match e.event_type.as_str() {
-        "tool_call" => ("⚒", "tool", fmt_val(&e.data, "tool_name")),
-        "tool_result" => ("◷", "result", fmt_val(&e.data, "result")),
-        _ => return stack_event_line(e),
-    };
-    Line::from(vec![
-        Span::styled(
-            format!("    {} {} ", glyph, tag),
-            Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
-        ),
-        Span::styled(trunc(&body, 60), Style::default().fg(Color::DarkGray)),
-    ])
-}
-
-/// ToolCallBadge:tool_call/tool_result 视觉标识行。独立 fn(可复用)。
-/// tool_call → ⚒ TOOL▸ tool_name;tool_result → ◷ TOOL◂ result。
-pub fn tool_call_badge_line(e: &ObserveEvent) -> Line<'static> {
-    let (glyph, tag, body, color) = match e.event_type.as_str() {
-        "tool_call" => ("⚒", "TOOL▸", fmt_val(&e.data, "tool_name"), Color::Blue),
-        "tool_result" => ("◷", "TOOL◂", fmt_val(&e.data, "result"), Color::Cyan),
-        _ => return stack_event_line(e),
-    };
-    Line::from(vec![
-        Span::styled(format!(" {} {} ", glyph, tag), Style::default().fg(Color::Black).bg(color).add_modifier(Modifier::BOLD)),
-        Span::raw(format!(" {}", trunc(&body, 60))),
-    ])
-}
-
-/// 通用事件行(含 tool_call/tool_result 完整匹配)。
-/// pub 供 render.rs Observe draw_stack 复用(消除重复,两处共用)。
+/// 通用事件行(Observe draw_stack 复用,逐事件平铺渲染)。
+/// render_turn_stream 不用它;render.rs Observe tab 用。
 pub fn stack_event_line(e: &ObserveEvent) -> Line<'static> {
     let (tag, color, body) = match e.event_type.as_str() {
         "tick_started" => ("START", Color::Green, fmt_val(&e.data, "request")),
@@ -205,61 +133,163 @@ pub fn stack_event_line(e: &ObserveEvent) -> Line<'static> {
     ])
 }
 
-/// tick_completed response markdown 渲染:把 response 字段当 markdown 渲染(多行 Text)。
-/// 复用 components/markdown.rs md_to_text。返回 Vec<Line>(已缩进 + 着色)。
-pub fn md_response_lines(e: &ObserveEvent) -> Vec<Line<'static>> {
-    let response = fmt_val(&e.data, "response");
+/// 把 markdown 文本渲染成带缩进的 Lines(assistant cell 复用)。
+fn md_indented_lines(response: &str, prefix_spans: &[Span<'static>]) -> Vec<Line<'static>> {
     if response.is_empty() {
-        return vec![];
+        return vec![Line::from(prefix_spans.to_vec())];
     }
-    let text = markdown::md_to_text(&response);
-    let mut out: Vec<Line> = Vec::new();
-    for line in text.lines {
-        // 每行前缀缩进(对话内容视觉层级)。
-        let mut spans = vec![Span::raw("   ")];
-        spans.extend(line.spans);
-        out.push(Line::from(spans));
-    }
-    out
+    let text = markdown::md_to_text(response);
+    text.lines
+        .into_iter()
+        .enumerate()
+        .map(|(i, line)| {
+            let mut spans: Vec<Span<'static>> = if i == 0 {
+                prefix_spans.to_vec()
+            } else {
+                vec![Span::raw("   ")] // 续行缩进 2 空格宽(3 char 视觉对齐前缀)
+            };
+            spans.extend(line.spans);
+            Line::from(spans)
+        })
+        .collect()
 }
 
-/// 把 cursor session 的 turn stream 渲染成 Lines。
-/// 按 tick_started 分组,每组:TurnSeparator + 事件行(tool_call/result 用 badge,token_delta 内联,
-/// tick_completed response 用 md 渲染)。复用 TurnSeparator + ToolCallBadge + md_response_lines。
+/// IT6 codex cell 模型:把 cursor session 的事件流渲染成 Lines。
+///
+/// 不再逐事件渲染。按 tick_id 分组为 turn,每个 turn = 一组 cells:
+/// - user cell:tick_started 的 request → 一行 `> request`(> Cyan bold)。
+/// - tool cells:同 tick 内 tool_call + 紧随的 tool_result 配对合并为一行 `▸ tool_name result`(三角 DarkGray dim)。
+/// - assistant cell:同 tick 的 token_delta 累积,或优先用 tick_completed.response;渲染为 md cell(• Magenta dim,首行带前缀,续行缩进)。
+///   token_delta 绝不逐行渲染(避免碎片/乱序)。
+/// - turn 间用空行分隔(不用 dash 线)。
+///
+/// 无 tick_started 事件时按 flat stack 兜底(逐事件 stack_event_line)。
 pub fn render_turn_stream(evs: &[ObserveEvent]) -> Vec<Line<'static>> {
-    let mut out: Vec<Line> = vec![];
-    let mut turn_idx: usize = 0;
-    let mut cur_tick: String = String::new();
+    use std::collections::HashMap as Map;
 
+    // 1) 按 tick_id 分组(保持首次出现顺序)。无 tick_id 的事件并入 "" 桶兜底。
+    let mut order: Vec<String> = Vec::new();
+    let mut buckets: Map<String, Vec<&ObserveEvent>> = Map::new();
     for e in evs {
-        // tick_started 开新 turn 块(仅当 tick_id 不同 —— F1 修复:原只查 empty 不比较 tick_id,防御连续相同 tick_id)。
-        if e.event_type == "tick_started" && e.tick_id != cur_tick {
-            if !cur_tick.is_empty() {
-                turn_idx += 1;
-            }
-            cur_tick = e.tick_id.clone();
-            out.push(turn_separator_line(&e.tick_id, turn_idx));
+        let key = if e.tick_id.is_empty() { String::new() } else { e.tick_id.clone() };
+        if !buckets.contains_key(&key) {
+            order.push(key.clone());
         }
-        if e.event_type == "tick_started" {
-            // tick_started 本身也一行(request message)。
-            out.push(stack_event_line(e));
-            continue;
+        buckets.entry(key).or_default().push(e);
+    }
+
+    // 全无 tick_id 桶:flat 兜底。
+    let any_tick = evs.iter().any(|e| !e.tick_id.is_empty());
+    if !any_tick {
+        return evs.iter().map(stack_event_line).collect();
+    }
+
+    let mut out: Vec<Line> = Vec::new();
+    for (i, tick) in order.iter().enumerate() {
+        let group = match buckets.get(tick) {
+            Some(g) => g,
+            None => continue,
+        };
+        // turn 间空行分隔(首个 turn 前不加)。
+        if i > 0 {
+            out.push(Line::raw(""));
         }
-        if e.event_type == "tool_call" || e.event_type == "tool_result" {
-            out.push(tool_call_badge_line(e));
-        } else if e.event_type == "tick_completed" {
-            // response 用 md 渲染(多行)。
-            let md_lines = md_response_lines(e);
-            if md_lines.is_empty() {
-                out.push(stack_event_line(e));
-            } else {
-                out.extend(md_lines);
+        // 轻量 turn 头(可选 tick_id 提示,dim,仅当非空)。
+        if !tick.is_empty() {
+            out.push(Line::from(Span::styled(
+                format!("── {} ──", trunc(tick, 16)),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+
+        // 2) user cell:首个 tick_started 的 request。
+        let mut user_rendered = false;
+        // 3) tool 配对:tool_call + 紧随的同 tick tool_result 合并为一行。
+        // 4) assistant cell:token_delta 累积 / tick_completed.response(优先)。
+        // 收集 assistant 文本(tick_completed.response 优先,否则累积 token_delta)。
+        let mut assistant_text = String::new();
+        let mut assistant_from_response = false;
+        for e in group {
+            if e.event_type == "tick_completed" {
+                let resp = fmt_val(&e.data, "response");
+                if !resp.is_empty() {
+                    assistant_text = resp;
+                    assistant_from_response = true;
+                }
             }
-        } else {
-            out.push(stack_event_line(e));
+        }
+        // 无 response 才累积 token_delta(流式中途或无 finalize)。
+        if !assistant_from_response {
+            for e in group {
+                if e.event_type == "token_delta" {
+                    assistant_text.push_str(&fmt_val(&e.data, "delta_text"));
+                }
+            }
+        }
+
+        // 渲染 user + tool(按事件顺序;tool_call/result 配对合并)。
+        let mut j = 0;
+        while j < group.len() {
+            let e = group[j];
+            if e.event_type == "tick_started" && !user_rendered {
+                let request = fmt_val(&e.data, "request");
+                out.push(Line::from(vec![
+                    Span::styled("> ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::styled(trunc(&request, 120), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                ]));
+                user_rendered = true;
+                j += 1;
+                continue;
+            }
+            if e.event_type == "tool_call" {
+                let tool_name = fmt_val(&e.data, "tool_name");
+                // 找紧随的 tool_result(同 tick)。
+                let mut result = String::new();
+                let mut k = j + 1;
+                while k < group.len() {
+                    if group[k].event_type == "tool_result" {
+                        result = fmt_val(&group[k].data, "result");
+                        break;
+                    }
+                    if group[k].event_type == "tool_call" {
+                        break; // 下一个 call,本 call 无 result
+                    }
+                    k += 1;
+                }
+                let body = if result.is_empty() {
+                    tool_name.clone()
+                } else {
+                    format!("{} → {}", tool_name, result)
+                };
+                out.push(Line::from(vec![
+                    Span::styled("▸ ", Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)),
+                    Span::styled(trunc(&body, 100), Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)),
+                ]));
+                j = if result.is_empty() { j + 1 } else { k + 1 };
+                continue;
+            }
+            if e.event_type == "tool_result" {
+                // 孤立 result(无配对 call):单独行。
+                let result = fmt_val(&e.data, "result");
+                out.push(Line::from(vec![
+                    Span::styled("◂ ", Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)),
+                    Span::styled(trunc(&result, 100), Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)),
+                ]));
+                j += 1;
+                continue;
+            }
+            j += 1;
+        }
+
+        // 5) assistant cell(若有文本)。
+        if !assistant_text.is_empty() {
+            let prefix: Vec<Span<'static>> = vec![
+                Span::styled("• ", Style::default().fg(Color::Magenta).add_modifier(Modifier::DIM)),
+            ];
+            out.extend(md_indented_lines(&assistant_text, &prefix));
         }
     }
-    // 无任何 turn_started 事件:按原 flat 渲染(兜底)。
+
     if out.is_empty() {
         for e in evs {
             out.push(stack_event_line(e));
@@ -267,3 +297,119 @@ pub fn render_turn_stream(evs: &[ObserveEvent]) -> Vec<Line<'static>> {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::ObserveEvent;
+    use std::collections::HashMap;
+
+    fn ev(t: &str, tick: &str, kv: &[(&str, &str)]) -> ObserveEvent {
+        let mut d = HashMap::new();
+        for (k, v) in kv {
+            d.insert((*k).to_string(), serde_json::Value::String((*v).to_string()));
+        }
+        ObserveEvent {
+            event_type: t.to_string(),
+            tick_id: tick.to_string(),
+            harness_id: "h".to_string(),
+            data: d,
+        }
+    }
+
+    /// 把 Line 的所有 spans 拼成一个 String(忽略样式)。
+    fn spans_str(l: &Line) -> String {
+        l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
+    }
+
+    /// IT6 core:token_delta 必须合并为单个 assistant cell,绝不逐行渲染。
+    #[test]
+    fn token_delta_merged_into_one_assistant_cell() {
+        let evs = vec![
+            ev("tick_started", "t1", &[("request", "hi")]),
+            ev("token_delta", "t1", &[("delta_text", "Hel")]),
+            ev("token_delta", "t1", &[("delta_text", "lo")]),
+            ev("token_delta", "t1", &[("delta_text", " world")]),
+        ];
+        let out = render_turn_stream(&evs);
+        let joined = out.iter().map(spans_str).collect::<Vec<_>>().join("\n");
+        // 合并后的完整文本出现在某行(可能被 md 包裹,但必须连续)。
+        assert!(joined.contains("Hello world"), "token_delta 未合并: {}", joined);
+        // 绝不能出现碎片行。
+        assert!(!joined.contains("δ"), "token_delta 被逐行渲染(stack_event_line): {}", joined);
+        // 仅 1 个 assistant cell(• 前缀出现 1 次)。
+        let dots = joined.matches('•').count();
+        assert_eq!(dots, 1, "期望 1 个 assistant cell,实际 {}: {}", dots, joined);
+    }
+
+    /// tick_completed.response 优先于 token_delta 累积。
+    #[test]
+    fn response_preferred_over_delta_accumulation() {
+        let evs = vec![
+            ev("tick_started", "t1", &[("request", "q")]),
+            ev("token_delta", "t1", &[("delta_text", "PARTIAL")]),
+            ev("tick_completed", "t1", &[("response", "FINAL")]),
+        ];
+        let out = render_turn_stream(&evs);
+        let joined = out.iter().map(spans_str).collect::<Vec<_>>().join("\n");
+        assert!(joined.contains("FINAL"), "缺 response: {}", joined);
+        assert!(!joined.contains("PARTIAL"), "response 未优先,delta 残留: {}", joined);
+    }
+
+    /// tool_call + tool_result 配对合并为一行(三角前缀)。
+    #[test]
+    fn tool_call_result_paired_into_one_line() {
+        let evs = vec![
+            ev("tick_started", "t1", &[("request", "run it")]),
+            ev("tool_call", "t1", &[("tool_name", "bash")]),
+            ev("tool_result", "t1", &[("result", "ok")]),
+            ev("tick_completed", "t1", &[("response", "done")]),
+        ];
+        let out = render_turn_stream(&evs);
+        let joined = out.iter().map(spans_str).collect::<Vec<_>>().join("\n");
+        // 合并行:tool_name → result。
+        assert!(joined.contains("bash") && joined.contains("ok"), "tool 未合并: {}", joined);
+        // 三角前缀(▸)出现 1 次。
+        let tri = joined.matches('▸').count();
+        assert_eq!(tri, 1, "期望 1 个 tool cell,实际 {}: {}", tri, joined);
+    }
+
+    /// turn 间用空行分隔,不用 dash 线作主分隔(仍可有轻量 tick 头)。
+    #[test]
+    fn turns_separated_by_blank_line() {
+        let evs = vec![
+            ev("tick_started", "t1", &[("request", "a")]),
+            ev("tick_completed", "t1", &[("response", "A")]),
+            ev("tick_started", "t2", &[("request", "b")]),
+            ev("tick_completed", "t2", &[("response", "B")]),
+        ];
+        let out = render_turn_stream(&evs);
+        let joined = out.iter().map(spans_str).collect::<Vec<_>>().join("\n");
+        // 两 turn 之间有空行。
+        assert!(joined.contains("\n\n"), "turn 间无空行: {}", joined);
+        // 两 turn 内容都在。
+        assert!(joined.contains("a") && joined.contains("B"), "内容丢失: {}", joined);
+    }
+
+    /// user 前缀 > (Cyan bold)。
+    #[test]
+    fn user_prefix_greater_than() {
+        let evs = vec![ev("tick_started", "t1", &[("request", "hello")])];
+        let out = render_turn_stream(&evs);
+        let joined = out.iter().map(spans_str).collect::<Vec<_>>().join("\n");
+        assert!(joined.contains("> hello"), "user 前缀不符: {}", joined);
+    }
+
+    /// 无 tick_id 事件:flat 兜底(逐事件 stack_event_line)。
+    #[test]
+    fn no_tick_falls_back_to_flat_stack() {
+        let evs = vec![
+            ev("tick_started", "", &[("request", "x")]),
+            ev("tick_completed", "", &[("response", "y")]),
+        ];
+        let out = render_turn_stream(&evs);
+        // flat:至少 2 行(每事件一行),且无空行分隔。
+        assert!(out.len() >= 2, "flat 兜底行数不足: {}", out.len());
+    }
+}
+
