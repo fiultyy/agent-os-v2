@@ -409,98 +409,164 @@ fn node_status_glyph(status: &str) -> (String, Color) {
     }
 }
 
-/// ADR-3(第八轮):Observe tab 卷轴 UI。所有 session 事件流连续滚动(日志总览),
-/// 不分 session 树 | turn stream HSplit(改全屏 ScrollView 大卷轴)。
-/// 每 session 一个 header 块 + 其事件行(session 标签前缀)。点 header/session → 跳 Control(ADR-2)。
-/// WS 数据源不变(observe service 不改,drain_ws 更新 app.events)。
+/// IT3 ④:Observe 改折叠树 + 查看面板 + 跳转按钮。
+/// 上半 = 折叠树(组 header ▾/▸+名+count,点击 toggle;展开显 session 行,点击查看);
+/// 下半 = 选中 session(observe_view_cursor)的事件流(ScrollView);
+/// 跳转 Control 用独立按钮(id 400)→ jump_to_control(不再 session 点击自动跳)。
+/// clickmap id 段:400=跳转按钮、500+组、600+session(flat idx)。
 pub fn draw_stack(f: &mut Frame, area: Rect, app: &mut App) {
-    app.observe_area = area; // 缓存供 events 鼠标命中(分隔条拖拽虽去,保留兼容)
+    app.observe_area = area;
 
-    // 收集所有 session 事件 → 连续行(header 块 + 事件行)。按 flat 顺序(已排序)。
-    // 跟踪每 session header 在总行列表中的索引(供 clickmap 算屏幕 y,考虑 scroll offset)。
-    let mut all_lines: Vec<Line> = vec![
-        Line::from(Span::styled(
-            " OBSERVE · 事件卷轴(所有 session 连续滚动 · 点 header 跳 Control · Enter 跳 Control)".to_string(),
-            Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
-        )),
-        Line::raw(""),
-    ];
-    // (header_line_idx, flat_idx) 对:header 行在全量 lines 中的索引 + 对应 flat 索引。
-    let mut header_marks: Vec<(usize, usize)> = vec![];
+    // 上下分屏:上半折叠树(固定够用的高度),下半选中 session 事件流。
+    // ponytail: 上半按内容行数动态(组数+展开 session 数 +4 标题/提示),clamp 3..area 的 60%。
+    let mut harnesses: Vec<String> = app.sessions.sessions_by_harness.keys().cloned().collect();
+    harnesses.sort();
+    let tree_rows = harnesses.len() // 组 header
+        + harnesses.iter().map(|h| {
+            if app.observe_collapsed.contains(h) { 0 }
+            else { app.sessions.sessions_by_harness.get(h).map(|v| v.len()).unwrap_or(0) }
+        }).sum::<usize>()
+        + harnesses.len().max(1) // 组间空行
+        + 4; // 标题/提示
+    let top_h = (tree_rows as u16).clamp(4, (area.height as u16 * 6 / 10).max(4));
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(top_h), Constraint::Min(4), Constraint::Length(1)])
+        .split(area);
+    let tree_area = chunks[0];
+    let view_area = chunks[1];
+    let jump_area = chunks[2];
 
-    for (fi, s) in app.flat.iter().enumerate() {
-        let key = format!("{}/{}", s.harness_type, s.session_id);
-        let evs = app.events.get(&key);
-        let ev_n = evs.map(|e| e.len()).unwrap_or(0);
-        let inst = app.instance_count(&s.harness_type, &s.session_id);
-        let sid_tag = trunc(&s.session_id, 24);
-        let multi_tag = if inst >= 2 { format!(" ×{}", inst) } else { String::new() };
+    // ── 上半:折叠树 ──
+    let tree_block = region_block(" Observe · session 树(点组折叠 · 点 session 查看) ");
+    let tree_inner = tree_block.inner(tree_area);
+    f.render_widget(tree_block, tree_area);
 
-        // header 行(session 标签 + 事件数 + 多实例)。
-        let is_cursor = fi == app.cursor;
-        let st = if is_cursor {
-            Style::default().fg(Color::White).bg(Color::Blue).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-        };
-        header_marks.push((all_lines.len(), fi));
-        all_lines.push(Line::from(vec![
-            Span::styled(format!(" ▸ {} ", sid_tag), st),
-            Span::styled(format!("({}) ", s.harness_type), Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{}ev", ev_n), Style::default().fg(Color::Yellow)),
-            Span::styled(
-                if inst >= 2 { format!("  {}", multi_tag) } else { String::new() },
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-            ),
+    let mut tree_lines: Vec<Line> = vec![];
+    // (row_in_tree_inner, flat_idx) 供 session 行 clickmap 注册;组 header clickmap 另记。
+    let mut session_marks: Vec<(u16, usize)> = vec![];
+    let mut group_marks: Vec<(u16, usize)> = vec![]; // (row, gi)
+    let mut row: u16 = 0;
+    let mut fi = 0usize;
+    for (gi, hs) in harnesses.iter().enumerate() {
+        if gi > 0 {
+            tree_lines.push(Line::raw(""));
+            row = row.saturating_add(1);
+        }
+        let n = app.sessions.sessions_by_harness.get(hs).map(|v| v.len()).unwrap_or(0);
+        let collapsed = app.observe_collapsed.contains(hs);
+        let arrow = if collapsed { "▸" } else { "▾" };
+        let (tag, color) = crate::state::harness_tag(hs);
+        group_marks.push((row, gi));
+        tree_lines.push(Line::from(vec![
+            Span::styled(format!(" {} ", tag), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{} ", arrow), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(hs.clone(), Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" ({})", n), Style::default().fg(Color::DarkGray)),
         ]));
-
-        // 事件行:每事件一行,session 标签前缀(日志风格)。
-        if let Some(evs) = evs {
-            for e in evs {
-                let (tag, color, body) = event_log_parts(e);
-                let prefix = format!(" [{}] ", trunc(&s.session_id, 10));
-                all_lines.push(Line::from(vec![
-                    Span::styled(prefix, Style::default().fg(Color::DarkGray)),
-                    Span::styled(format!(" {} ", tag), Style::default().fg(Color::Black).bg(color).add_modifier(Modifier::BOLD)),
-                    Span::raw(format!(" {}", trunc(&body, 50))),
-                ]));
+        row = row.saturating_add(1);
+        if !collapsed {
+            if let Some(ss) = app.sessions.sessions_by_harness.get(hs) {
+                for s in ss {
+                    let is_view = app.observe_view_cursor == Some(fi);
+                    let inst = app.instance_count(&s.harness_type, &s.session_id);
+                    let multi_tag = if inst >= 2 { format!(" ×{}", inst) } else { String::new() };
+                    let st = if is_view {
+                        Style::default().fg(Color::White).bg(Color::Blue).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::White)
+                    };
+                    session_marks.push((row, fi));
+                    tree_lines.push(Line::from(vec![
+                        Span::styled(format!("    ▸ {}", trunc(&s.session_id, 22)), st),
+                        Span::styled(multi_tag, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    ]));
+                    row = row.saturating_add(1);
+                    fi += 1;
+                }
             }
         } else {
-            all_lines.push(Line::from(Span::styled(
-                "   (observe 不可达 · r 刷新)".to_string(),
-                Style::default().fg(Color::DarkGray),
-            )));
+            fi += n; // 折叠:fi 前进保持 flat 对齐
         }
-        all_lines.push(Line::raw("")); // session 间空行
     }
-
     if app.flat.is_empty() {
-        all_lines.push(Line::from(Span::styled(
+        tree_lines.push(Line::from(Span::styled(
             " (无 session · r 刷新)".to_string(),
             Style::default().fg(Color::DarkGray),
         )));
     }
+    f.render_widget(Paragraph::new(tree_lines), tree_inner);
 
-    app.observe_scroll.set_content(all_lines);
-    app.observe_scroll.render(f, area);
-
-    // clickmap:为可见 header 行注册(flat 索引)供鼠标点击跳 Control。
-    // ScrollView render 用 Block(全 borders),inner = area 四周缩 1;offset 是行偏移。
-    // header 屏幕行 y = inner.y + (header_line_idx - offset)(落在 inner 内才注册)。
-    // ponytail: scroll offset 下 clickmap 仅 header 行精确(事件行不注册,日志卷轴点 header 足够)。
-    let inner = ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::ALL).inner(area);
-    let offset = app.observe_scroll.offset;
-    for (line_idx, flat_idx) in &header_marks {
-        if *line_idx < offset {
-            continue;
+    // clickmap:组 header(id 500+gi)、session 行(id 600+flat_idx)。
+    for (r, gi) in &group_marks {
+        let y = tree_inner.y + r;
+        if y < tree_inner.y + tree_inner.height {
+            app.clickmap.register(Rect::new(tree_inner.x, y, tree_inner.width, 1), 500 + gi);
         }
-        let screen_y = inner.y + (*line_idx - offset) as u16;
-        if screen_y >= inner.y + inner.height {
-            continue; // 屏幕外
-        }
-        let row_rect = Rect::new(inner.x, screen_y, inner.width, 1);
-        app.clickmap.register(row_rect, *flat_idx);
     }
+    for (r, fidx) in &session_marks {
+        let y = tree_inner.y + r;
+        if y < tree_inner.y + tree_inner.height {
+            app.clickmap.register(Rect::new(tree_inner.x, y, tree_inner.width, 1), 600 + fidx);
+        }
+    }
+
+    // ── 下半:选中 session 事件流(observe_view_cursor 指向的 session)──
+    let view_block = region_block(" Observe · 事件流(选中 session · 点击树中 session 查看) ");
+    let view_inner = view_block.inner(view_area);
+    f.render_widget(view_block, view_area);
+    let view_lines: Vec<Line> = match app.observe_view_cursor.and_then(|i| app.flat.get(i)) {
+        Some(s) => {
+            let key = format!("{}/{}", s.harness_type, s.session_id);
+            let mut out = vec![Line::from(vec![
+                Span::styled(format!(" ▸ {} ", trunc(&s.session_id, 28)),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("({}) ", s.harness_type), Style::default().fg(Color::DarkGray)),
+            ])];
+            match app.events.get(&key) {
+                Some(evs) => {
+                    if evs.is_empty() {
+                        out.push(Line::from(Span::styled(
+                            "   (无事件)".to_string(),
+                            Style::default().fg(Color::DarkGray),
+                        )));
+                    }
+                    for e in evs {
+                        let (tag, color, body) = event_log_parts(e);
+                        out.push(Line::from(vec![
+                            Span::styled(format!(" {} ", tag),
+                                Style::default().fg(Color::Black).bg(color).add_modifier(Modifier::BOLD)),
+                            Span::raw(format!(" {}", trunc(&body, 60))),
+                        ]));
+                    }
+                }
+                None => out.push(Line::from(Span::styled(
+                    "   (observe 不可达 · r 刷新)".to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ))),
+            }
+            out
+        }
+        None => vec![Line::from(Span::styled(
+            " (未选 session · 上方树点击 session 查看其事件流)".to_string(),
+            Style::default().fg(Color::DarkGray),
+        ))],
+    };
+    app.observe_scroll.set_content(view_lines);
+    // view_inner 已在 region_block 边框内,scroll 不再叠自己的边框(免双框)。
+    app.observe_scroll.bordered = false;
+    app.observe_scroll.render(f, view_inner);
+
+    // ── 跳转 Control 按钮(id 400):整行宽,点击 → jump_to_control(view_cursor)──
+    let has_view = app.observe_view_cursor.is_some();
+    let style = if has_view {
+        Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let label = if has_view { " →Control (跳转 · 查看选中 session 的 Control 面板) " } else { " →Control (先选 session) " };
+    f.render_widget(Paragraph::new(label).style(style), jump_area);
+    app.clickmap.register(jump_area, 400);
 }
 
 /// 事件 → (tag, color, body)用于卷轴日志行(ADR-3 Observe 卷轴)。复用 glyph 语义。
@@ -557,8 +623,10 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
         app.clickmap.register(new_rect, 300);
     }
 
-    // session 列:flat 顺序(已按 harness 排序),去组头,组间空行。
-    // 记录每组首 session 行(group_start),供色块对齐渲染到该行。
+    // IT3 ③:Control 左大纲改成真折叠树。
+    //   - 每组一行 header(色块列 + ▾/▸ + 名+count),id 200+ 点击 toggle_group。
+    //   - control_collapsed 含该组 → 只画 header,跳过 session 行;否则画 header + session 行。
+    //   - 组间留空行分隔。session 行 id 100+(flat idx)→ 选 cursor。
     // IT2 节点 C:sessions 从 sess_col.y+1 起([+] new 占第 0 行)。
     let list_area = Rect {
         y: sess_col.y + 1,
@@ -566,51 +634,74 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
         ..sess_col
     };
     let mut items: Vec<ListItem> = vec![];
-    let mut ci = 0usize;
+    let mut ci = 0usize; // flat 索引(与 app.flat 对齐)
     let mut row_idx: u16 = 0; // 相对 list_area 内偏移
-    let mut group_start: Vec<u16> = vec![];
-    let sid_cap = sess_col.width.saturating_sub(6).max(4) as usize;
-    for hs in &harnesses {
-        let mut group_first = true;
-        if let Some(ss) = app.sessions.sessions_by_harness.get(hs) {
-            for s in ss {
-                if ci > 0 && group_first {
-                    items.push(ListItem::new(""));
+    // (gi, header_row_idx):组 header 所在行(供色块列对齐)。
+    let mut group_header_rows: Vec<u16> = vec![];
+    let sid_cap = sess_col.width.saturating_sub(8).max(4) as usize;
+    for (gi, hs) in harnesses.iter().enumerate() {
+        // 组间空行分隔(首组除外)。
+        if gi > 0 {
+            items.push(ListItem::new(""));
+            row_idx = row_idx.saturating_add(1);
+        }
+        // 组 header 行:▾/▸ + 名 + (count)。
+        group_header_rows.push(row_idx);
+        let ss = app.sessions.sessions_by_harness.get(hs).map(|v| v.len()).unwrap_or(0);
+        let collapsed = app.control_collapsed.contains(hs);
+        let arrow = if collapsed { "▸" } else { "▾" };
+        let is_cursor_grp = cursor_group.as_deref() == Some(hs.as_str());
+        let hdr_st = if is_cursor_grp {
+            Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD)
+        };
+        items.push(ListItem::new(ratatui::text::Line::from(vec![
+            Span::styled(format!("{} ", arrow), hdr_st),
+            Span::styled(hs.clone(), hdr_st),
+            Span::styled(format!(" ({})", ss), Style::default().fg(Color::DarkGray)),
+        ])));
+        // header 整行注册 clickmap(色块列 200+ 不再用;header 点击 toggle)。点击范围 = header 行整宽。
+        let hdr_rect = Rect::new(list_area.x, list_area.y + row_idx, list_area.width, 1);
+        app.clickmap.register(hdr_rect, 200 + gi);
+        row_idx = row_idx.saturating_add(1);
+
+        // 展开态:画 session 行;折叠态:跳过。
+        if !collapsed {
+            if let Some(ss_list) = app.sessions.sessions_by_harness.get(hs) {
+                for s in ss_list {
+                    let sid = trunc(&s.session_id, sid_cap);
+                    let inst = app.instance_count(&s.harness_type, &s.session_id);
+                    let ev_key = format!("{}/{}", s.harness_type, s.session_id);
+                    let ev_n = app.events.get(&ev_key).map(|e| e.len()).unwrap_or(0);
+                    let multi_tag = if inst >= 2 { format!("×{}", inst) } else { String::new() };
+                    let row_rect = Rect::new(list_area.x, list_area.y + row_idx, list_area.width, 1);
+                    let hovered = app.mouse.in_rect(row_rect);
+                    let is_cursor = ci == app.cursor;
+                    let (prefix, st) = if is_cursor {
+                        ("  ▸", Style::default().fg(Color::White).bg(Color::Blue).add_modifier(Modifier::BOLD))
+                    } else if hovered {
+                        ("   ", Style::default().fg(Color::Black).bg(Color::Yellow))
+                    } else {
+                        ("   ", Style::default().fg(Color::White))
+                    };
+                    let multi_color = if inst >= 2 { Color::Yellow } else { Color::DarkGray };
+                    let line = ratatui::text::Line::from(vec![
+                        Span::styled(format!("{}{}", prefix, sid), st),
+                        Span::styled(multi_tag, Style::default().fg(multi_color).add_modifier(Modifier::BOLD)),
+                        Span::styled(format!(" {}", ev_n), Style::default().fg(Color::DarkGray)),
+                    ]);
+                    items.push(ListItem::new(line));
+                    app.clickmap.register(row_rect, 100 + ci);
+                    ci += 1;
                     row_idx = row_idx.saturating_add(1);
                 }
-                if group_first {
-                    group_start.push(row_idx);
-                    group_first = false;
-                }
-                let sid = trunc(&s.session_id, sid_cap);
-                let inst = app.instance_count(&s.harness_type, &s.session_id);
-                let ev_key = format!("{}/{}", s.harness_type, s.session_id);
-                let ev_n = app.events.get(&ev_key).map(|e| e.len()).unwrap_or(0);
-                let multi_tag = if inst >= 2 { format!("×{}", inst) } else { String::new() };
-                let row_rect = Rect::new(list_area.x, list_area.y + row_idx, list_area.width, 1);
-                let hovered = app.mouse.in_rect(row_rect);
-                let is_cursor = ci == app.cursor;
-                let (prefix, st) = if is_cursor {
-                    ("▸", Style::default().fg(Color::White).bg(Color::Blue).add_modifier(Modifier::BOLD))
-                } else if hovered {
-                    (" ", Style::default().fg(Color::Black).bg(Color::Yellow))
-                } else {
-                    (" ", Style::default().fg(Color::White))
-                };
-                let multi_color = if inst >= 2 { Color::Yellow } else { Color::DarkGray };
-                let line = ratatui::text::Line::from(vec![
-                    Span::styled(format!("{}{}", prefix, sid), st),
-                    Span::styled(multi_tag, Style::default().fg(multi_color).add_modifier(Modifier::BOLD)),
-                    Span::styled(format!(" {}", ev_n), Style::default().fg(Color::DarkGray)),
-                ]);
-                items.push(ListItem::new(line));
-                app.clickmap.register(row_rect, 100 + ci);
-                ci += 1;
-                row_idx = row_idx.saturating_add(1);
             }
-        }
-        if group_first {
-            group_start.push(row_idx); // 空组:占位保持与 harnesses 等长
+        } else {
+            // 折叠态:ci 仍要前进(保持 flat 索引对齐,虽然不画但 cursor 索引语义不变)。
+            if let Some(ss_list) = app.sessions.sessions_by_harness.get(hs) {
+                ci += ss_list.len();
+            }
         }
     }
     if app.flat.is_empty() {
@@ -620,12 +711,13 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
     }
     f.render_widget(List::new(items), list_area);
 
-    // 色块列:对齐到每组首 session 行(group_start),光标组反白;clickmap id 200+group_idx。
+    // 色块列:对齐到每组 header 行(group_header_rows),光标组反白。
+    // IT3 ③:色块仍画(视觉组标签),但点击行为已由 header 行 clickmap 200+ 接管(toggle)。
+    // 色块 rect 与 header 行重叠 → 同 id 200+ 注册(header rect 已覆盖,这里仅视觉)。
     for (gi, hs) in harnesses.iter().enumerate() {
         let (tag, color) = harness_tag(hs);
         let is_cursor = cursor_group.as_deref() == Some(hs.as_str());
-        let y_off = *group_start.get(gi).unwrap_or(&0);
-        // IT2 节点 C:sessions 下移 1 行([+] new 占首行),色块同步 +1 对齐。
+        let y_off = *group_header_rows.get(gi).unwrap_or(&0);
         let block_rect = Rect::new(tag_col.x, tag_col.y + 1 + y_off, 2, 1);
         if block_rect.y < tag_col.y + tag_col.height {
             let style = if is_cursor {
@@ -637,7 +729,6 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
                 Paragraph::new(tag).style(style).alignment(ratatui::layout::Alignment::Center),
                 block_rect,
             );
-            app.clickmap.register(block_rect, 200 + gi);
         }
     }
 
@@ -949,10 +1040,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     .style(Style::default().fg(Color::DarkGray));
     f.render_widget(hint, chunks[2]);
 
-    // z-order layer 1:overlay(Kitty 图片预览——有图形协议才画)。ponytail: 无图片资源时跳过。
-    if app.term.image_ok {
-        components::render_image_preview(f, area, &app.term);
-    }
+    // z-order layer 1:overlay(Kitty 图片预览)IT3 ② 已废——终端能力并入 i 弹窗(open_props)。
+    // render_image_preview 函数保留(dead_code),draw() 不再调。
 
     // z-order layer 2:modal popup 栈(栈顶最上)。每个弹窗 Clear 遮罩 + Block + 正文。
     // IT2 节点 C:new/delete 弹窗 body 按 state 实时刷新(picker 选中行/自由输入)。

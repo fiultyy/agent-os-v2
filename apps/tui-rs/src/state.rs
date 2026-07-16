@@ -564,6 +564,10 @@ pub struct App {
     /// ADR-4 左侧折叠树:已折叠组名集合(HashSet)。toggle_group 增删;
     /// 默认空集=全展开。draw_control 读此判 header 展开态。
     pub control_collapsed: std::collections::HashSet<String>,
+    /// IT3 ④:Observe 折叠树已折叠组名集合。toggle_observe_group 增删;默认空=全展开。
+    pub observe_collapsed: std::collections::HashSet<String>,
+    /// IT3 ④:Observe 当前"查看"的 session flat 索引(None=未选,显提示)。
+    pub observe_view_cursor: Option<usize>,
     /// ADR-3 props 弹窗激活(open_props 置 true,esc/enter 关)。替代原常驻「属性」tab。
     pub props_open: bool,
     // ── IT2 节点 C:new/delete 弹窗态(session 管理)──────────────────────
@@ -635,6 +639,8 @@ impl App {
             mentions_open: false,
             quit_requested: false,
             control_collapsed: std::collections::HashSet::new(),
+            observe_collapsed: std::collections::HashSet::new(),
+            observe_view_cursor: None,
             props_open: false,
             new_popup: None,
             new_candidates: vec![],
@@ -1170,6 +1176,19 @@ impl App {
                         return;
                     }
                 }
+                // ADR-3(IT3 ①):全局 ×(id999)/i(id998)按钮前置——任何 panel 任何位置点 × 都 quit。
+                // 原先 tabbar.hit 先跑,× 落在 tab_area 右端时被 tabbar 命中短路,quit 永不触发。
+                // 现提到 tabbar.hit 之前:命中 998/999 直接 return,不走后续 tab/clickmap。
+                if let Some(id) = self.clickmap.hit(m.column, m.row) {
+                    if *id == 999 {
+                        self.quit_requested = true;
+                        return;
+                    }
+                    if *id == 998 {
+                        self.open_props();
+                        return;
+                    }
+                }
                 // 顶栏 TabBar 命中切 base panel。
                 if let Some(i) = self.tabbar.hit(self.tab_area, m.column, m.row) {
                     self.tabbar.select(i);
@@ -1180,17 +1199,6 @@ impl App {
                 if self.panel == Panel::Control {
                     if let Some(i) = self.control_right_tabs.hit(self.right_tab_area, m.column, m.row) {
                         self.control_right_tabs.select(i);
-                        return;
-                    }
-                }
-                // ADR-3:顶栏右侧 i(id998→open_props)/×(id999→quit)全局命中(任意 panel)。
-                if let Some(id) = self.clickmap.hit(m.column, m.row) {
-                    if *id == 999 {
-                        self.quit_requested = true;
-                        return;
-                    }
-                    if *id == 998 {
-                        self.open_props();
                         return;
                     }
                 }
@@ -1221,11 +1229,36 @@ impl App {
                         return;
                     }
                 }
-                // ADR-2(第八轮):Observe session 点 → 跳 Control(跨 tab cursor 同步 + WS 重订阅)。
+                // IT3 ④:Observe 折叠树交互。
+                //   id 400 = 跳转 Control 按钮(observe_view_cursor 指向的 session → jump_to_control)
+                //   id 500+ = 组 header(gi = id-500)→ toggle_observe_group(展开/收起)
+                //   id 600+ = session 行(flat idx = id-600)→ 设 observe_view_cursor(查看,不跳)
                 if self.panel == Panel::Observe {
-                    if let Some(idx) = self.clickmap.hit(m.column, m.row) {
-                        self.jump_to_control(*idx);
-                        return;
+                    if let Some(id) = self.clickmap.hit(m.column, m.row) {
+                        if *id == 400 {
+                            // 跳转 Control:用 observe_view_cursor(若有),否则 fallback cursor。
+                            let idx = self.observe_view_cursor.unwrap_or(self.cursor);
+                            self.jump_to_control(idx);
+                            return;
+                        }
+                        if *id >= 600 {
+                            let idx = *id - 600;
+                            if idx < self.flat.len() {
+                                self.observe_view_cursor = Some(idx);
+                            }
+                            return;
+                        }
+                        if *id >= 500 {
+                            // 组 header:用 flat 的 harness_type 列表(排序去重)定位组名。
+                            let mut groups: Vec<String> =
+                                self.flat.iter().map(|s| s.harness_type.clone()).collect();
+                            groups.sort();
+                            groups.dedup();
+                            if let Some(g) = groups.get(*id - 500).cloned() {
+                                self.toggle_observe_group(&g);
+                            }
+                            return;
+                        }
                     }
                 }
             }
@@ -1304,13 +1337,44 @@ impl App {
         }
     }
 
+    /// IT3 ④:Observe 折叠树组 toggle。observe_collapsed HashSet 增删。
+    pub fn toggle_observe_group(&mut self, group: &str) {
+        if !self.observe_collapsed.insert(group.to_string()) {
+            self.observe_collapsed.remove(group);
+        }
+    }
+
     /// ADR-3:`i`(顶栏右)开 props 弹窗(替代常驻「属性」tab)。
     /// 置 props_open=true;render 据此画 props modal;esc/enter 关。
-    /// ponytail: props 内容暂复用 help 弹窗样式(render 侧 gate),待节点 B 接 props 组件。
+    /// IT3 ②:终端能力(protocol/image_ok/poll)从原右下 icat 框并入此弹窗。
     pub fn open_props(&mut self) {
         self.props_open = true;
+        // props body:cursor session 属性 + 终端能力段。
+        let mut body: Vec<String> = vec![];
+        match self.flat.get(self.cursor) {
+            Some(s) => {
+                let inst = self.instance_count(&s.harness_type, &s.session_id);
+                let ev_key = format!("{}/{}", s.harness_type, s.session_id);
+                let ev_n = self.events.get(&ev_key).map(|e| e.len()).unwrap_or(0);
+                let turn_disp = self.turn_status.clone().unwrap_or_else(|| "(未触发)".to_string());
+                body.push(format!(" sid     {}", trunc(&s.session_id, 30)));
+                body.push(format!(" harness {}", s.harness_type));
+                body.push(format!(" 实例    {}{}", inst, if inst >= 2 { "  (×N multi)" } else { "" }));
+                body.push(format!(" 事件    {}", ev_n));
+                body.push(format!(" last    {}", trunc(&turn_disp, 40)));
+            }
+            None => body.push("(无 session · r 刷新)".to_string()),
+        }
+        body.push(String::new());
+        body.push(format!(" protocol = {}", self.term.protocol.label()));
+        body.push(format!(" image_ok = {}", self.term.image_ok));
+        body.push(format!(" poll     = {}ms", self.term.poll_interval.as_millis()));
+        if !self.term.hint.is_empty() {
+            body.push(format!(" ⚠ {}", self.term.hint));
+        }
+        let h = (body.len() as u16 + 4).clamp(10, 24);
         self.open_popup(
-            Popup::centered("props", " props ", vec![], 60, 16),
+            Popup::centered("props", " props · 终端能力 ", body, 60, h),
         );
     }
 
@@ -1865,19 +1929,20 @@ mod tests {
     /// ADR-2(第八轮):Observe session 点 → 跳 Control(cursor 同步 + panel 切 Control)。
     /// 手动注册 clickmap region(id=1),模拟 draw_observe_scroll 注册后 handle_base_mouse 命中。
     #[test]
-    fn observe_clickmap_session_jumps_to_control() {
+    /// IT3 ④:Observe session 点击 → 设 observe_view_cursor(查看,不跳 Control);
+    /// 跳 Control 用独立按钮(id 400)。
+    #[test]
+    fn observe_clickmap_session_sets_view_cursor() {
         let mut app = App::new(crate::kitty::detect());
         app.panel = Panel::Observe;
-        // 填充 flat sessions(2 个)。
         app.flat = vec![
             Session { harness_type: "claw".into(), session_id: "sess-a".into(), harness_id: "h1".into() },
             Session { harness_type: "claw".into(), session_id: "sess-b".into(), harness_id: "h2".into() },
         ];
         app.cursor = 0;
-        // 模拟 draw_observe_scroll 注册 session 项(id=1,第二行)在 (0,3)-(35,4)。
+        // session 行 clickmap id = 600 + flat_idx(模拟 draw_stack 注册 session 行 1)。
         app.clickmap.clear();
-        app.clickmap.register(Rect::new(0, 3, 35, 1), 1);
-        // 点击该区域 → cursor=1 + panel=Control(跨 tab 跳转)。
+        app.clickmap.register(Rect::new(0, 3, 35, 1), 600 + 1);
         let m = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 5,
@@ -1885,8 +1950,69 @@ mod tests {
             modifiers: crossterm::event::KeyModifiers::empty(),
         };
         app.handle_base_mouse(&m);
-        assert_eq!(app.cursor, 1, "clicking session row 1 should set cursor=1");
-        assert_eq!(app.panel, Panel::Control, "clicking Observe session should jump to Control");
+        // 点 session → observe_view_cursor=Some(1),但不跳 Control(panel 仍 Observe)。
+        assert_eq!(app.observe_view_cursor, Some(1), "clicking session sets observe_view_cursor");
+        assert_eq!(app.panel, Panel::Observe, "clicking session views in-place, no jump");
+    }
+
+    /// IT3 ④:Observe 跳转按钮(id 400)→ jump_to_control(view_cursor 同步 cursor + panel=Control)。
+    #[test]
+    fn observe_jump_button_jumps_to_control() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Observe;
+        app.flat = vec![
+            Session { harness_type: "claw".into(), session_id: "sess-a".into(), harness_id: "h1".into() },
+            Session { harness_type: "claw".into(), session_id: "sess-b".into(), harness_id: "h2".into() },
+        ];
+        app.observe_view_cursor = Some(1);
+        // 跳转按钮 clickmap id=400。
+        app.clickmap.clear();
+        app.clickmap.register(Rect::new(0, 20, 40, 1), 400);
+        let m = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 20,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        app.handle_base_mouse(&m);
+        assert_eq!(app.panel, Panel::Control, "jump button → panel=Control");
+        assert_eq!(app.cursor, 1, "jump syncs view_cursor(1) into cursor");
+    }
+
+    /// IT3 ④:Observe 组 header 点击(id 500+gi)→ toggle_observe_group。
+    #[test]
+    fn observe_group_header_toggles() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Observe;
+        app.flat = vec![
+            Session { harness_type: "claude-code".into(), session_id: "cc-1".into(), harness_id: "h1".into() },
+            Session { harness_type: "openclaw".into(), session_id: "oc-1".into(), harness_id: "h2".into() },
+        ];
+        // 组 id=500+0 = claude-code(排序首)。
+        app.clickmap.clear();
+        app.clickmap.register(Rect::new(0, 2, 40, 1), 500);
+        let m = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 1,
+            row: 2,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        assert!(!app.observe_collapsed.contains("claude-code"));
+        app.handle_base_mouse(&m);
+        assert!(app.observe_collapsed.contains("claude-code"), "header click → 折叠");
+        app.handle_base_mouse(&m);
+        assert!(!app.observe_collapsed.contains("claude-code"), "再点 → 展开");
+    }
+
+    /// IT3 ④:toggle_observe_group 增删 observe_collapsed。
+    #[test]
+    fn toggle_observe_group_flips() {
+        let mut app = App::new(crate::kitty::detect());
+        assert!(!app.observe_collapsed.contains("g"));
+        app.toggle_observe_group("g");
+        assert!(app.observe_collapsed.contains("g"));
+        app.toggle_observe_group("g");
+        assert!(!app.observe_collapsed.contains("g"));
     }
 
     /// ADR-2(第八轮):Observe 键盘 Enter on ObserveSession focus → 跳 Control(cursor 同步)。
