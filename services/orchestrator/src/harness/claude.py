@@ -51,6 +51,8 @@ class StreamJSONParser:
         self.tick_id = tick_id or str(uuid.uuid4())
         # session_id captured from the result event (fork uses this)
         self.captured_sid: Optional[str] = None
+        # result 事件已发 tick_completed(proc 退无 result 时用于兜底闭环)
+        self.completed: bool = False
 
     def parse_line(self, line: str) -> Optional[Dict[str, Any]]:
         try:
@@ -96,6 +98,7 @@ class StreamJSONParser:
         sid = data.get("session_id")
         if sid:
             self.captured_sid = sid
+        self.completed = True
         return tick_completed(
             HARNESS_TYPE, self.harness_id, self.session_id, self.tick_id,
             status="error" if data.get("is_error") else "success",
@@ -138,7 +141,11 @@ class ClaudeClient:
         self.on_native_sid = on_native_sid
         # running one-shot turn tasks (spawn multi-instance: multiple turns)
         self._turn_tasks: List[asyncio.Task] = []
-        self._procs: List[subprocess.Popen] = []
+        # asyncio.subprocess.Process(create_subprocess_exec,异步流式)
+        self._procs: List[Any] = []
+        # per-client turn 串行化:防并发 turn 在 native_sid 回填前都判 oneshot →
+        # 建多个原生 session 互覆盖丢上下文(方案 B+C ext→native 1:1 契约)。
+        self._turn_lock = asyncio.Lock()
 
     async def connect(self) -> bool:
         """Open the observe ingest WS only (no persistent harness connection).
@@ -170,25 +177,25 @@ class ClaudeClient:
                          tick_id=tick_id, request=message)
         )
 
-        # resume 决策:caller 要求 resume 且已有 native_sid(原生 UUID)→ 真 resume;
-        # 否则 oneshot(首 turn 无 native_sid,`claude -p` 建新原生 session 并捕获其 id)。
-        # native_sid 缺失时强制 oneshot:拿 ext 12-hex 去 `claude --resume` 必 not found。
-        do_resume = resume and bool(self.native_sid)
-
         async def _run_and_capture() -> None:
-            if do_resume:
-                await self._run_resume(parser, message)
-            else:
-                await self._run_oneshot(parser, message)
-            # 回填 native_sid:oneshot/resume 的 result 事件都携带原生 session_id;
-            # 落内存 + 通知 routes 持久化(回调 fire-and-forget,失败不阻塞 turn)。
-            if parser.captured_sid and parser.captured_sid != self.native_sid:
-                self.native_sid = parser.captured_sid
-                if self.on_native_sid:
-                    try:
-                        self.on_native_sid(parser.captured_sid)
-                    except Exception:
-                        logger.warning("on_native_sid callback failed", exc_info=True)
+            # per-client 串行:do_resume 决策(读 native_sid)+ run + 回填全在锁内,
+            # 防并发 turn 都判 oneshot 建多原生 session 互覆盖丢上下文。
+            # native_sid 缺失时强制 oneshot:拿 ext 12-hex 去 `claude --resume` 必 not found。
+            async with self._turn_lock:
+                do_resume = resume and bool(self.native_sid)
+                if do_resume:
+                    await self._run_resume(parser, message)
+                else:
+                    await self._run_oneshot(parser, message)
+                # 回填 native_sid:oneshot/resume 的 result 事件都携带原生 session_id;
+                # 落内存 + 通知 routes 持久化(回调 fire-and-forget,失败不阻塞 turn)。
+                if parser.captured_sid and parser.captured_sid != self.native_sid:
+                    self.native_sid = parser.captured_sid
+                    if self.on_native_sid:
+                        try:
+                            self.on_native_sid(parser.captured_sid)
+                        except Exception:
+                            logger.warning("on_native_sid callback failed", exc_info=True)
 
         task = asyncio.create_task(_run_and_capture())
         self._turn_tasks.append(task)
@@ -221,47 +228,49 @@ class ClaudeClient:
     async def _spawn_and_stream(
         self, parser: StreamJSONParser, cmd: List[str],
     ) -> None:
-        tool_count = 0
-        proc: Optional[subprocess.Popen] = None
+        # 原生 async subprocess + 逐行流式(替代 Popen + list(stdout) 全量读):
+        # stream-json 事件实时 emit(不再批量到 EOF);wait_for 超时防 proc 挂起阻塞。
+        proc: Optional[asyncio.subprocess.Process] = None
         try:
-            proc = await asyncio.to_thread(
-                subprocess.Popen,
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
                 cwd=str(self.cwd),
             )
             self._procs.append(proc)
 
-            # read loop off the event loop
-            def _read_lines():
-                for line in proc.stdout:  # type: ignore[union-attr]
-                    yield line
-
-            loop = asyncio.get_event_loop()
-            # ponytail: line iterator wrapped in to_thread per read to avoid
-            # blocking the loop; for high-volume streams a StreamReader would
-            # be better, but claude -p output is modest.
-            for line in await loop.run_in_executor(None, lambda: list(proc.stdout)):  # type: ignore[union-attr]
+            # 逐行流式解析 emit(tool_call/tool_result/tick_completed 实时到 observe)
+            assert proc.stdout is not None
+            async for raw in proc.stdout:
+                line = raw.decode(errors="replace") if isinstance(raw, (bytes, bytearray)) else raw
                 parsed = parser.parse_line(line)
                 if parsed:
-                    if parsed.get("event_type") == "tool_call":
-                        tool_count += 1
                     await self.emitter.emit(parsed)
 
-            await asyncio.to_thread(proc.wait)
+            # 等 proc 退出(带超时,防 runaway tool / claude 挂起无限阻塞 executor)
+            await asyncio.wait_for(proc.wait(), timeout=300)
+        except asyncio.TimeoutError:
+            logger.error("claude turn timed out (300s), killing")
+            if proc is not None and proc.returncode is None:
+                proc.kill()
         except Exception as e:
             logger.error("claude turn failed: %s", e)
-            await self.emitter.emit(
-                tick_completed(
-                    HARNESS_TYPE, self.harness_id, self.session_id, parser.tick_id,
-                    status="error", response=f"spawn failed: {e}",
-                )
-            )
         finally:
-            if proc is not None and proc.poll() is None:
+            if proc is not None and proc.returncode is None:
                 proc.kill()
+            # tick 闭环兜底:proc 退但无 result 事件(OOM/崩溃/非JSON stderr 合并丢弃)
+            # → 补发 error tick_completed,保证每个 tick_started 都有 completed(防前端永转)
+            if not parser.completed:
+                await self.emitter.emit(
+                    tick_completed(
+                        HARNESS_TYPE, self.harness_id, self.session_id, parser.tick_id,
+                        status="error", response="claude exited without result event",
+                    )
+                )
+            # _procs 清理(与 _turn_tasks 同形,避免无界增长持有已结束 Process)
+            if proc is not None and proc in self._procs:
+                self._procs.remove(proc)
 
     async def spawn_instance(self) -> Dict[str, Any]:
         """Spawn a new claude instance on the same session (multi-instance).
@@ -308,14 +317,15 @@ class ClaudeClient:
         )
         await self._spawn_and_stream(parser, cmd)
 
-        # _parse_result captured the result event's session_id if present
-        new_sid = parser.captured_sid or new_sid_fallback
-        if not parser.captured_sid:
-            logger.warning(
-                "fork: no session_id in stream-json result, using fallback %s",
-                new_sid,
-            )
-        return {"new_sid": new_sid, "tick_id": parser.tick_id, "status": "forked"}
+        # _parse_result captured the result event's session_id if present。
+        # captured_sid 缺失(fork 子进程出错/无 result)→ new_sid=None,绝不用伪 UUID
+        # 占位(否则落 store 当 native_sid,下个 turn `claude --resume <伪UUID>` 必败)。
+        # routes.fork_session 的 `if not new_sid: raise 500` 会拦住 None。
+        new_sid = parser.captured_sid
+        if not new_sid:
+            logger.warning("fork: no session_id in stream-json result → returning None")
+        return {"new_sid": new_sid, "tick_id": parser.tick_id,
+                "status": "forked" if new_sid else "failed"}
 
     async def delete(self, sid: str = None) -> Dict[str, Any]:
         """Delete a claude session transcript (jsonl) and stop the client.
@@ -349,6 +359,6 @@ class ClaudeClient:
         for t in self._turn_tasks:
             t.cancel()
         for p in self._procs:
-            if p.poll() is None:
+            if p.returncode is None:
                 p.kill()
         await self.emitter.close()

@@ -90,6 +90,39 @@ def _get_client(harness_type: str, session_id: str) -> Optional[Any]:
     return rec["client"] if rec else None
 
 
+async def _ensure_client(harness_type: str, session_id: str) -> Optional[Any]:
+    """获取 client;内存无但 store 有(restore 失败/未重建的孤儿)→ 按需重建(惰性)。
+
+    解决 store-only session 在 turn/archive/spawn/fork 恒 404(架构完整性);
+    claw 路径即惰性重连(healthcheck 的 routes 侧)。重建失败返 None → 调用方 404。
+    """
+    client = _get_client(harness_type, session_id)
+    if client is not None:
+        return client
+    row = _store.get(harness_type, session_id)
+    if row is None:
+        return None
+    try:
+        if harness_type == "claude-code":
+            client = await _create_claude(session_id, row.get("cwd"), native_sid=row.get("native_sid"))
+            _sessions[_key(harness_type, session_id)] = {
+                "client": client, "session_id": session_id, "harness_type": harness_type,
+                "agent_id": None, "native_sid": row.get("native_sid"), "cwd": row.get("cwd"),
+            }
+        else:  # claw 惰性重连
+            client = await _create_claw(session_id, row.get("agent_id"))
+            _sessions[_key(harness_type, session_id)] = {
+                "client": client, "session_id": session_id, "harness_type": harness_type,
+                "agent_id": row.get("agent_id"),
+                "native_sid": row.get("native_sid") or session_id, "cwd": None,
+            }
+        logger.info("lazy-restored session %s/%s", harness_type, session_id)
+        return client
+    except Exception as e:
+        logger.warning("lazy restore failed (%s/%s): %s", harness_type, session_id, e)
+        return None
+
+
 # ── request models ────────────────────────────────────────────────────
 
 class CreateSessionReq(BaseModel):
@@ -234,15 +267,29 @@ async def trigger_turn(
     harness_type: str, session_id: str, req: TurnReq,
 ) -> Dict[str, Any]:
     _validate_type(harness_type)
-    client = _get_client(harness_type, session_id)
+    client = await _ensure_client(harness_type, session_id)
     if client is None:
         raise HTTPException(status_code=404, detail="session not found")
 
     if harness_type == "claw":
         if not getattr(client, "running", False):
             raise HTTPException(status_code=503, detail="claw client not connected yet")
+        # 上次 turn 残留的 stale(send 死 key 置)→ 提示重建,不再发
+        if getattr(client, "stale", False):
+            raise HTTPException(
+                status_code=503,
+                detail="claw session dead/stale (session not found), delete + recreate",
+            )
         await client.send_message(req.message, agent_id=req.agent_id, thinking=req.thinking)
         _store.touch(session_id)
+        # 本次 send 检测到死 key → send_message 已 emit error tick(前端停转),这里
+        # 返 503 让调用方知道失败并重建(stale client running 仍 True,create_session
+        # 死 client 检测会短路,需显式 delete + create)。
+        if getattr(client, "stale", False):
+            raise HTTPException(
+                status_code=503,
+                detail="claw session dead/stale (session not found), delete + recreate",
+            )
         return {"session_id": session_id, "status": "sent", "message": req.message[:50]}
     else:  # claude-code
         # 自动 resume:有 native_sid(原生 UUID)→ 续聊原生 session;无(首 turn)→
@@ -259,7 +306,7 @@ async def spawn_instance(
     harness_type: str, session_id: str,
 ) -> Dict[str, Any]:
     _validate_type(harness_type)
-    client = _get_client(harness_type, session_id)
+    client = await _ensure_client(harness_type, session_id)
     if client is None:
         raise HTTPException(status_code=404, detail="session not found")
 
@@ -280,6 +327,12 @@ async def delete_session(
     k = _key(harness_type, session_id)
     rec = _sessions.pop(k, None)
     if rec is None:
+        # 内存无但 store 可能有(restore 失败的孤儿):清 store + observe,无 client 可 stop
+        if _store.get(harness_type, session_id) is not None:
+            _store.delete(harness_type, session_id)
+            ob_deleted = await _observe_delete_session(harness_type, session_id)
+            return {"session_id": session_id, "status": "deleted",
+                    "raw_deleted": False, "observe_deleted": ob_deleted}
         raise HTTPException(status_code=404, detail="session not found")
     client = rec["client"]
     # raw delete first (jsonl transcript / gateway transcript), then stop.
@@ -393,7 +446,7 @@ async def fork_session(
 ) -> Dict[str, Any]:
     _validate_type(harness_type)
     source = req.source_session_id
-    client = _get_client(harness_type, source)
+    client = await _ensure_client(harness_type, source)
     if client is None:
         raise HTTPException(status_code=404, detail="source session not found")
 
@@ -407,6 +460,10 @@ async def fork_session(
             )
         # register the new session (new ClaudeClient on same cwd)
         cwd = str(getattr(client, "cwd", ""))
+        # 守卫:new_sid 碰撞已存在 ext_id(罕见,caller 指定 new_session_id)→ 409,
+        # 不静默覆盖活 client(旧 emitter WS / 子进程泄漏)
+        if _key(harness_type, new_sid) in _sessions:
+            raise HTTPException(status_code=409, detail="session already exists")
         new_client = await _create_claude(new_sid, cwd or None, native_sid=new_sid)
         _sessions[_key(harness_type, new_sid)] = {
             "client": new_client,
@@ -500,7 +557,7 @@ async def archive_session(
     harness_type: str, session_id: str, req: ArchiveReq,
 ) -> Dict[str, Any]:
     _validate_type(harness_type)
-    client = _get_client(harness_type, session_id)
+    client = await _ensure_client(harness_type, session_id)
     if client is None:
         raise HTTPException(status_code=404, detail="session not found")
 

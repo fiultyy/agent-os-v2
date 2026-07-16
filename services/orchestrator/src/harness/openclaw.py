@@ -179,6 +179,10 @@ class OpenClawClient:
         # ponytail: unbounded set (one entry per run_id); reset on session teardown
         self._ticks_seen: set = set()
         self._last_prompt: str = ""
+        # 死 key 检测(send ok=false / 超时 → _fail_turn 置 True,trigger_turn → 503)
+        self.stale: bool = False
+        # 当前在飞 turn 的 runId(= idempotencyKey,res.payload.runId 回填,供 tick 配对)
+        self._pending_run_id: Optional[str] = None
         # optional local callback (e.g. tests / self-check)
         self.on_event: Optional[Callable[[Dict[str, Any]], Any]] = None
         # pending RPC req→future responses (for delete/fork that need a reply)
@@ -342,9 +346,18 @@ class OpenClawClient:
         self, message: str,
         agent_id: Optional[str] = None, thinking: Optional[str] = None,
     ) -> None:
-        """Drive a turn via gateway RPC `sessions.send`.
+        """Drive a turn via gateway RPC `sessions.send`(等 res 检测死 key)。
 
-        SessionsSendParamsSchema: {key, agentId?, message, thinking?, idempotencyKey?}.
+        SessionsSendParamsSchema: {key, agentId?, message, thinking?, idempotencyKey?}。
+        已核实(/home/yy/tools/openclaw/src/gateway/server-methods/sessions.ts:801
+        + 2026-07-16 实测):死/不存在 session_key(非 main)→ gateway respond
+        ok=false "session not found"。故 send 走 _request 等 res:ok=false / 超时 →
+        _fail_turn(emit error tick 闭环 + stale=True),下次 trigger_turn → 503。
+        subscribe 仍查不出死 key(ok=true 零事件),但 send 是 turn 主路径,够用。
+        (agent:main:main 死 key 被 gateway createAgentMainSessionForSend 自动重建
+        → ok=true,不死,属正常。)
+
+        runId = idempotencyKey(我们生成),res.payload.runId 回填供 tick 配对。
         """
         if not self.gateway_ws or not self.running:
             logger.error("Cannot send: gateway not connected")
@@ -363,8 +376,43 @@ class OpenClawClient:
         # record prompt for the synthesized tick_started (runId arrives in events)
         self._last_prompt = message
 
-        await self._send_request(self.gateway_ws, "sessions.send", params)
+        try:
+            res = await self._request("sessions.send", params, timeout=15)
+        except (asyncio.TimeoutError, RuntimeError) as e:
+            # send res 15s 未回(gateway 挂/断)/ 未连接 → 死/断,收场
+            await self._fail_turn(f"send failed: {type(e).__name__}: {e}")
+            return
+        if not res.get("ok"):
+            # 死/不存在 key(非 main)→ "session not found";agent 删除 → "Agent ... no longer exists"
+            err = res.get("error") or {}
+            await self._fail_turn(
+                f"{err.get('code', 'INVALID_REQUEST')}: "
+                f"{err.get('message', 'dead session_key')}"
+            )
+            return
+        # ok=true:res.payload.runId 是后续 ChatEvent 的 runId(= idempotencyKey),供 tick 配对
+        self._pending_run_id = res.get("payload", {}).get("runId")
         logger.info("Sent message to %s: %s...", self.session_key, message[:50])
+
+    async def _fail_turn(self, reason: str) -> None:
+        """死 key / send 超时收场:emit error tick 闭环 + 标 stale。
+
+        openclaw 的 tick_started 本是首 ChatEvent 到达时合成(_ensure_tick_started),
+        死 key 零事件 → tick_started 从未发。故这里先补 tick_started 再发
+        tick_completed(error),保证前端有完整 tick 闭环(停转,不永转)。stale=True
+        → routes.trigger_turn 下次返 503 提示重连/重建 session。
+        """
+        self.stale = True
+        tid = self._pending_run_id or f"dead_{uuid.uuid4().hex[:8]}"
+        await self.emitter.emit(
+            tick_started("openclaw", self.harness_id, self.session_key,
+                         tick_id=tid, request=self._last_prompt)
+        )
+        await self.emitter.emit(
+            tick_completed("openclaw", self.harness_id, self.session_key, tid,
+                           status="error", response=reason, tool_count=0)
+        )
+        logger.error("claw turn dead/stale (%s): %s", self.session_key, reason)
 
     def start_background(self, loop: Optional[asyncio.AbstractEventLoop] = None) -> asyncio.Task:
         """Spawn connect() as a background task on the running loop."""
@@ -443,6 +491,7 @@ class OpenClawClient:
 
     async def stop(self) -> None:
         self.running = False
+        self._ticks_seen.clear()  # 兑现 ponytail 注释的 "reset on session teardown"
         try:
             if self.gateway_ws is not None:
                 await self.gateway_ws.close()

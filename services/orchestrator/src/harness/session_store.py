@@ -50,9 +50,11 @@ CREATE INDEX IF NOT EXISTS idx_orch_harness ON orch_sessions(harness_type, last_
 class OrchSessionStore:
     """Persistent ext→native session mapping for the orchestrator.
 
-    Thread-safe for async usage via a single connection (check_same_thread=False,
-    WAL mode). ext_id is globally unique → PK; lookups also filter harness_type
-    so a claw key and a claude ext can never collide semantically.
+    async-safe(single event loop):所有写(create/update_native_sid/touch/delete)
+    在 orche 单 asyncio loop 串行执行。check_same_thread=False 放开线程归属检查
+    仅为适配 loop,**非多线程并发写安全**;若将来 to_thread 并发写需换 aiosqlite /
+    connection-per-thread + 显式串行锁(busy_timeout=5000 兜底单 loop 竞争)。
+    ext_id 全局唯一 → PK;查询带 harness_type 过滤,claw key 与 claude ext 永不语义碰撞。
     """
 
     def __init__(self, db_path: Optional[str] = None) -> None:
