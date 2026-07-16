@@ -171,6 +171,11 @@ impl Textarea {
     /// - Ctrl+V:Paste(占位空串,crossterm 粘贴事件高级特性 defer)。
     pub fn handle_key(&mut self, k: &KeyEvent) -> TextareaOp {
         match k.code {
+            // Ctrl+J = 换行(tmux 可靠透传;Shift/Alt+Enter 在 tmux 里常被吞 modifier)。
+            KeyCode::Char('j') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.insert_char('\n');
+                TextareaOp::Newline
+            }
             KeyCode::Enter => {
                 // Shift+Enter / Alt+Enter → 换行(多行输入);裸 Enter → Send。
                 if k.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
