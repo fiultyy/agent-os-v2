@@ -72,7 +72,13 @@ _active: Dict[str, str] = {"type": "", "id": ""}
 
 # ── session registry ──────────────────────────────────────────────────
 # keyed by (harness_type, session_id). Holds the live client + metadata.
+# _store is the persistent mirror (ext→native mapping); _sessions holds the
+# live client. Restart rebuilds _sessions from _store (restore_all_sessions).
 _sessions: Dict[str, Dict[str, Any]] = {}
+
+# orche 自管持久层(方案 B+C):不持对话内容,只存 ext→native 映射 + 元数据。
+from .session_store import OrchSessionStore
+_store = OrchSessionStore()
 
 
 def _key(harness_type: str, session_id: str) -> str:
@@ -119,12 +125,29 @@ async def _create_claw(session_id: str, agent_id: Optional[str]) -> OpenClawClie
     return client
 
 
-async def _create_claude(session_id: str, cwd: Optional[str]) -> ClaudeClient:
+async def _create_claude(
+    session_id: str, cwd: Optional[str], native_sid: Optional[str] = None,
+) -> ClaudeClient:
+    """Build a ClaudeClient + wire the native_sid backfill → persistent store.
+
+    native_sid passed on restore (rebuild); None on fresh create (first turn
+    fills it). on_native_sid closes the loop: claude turn captures the native
+    UUID from stream-json → store.update_native_sid → 内存记录同步。
+    """
     from pathlib import Path
     from .claude import DEFAULT_CWD
+
+    def _on_native(nsid: str) -> None:
+        _store.update_native_sid(session_id, nsid)
+        rec = _sessions.get(_key("claude-code", session_id))
+        if rec is not None:
+            rec["native_sid"] = nsid
+
     client = ClaudeClient(
         session_id=session_id,
         cwd=Path(cwd) if cwd else DEFAULT_CWD,
+        native_sid=native_sid,
+        on_native_sid=_on_native,
     )
     await client.connect()
     return client
@@ -148,27 +171,61 @@ async def create_session(
     # ADR-4:同 session_id 复用 client,防重复订阅(多 OpenClawClient 连同 claw session 抢事件)
     key = _key(harness_type, session_id)
     if key in _sessions:
-        return {"session_id": session_id, "type": harness_type, "status": "exists"}
+        # claw 长连 client 可能已死(running=False 且 connect task 已结束 = 重连失败)→
+        # 重建,避免僵尸死锁(turn 503 + create 同 key 永远短路)。claude client 无状态,
+        # exists 短路正确。ponytail:更彻底是 trigger_turn 惰性重连 / 后台 healthcheck。
+        if harness_type == "claw":
+            old = _sessions[key].get("client")
+            conn = getattr(old, "_connect_task", None)
+            if (getattr(old, "running", True) is False
+                    and conn is not None and getattr(conn, "done", lambda: False)()):
+                _sessions.pop(key, None)   # 死 client,落到下面重建
+            else:
+                return {"session_id": session_id, "type": harness_type, "status": "exists"}
+        else:
+            return {"session_id": session_id, "type": harness_type, "status": "exists"}
 
     client = await (_create_claw(session_id, req.agent_id) if harness_type == "claw"
                     else _create_claude(session_id, req.cwd))
+    # claw native = session_key(= ext);claude native 首 turn 后回填(None)
+    native_sid = session_id if harness_type == "claw" else None
     _sessions[key] = {
         "client": client,
         "session_id": session_id,
         "harness_type": harness_type,
         "agent_id": req.agent_id,
+        "native_sid": native_sid,
+        "cwd": req.cwd,
     }
+    # 持久层落库(重启不丢)
+    if harness_type == "claw":
+        _store.create(session_id, "claw", native_sid=session_id, agent_id=req.agent_id)
+    else:
+        _store.create(session_id, "claude-code", native_sid=None, cwd=req.cwd)
     return {"session_id": session_id, "type": harness_type, "status": "created"}
 
 
 @router.get("/{harness_type}/sessions")
 async def list_sessions(harness_type: str) -> Dict[str, Any]:
     _validate_type(harness_type)
-    items = [
-        {"session_id": v["session_id"], "agent_id": v.get("agent_id")}
-        for v in _sessions.values()
-        if v["harness_type"] == harness_type
-    ]
+    # 持久层为准(重启后内存空但 store 在);合并内存 client 运行状态(claw 长连)
+    items = []
+    for r in _store.list_all(harness_type):
+        rec = _sessions.get(_key(harness_type, r["ext_id"]))
+        client = rec.get("client") if rec else None
+        if client is not None and not hasattr(client, "running"):
+            # claude-code subprocess-per-turn:无长连,"running" = 有在飞 turn task
+            running = any(not t.done() for t in getattr(client, "_turn_tasks", []))
+        else:
+            running = bool(client and getattr(client, "running", False))
+        items.append({
+            "session_id": r["ext_id"],
+            "native_sid": r.get("native_sid"),
+            "agent_id": r.get("agent_id"),
+            "cwd": r.get("cwd"),
+            "running": running,
+            "last_turn_at": r.get("last_turn_at"),
+        })
     return {"type": harness_type, "sessions": items, "count": len(items)}
 
 
@@ -185,9 +242,14 @@ async def trigger_turn(
         if not getattr(client, "running", False):
             raise HTTPException(status_code=503, detail="claw client not connected yet")
         await client.send_message(req.message, agent_id=req.agent_id, thinking=req.thinking)
+        _store.touch(session_id)
         return {"session_id": session_id, "status": "sent", "message": req.message[:50]}
     else:  # claude-code
-        result = await client.turn(req.message, resume=req.resume)
+        # 自动 resume:有 native_sid(原生 UUID)→ 续聊原生 session;无(首 turn)→
+        # oneshot 建原生 session 并捕获 id。多轮能力自动恢复(不再每次 oneshot 丢上下文)。
+        resume = req.resume or client.native_sid is not None
+        result = await client.turn(req.message, resume=resume)
+        _store.touch(session_id)
         return {"session_id": session_id, "status": result["status"],
                 "tick_id": result["tick_id"]}
 
@@ -249,6 +311,7 @@ async def delete_session(
     # sync the delete to observe (its SQLite is the TUI's session source of
     # truth). best-effort: failure here does NOT fail the orche delete.
     ob_deleted = await _observe_delete_session(harness_type, session_id)
+    _store.delete(harness_type, session_id)
     return {"session_id": session_id, "status": "deleted",
             "raw_deleted": raw_deleted, "observe_deleted": ob_deleted}
 
@@ -344,13 +407,16 @@ async def fork_session(
             )
         # register the new session (new ClaudeClient on same cwd)
         cwd = str(getattr(client, "cwd", ""))
-        new_client = await _create_claude(new_sid, cwd or None)
+        new_client = await _create_claude(new_sid, cwd or None, native_sid=new_sid)
         _sessions[_key(harness_type, new_sid)] = {
             "client": new_client,
             "session_id": new_sid,
             "harness_type": harness_type,
             "agent_id": None,
+            "native_sid": new_sid,   # fork 直接产原生 UUID → ext = native
+            "cwd": cwd or None,
         }
+        _store.create(new_sid, harness_type, native_sid=new_sid, cwd=cwd or None)
         return {"new_session_id": new_sid, "source": source,
                 "forked": True, "detail": r}
 
@@ -371,9 +437,54 @@ async def fork_session(
         "session_id": new_key,
         "harness_type": harness_type,
         "agent_id": None,
+        "native_sid": new_key,
+        "cwd": None,
     }
+    _store.create(new_key, harness_type, native_sid=new_key)
     return {"new_session_id": new_key, "source": source,
             "forked": True, "detail": r}
+
+
+# ── startup restore (rebuild _sessions from _store after restart) ────
+
+async def restore_all_sessions() -> Dict[str, int]:
+    """启动重建:load _store → 按 harness_type 分派重建 client → 塞回 _sessions。
+
+    claude:无状态重建(ClaudeClient(native_sid, cwd).connect() 只 observe WS,廉价;
+    turn 时 spawn,client 本身无长连状态)。
+    claw:有状态重连(OpenClawClient.start_background() 重连 gateway + v4 handshake +
+    subscribe);gateway 不可达时 connect task 内部容错(running=False),不崩启动。
+    ponytail:claw 重连失败后不自动重试(running=False → turn 时 503);后续可加
+    healthcheck/自动重连。本次先"重启不丢 + 尝试重连"。
+    """
+    restored = {"claude-code": 0, "claw": 0, "failed": 0}
+    for r in _store.list_all():
+        ht = r["harness_type"]
+        ext = r["ext_id"]
+        key = _key(ht, ext)
+        if key in _sessions:
+            continue  # 已在内存(本轮 create 过)
+        try:
+            if ht == "claude-code":
+                client = await _create_claude(ext, r.get("cwd"), native_sid=r.get("native_sid"))
+                _sessions[key] = {
+                    "client": client, "session_id": ext, "harness_type": ht,
+                    "agent_id": None, "native_sid": r.get("native_sid"), "cwd": r.get("cwd"),
+                }
+                restored["claude-code"] += 1
+            elif ht == "claw":
+                client = await _create_claw(ext, r.get("agent_id"))
+                _sessions[key] = {
+                    "client": client, "session_id": ext, "harness_type": ht,
+                    "agent_id": r.get("agent_id"),
+                    "native_sid": r.get("native_sid") or ext, "cwd": None,
+                }
+                restored["claw"] += 1
+        except Exception as e:
+            logger.warning("restore session failed (%s/%s): %s", ht, ext, e)
+            restored["failed"] += 1
+    logger.info("harness session restore: %s", restored)
+    return restored
 
 
 # ── archive (summarize a session in place) ────────────────────────────
@@ -400,8 +511,10 @@ async def archive_session(
             raise HTTPException(status_code=503, detail="claw client not connected yet")
         await client.send_message(prompt)
         return {"session_id": session_id, "status": "archived"}
-    # claude-code
-    result = await client.turn(prompt)
+    # claude-code: 同 trigger_turn 自动 resume(在原生 session 上下文里总结)
+    resume = client.native_sid is not None
+    result = await client.turn(prompt, resume=resume)
+    _store.touch(session_id)
     return {"session_id": session_id, "status": "archived",
             "tick_id": result.get("tick_id")}
 

@@ -584,6 +584,24 @@ app.include_router(harness_switch_router)
 logger.info("harness primitive API mounted: /h/{type}/sessions*, /switch")
 
 
+@app.on_event("startup")
+async def _restore_harness_sessions() -> None:
+    """启动重建:harness session 从持久层恢复(方案 B+C)。
+
+    load OrchSessionStore → 按 harness_type 分派重建 client(claude 无状态 /
+    claw 重连+subscribe)。失败不崩启动(降级空 registry,create 仍可新建)。
+    """
+    from src.harness.routes import restore_all_sessions
+    try:
+        restored = await restore_all_sessions()
+        logger.info("harness sessions restored on startup: %s", restored)
+    except Exception:
+        logger.warning(
+            "harness session restore failed — continuing with empty registry",
+            exc_info=True,
+        )
+
+
 # ── CLI entry point ────────────────────────────────────────────────
 
 

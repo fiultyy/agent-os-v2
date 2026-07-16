@@ -19,7 +19,7 @@ import os
 import subprocess
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .events import (
     tick_completed,
@@ -119,6 +119,8 @@ class ClaudeClient:
         harness_id: str = "",
         cwd: Path = DEFAULT_CWD,
         emitter: Optional[ObserveEmitter] = None,
+        native_sid: Optional[str] = None,
+        on_native_sid: Optional[Callable[[str], Any]] = None,
     ):
         self.session_id = session_id
         self.harness_id = harness_id or f"claude_{uuid.uuid4().hex[:8]}"
@@ -128,6 +130,12 @@ class ClaudeClient:
             harness_id=self.harness_id,
             session_id=session_id,
         )
+        # native harness session id(claude 完整 UUID)。首 turn(oneshot)前为 None,
+        # turn 完成后从 stream-json result 事件回填;后续 turn 用它 `claude --resume`
+        # 续聊原生 session(session_id 是 orche 的 ext 12-hex 句柄,claude 不认)。
+        self.native_sid = native_sid
+        # native_sid 回填回调(routes 注入 → 落 OrchSessionStore 持久层)
+        self.on_native_sid = on_native_sid
         # running one-shot turn tasks (spawn multi-instance: multiple turns)
         self._turn_tasks: List[asyncio.Task] = []
         self._procs: List[subprocess.Popen] = []
@@ -162,11 +170,30 @@ class ClaudeClient:
                          tick_id=tick_id, request=message)
         )
 
-        if resume:
-            task = asyncio.create_task(self._run_resume(parser, message))
-        else:
-            task = asyncio.create_task(self._run_oneshot(parser, message))
+        # resume 决策:caller 要求 resume 且已有 native_sid(原生 UUID)→ 真 resume;
+        # 否则 oneshot(首 turn 无 native_sid,`claude -p` 建新原生 session 并捕获其 id)。
+        # native_sid 缺失时强制 oneshot:拿 ext 12-hex 去 `claude --resume` 必 not found。
+        do_resume = resume and bool(self.native_sid)
+
+        async def _run_and_capture() -> None:
+            if do_resume:
+                await self._run_resume(parser, message)
+            else:
+                await self._run_oneshot(parser, message)
+            # 回填 native_sid:oneshot/resume 的 result 事件都携带原生 session_id;
+            # 落内存 + 通知 routes 持久化(回调 fire-and-forget,失败不阻塞 turn)。
+            if parser.captured_sid and parser.captured_sid != self.native_sid:
+                self.native_sid = parser.captured_sid
+                if self.on_native_sid:
+                    try:
+                        self.on_native_sid(parser.captured_sid)
+                    except Exception:
+                        logger.warning("on_native_sid callback failed", exc_info=True)
+
+        task = asyncio.create_task(_run_and_capture())
         self._turn_tasks.append(task)
+        # 完成后移除引用,允许 task GC(避免 _turn_tasks 无界增长持有已完成 frame)
+        task.add_done_callback(self._turn_tasks.remove)
         return {"tick_id": tick_id, "status": "started"}
 
     async def _run_oneshot(self, parser: StreamJSONParser, message: str) -> None:
@@ -180,15 +207,14 @@ class ClaudeClient:
         await self._spawn_and_stream(parser, cmd)
 
     async def _run_resume(self, parser: StreamJSONParser, message: str) -> None:
-        """Resume mode: spawn `claude --resume <sid>` (interactive PTY).
+        """Resume mode: `claude --resume <native_sid> -p <message>`.
 
-        ponytail: stream-json is one-shot (-p). For resume we still spawn
-        `claude --resume <sid>` but feed the message via stdin; when claude
-        supports stream-json on resume it will be parsed, otherwise stdout is
-        treated as raw text and the turn completes on process exit. This is the
-        minimal path that keeps multi-instance (separate PTYs) working.
+        用 native_sid(原生 claude UUID)续聊,不是 ext session_id(12-hex 句柄,
+        claude 不认 → not found)。do_resume 保证 native_sid 非 None。stream-json
+        result 事件回带 session_id,_run_and_capture 据此保持 native_sid 同步
+        (fork 后 native 变化也覆盖)。
         """
-        cmd = ["claude", "--resume", self.session_id, "-p", message,
+        cmd = ["claude", "--resume", self.native_sid or "", "-p", message,
                "--output-format", "stream-json", "--verbose"]
         await self._spawn_and_stream(parser, cmd)
 
@@ -299,7 +325,10 @@ class ClaudeClient:
         A missing file is treated as already-deleted (deleted=True). Then the
         client is stopped (processes cancelled, observe WS closed).
         """
-        target_sid = sid or self.session_id
+        # transcript 文件名是 native UUID(不是 ext 12-hex);native 优先。
+        # native None(首 turn 前无 transcript)→ fallback sid → 路径不存在 →
+        # deleted=True("already gone"),语义正确(从未建过)。
+        target_sid = self.native_sid or sid or self.session_id
         slug = str(self.cwd).replace("/", "-")
         transcript = Path.home() / ".claude" / "projects" / slug / f"{target_sid}.jsonl"
         deleted = False

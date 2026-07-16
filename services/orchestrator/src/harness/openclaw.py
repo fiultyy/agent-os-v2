@@ -61,7 +61,8 @@ def _foreign_session(payload: Dict[str, Any], own_session: str) -> bool:
     应跳过(否则会被盖错戳 emit 到错误的 observe ingest 连接,被 observe 的
     session 校验丢弃,导致事件互相串线、大面积丢失)。"""
     sk = payload.get("sessionKey") or payload.get("session_key")
-    return bool(sk) and sk != own_session
+    # 缺失 sessionKey → 当外部跳过(防御性:协议漂移/新事件类型不静默串线)
+    return sk is None or sk != own_session
 
 
 # ── Event Mapping: openclaw ChatEvent / agent tool → ObserveEvent ─────
