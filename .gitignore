@@ -69,3 +69,4 @@ target/
 
 # Go build binary(cmd/popup 产物)
 /apps/tui/popup
+.worktrees/
