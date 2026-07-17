@@ -8,14 +8,6 @@
 //! 弹窗栈顶(modal)优先消费事件:用 rat-event 的 `Dialog` qualifier 语义——
 //! 模态弹窗激活时,所有 mouse/key 事件先喂给栈顶弹窗,ConsumedEvent 即不再下发 base panel。
 #![allow(dead_code)]
-//!
-//! 把底层 crossterm `Event` 翻译成对 app 有意义的 `AppEvent`:
-//! - Key → focused base panel 操作(tab/j/k/t/数字键等)
-//! - Mouse → 点击 / 拖拽(tui-popup PopupState) / 滚轮(列表滚动) / 右键(ContextMenu)
-//! - Resize → 重算 layout
-//!
-//! 弹窗栈顶(modal)优先消费事件:用 rat-event 的 `Dialog` qualifier 语义——
-//! 模态弹窗激活时,所有 mouse/key 事件先喂给栈顶弹窗,ConsumedEvent 即不再下发 base panel。
 
 use crossterm::event::{self, Event, KeyEvent, MouseEvent};
 use std::time::Duration;
