@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -269,14 +270,31 @@ class FlowScheduler:
 
     # ── node execution ─────────────────────────────────────────────
 
+    _NODE_REF = re.compile(r"\{node\.([A-Za-z0-9_-]+)\.response\}")
+
+    def _render_message(self, msg: str) -> str:
+        """渲染 {node.<id>.response} 占位 → 该 node 已捕获的 response(词语接龙等
+        chain:每步 message 引用上一步输出)。未完成/未知 node → 空串。
+
+        ponytail: 正则单占位,不支持变换/截取/拼接;多入边 DAG 各引用自己源 node。
+        升级: jinja2(filter/slice/join)if message 组合复杂到手写不值。
+        """
+        def repl(m: "re.Match[str]") -> str:
+            nid = m.group(1)
+            return self.state.nodes.get(nid, {}).get("response", "") or ""
+        return self._NODE_REF.sub(repl, msg)
+
     async def _run_node(self, node: FlowNode) -> None:
         # import here to avoid circular import (routes imports flow)
         from .routes import _get_client, _create_claw, _create_claude, _sessions, _key
 
         self.state.nodes[node.id]["status"] = "running"
+        # 渲染 {node.<id>.response} 占位 → 已完成 node 的输出(词语接龙每步接上一步
+        # 的词)。依赖 node 在 _schedule_dependents 里早已 completed,response 已入 state。
+        msg = self._render_message(node.message)
         await self._emit_flow("node_started", {
             "node_id": node.id, "harness": node.harness,
-            "session_id": node.session_id or "", "message": node.message[:200],
+            "session_id": node.session_id or "", "message": msg[:200],
         })
 
         # ensure session exists (create if missing)
@@ -309,7 +327,7 @@ class FlowScheduler:
         fut: asyncio.Future = asyncio.get_event_loop().create_future()
         if node.harness == "claude-code":
             # claude turn() returns tick_id synchronously
-            result = await client.turn(node.message, resume=node.resume)
+            result = await client.turn(msg, resume=node.resume)
             self._pending[node.id] = {
                 "future": fut, "match_type": "tick",
                 "tick_id": result["tick_id"],
@@ -322,7 +340,7 @@ class FlowScheduler:
                         break
                     await asyncio.sleep(0.1)
             await client.send_message(
-                node.message, agent_id=node.agent_id)
+                msg, agent_id=node.agent_id)
             self._pending[node.id] = {
                 "future": fut, "match_type": "session",
                 "session_id": sid,
@@ -398,6 +416,12 @@ class FlowScheduler:
         # handles chains/branches/DAG uniformly (dependents spawn into the set).
         while self._node_tasks:
             await asyncio.gather(*list(self._node_tasks), return_exceptions=True)
+            # purge finished tasks explicitly: relying solely on each task's
+            # done-callback to discard() live-locks when several nodes finish in
+            # the same tick — gather() of already-done tasks returns without
+            # yielding, so the callbacks get starved and _node_tasks never
+            # drains (hit on fan-out: A→{B,C} with no merge).
+            self._node_tasks -= {t for t in list(self._node_tasks) if t.done()}
 
         # any node that never got reached (branch dead-end / DAG left behind)
         for node in self.flow_def.nodes:
