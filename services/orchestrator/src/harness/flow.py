@@ -416,6 +416,12 @@ class FlowScheduler:
         # handles chains/branches/DAG uniformly (dependents spawn into the set).
         while self._node_tasks:
             await asyncio.gather(*list(self._node_tasks), return_exceptions=True)
+            # purge finished tasks explicitly: relying solely on each task's
+            # done-callback to discard() live-locks when several nodes finish in
+            # the same tick — gather() of already-done tasks returns without
+            # yielding, so the callbacks get starved and _node_tasks never
+            # drains (hit on fan-out: A→{B,C} with no merge).
+            self._node_tasks -= {t for t in list(self._node_tasks) if t.done()}
 
         # any node that never got reached (branch dead-end / DAG left behind)
         for node in self.flow_def.nodes:
