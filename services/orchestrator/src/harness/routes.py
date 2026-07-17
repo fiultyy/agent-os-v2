@@ -373,13 +373,17 @@ async def delete_session(
 
 @router.get("/claw/agents")
 async def list_claw_agents() -> Dict[str, Any]:
-    """List registered claw agents for the picker.
+    """List real claw agents for the picker.
 
-    Reads ~/.openclaw/openclaw.json:
-    - channels.feishu.accounts keys → real gateway-capable agents (main, claw-02, ...).
-    - acp.allowedAgents → acpx agents (claude, codex, ...).
-    Returns {"agents": [...], "default": "..."}; feishu accounts first, then acp;
-    falls back to ["main"] when neither is present.
+    读 ~/.openclaw/openclaw.json 的 agents.list —— 真正的 agent 定义(含 model +
+    后端),即 gateway agents.list RPC / sessions.send 认的 agent。
+
+    不再读 channels.feishu.accounts:那是飞书 bot 凭证({appId, appSecret}),不是
+    agent。旧实现把 feishu account keys 当 agent,致 default/origin-cc 等无 agent
+    定义的飞书凭证混入 picker → flow sessions.send 时 session not found / timeout。
+    agents.list 才是真 agent(main/claw-02/project-expert-00/english-expert/claw-03/
+    claude,均 glm-5.2)。acp.allowedAgents 是 acpx 协议 agent(非 sessions.send),
+    也不在此列。
     """
     import json as _json
     from pathlib import Path
@@ -389,19 +393,12 @@ async def list_claw_agents() -> Dict[str, Any]:
         cfg_path = Path.home() / ".openclaw" / "openclaw.json"
         with open(cfg_path) as f:
             cfg = _json.load(f) or {}
-        # feishu accounts(能创 gateway session 的真实 agent)。
-        feishu = (((cfg.get("channels") or {}).get("feishu")) or {})
-        accts = feishu.get("accounts") or {}
-        feishu_agents = list(accts.keys()) if isinstance(accts, dict) else []
-        # acp allowedAgents(acpx agent)。
-        acp = cfg.get("acp", {}) or {}
-        acp_agents = acp.get("allowedAgents") or []
-        agents = feishu_agents + [a for a in acp_agents if a not in feishu_agents]
+        agents_list = (cfg.get("agents") or {}).get("list") or []
+        agents = [a.get("id") or a.get("name") for a in agents_list
+                  if isinstance(a, dict) and (a.get("id") or a.get("name"))]
         if not agents:
             agents = default_agents
-        default = (acp.get("defaultAgent") if acp.get("defaultAgent") else None) \
-            or (feishu_agents[0] if feishu_agents else None) \
-            or (agents[0] if agents else default_default)
+        default = "main" if "main" in agents else (agents[0] if agents else default_default)
         return {"agents": agents, "default": default}
     except Exception as e:
         logger.warning("list_claw_agents: read cfg failed: %s", e)
