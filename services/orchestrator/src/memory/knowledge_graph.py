@@ -572,12 +572,14 @@ class KnowledgeGraph:
     def delete_entity(self, entity_id: str) -> bool:
         """Remove an entity and all its relations."""
         with self._conn:
-            cursor = self._conn.execute(
-                "DELETE FROM entities WHERE id = ?", (entity_id,)
-            )
+            # Delete relations first: PRAGMA foreign_keys=ON makes an entity
+            # undeletable while relations still reference it (FK constraint).
             self._conn.execute(
                 "DELETE FROM relations WHERE source_id = ? OR target_id = ?",
                 (entity_id, entity_id),
+            )
+            cursor = self._conn.execute(
+                "DELETE FROM entities WHERE id = ?", (entity_id,)
             )
         return cursor.rowcount > 0
 
