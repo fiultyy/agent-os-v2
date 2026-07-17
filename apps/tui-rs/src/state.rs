@@ -94,6 +94,20 @@ pub fn fetch_claw_agents() -> Vec<String> {
         .map(|a| if a.agents.is_empty() { vec!["main".to_string()] } else { a.agents })
         .unwrap_or_else(|| vec!["main".to_string()])
 }
+
+/// 生成 claw session 唯一 conv key(回归 bug2「创建不新建」)。
+/// orche routes.py 把 claw session_key 固定 `agent:<a>:main`,同 agent 已存在 → exists
+/// 短路不新建;TUI create_session 不查 status → focus 旧 session(看似"创建不新建")。
+/// 故生成 `agent:<a>:t<时间戳hex>` 让 orche 见新 conv → 必新建。agent_base 剥 "agent:"
+/// 前缀(防 agent 已带前缀,split ':' 取第 2 段,裸名则原样)。
+fn claw_session_key(agent: &str) -> String {
+    let agent_base = agent.split(':').nth(1).unwrap_or(agent);
+    let conv = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| format!("t{:x}", d.as_secs() % 0x1000000))
+        .unwrap_or_else(|_| "new".to_string());
+    format!("agent:{}:{}", agent_base, conv)
+}
 /// GET /h/claude-code/cwds → cwd 列表。失败返空。
 pub fn fetch_cc_cwds() -> Vec<String> {
     ureq::get(&format!("{}/h/claude-code/cwds", ORCH))
@@ -1139,13 +1153,8 @@ impl App {
                 // claw "new session" = 为 agent 开新对话(唯一 conv)。裸 agent 名 →
                 // orche 固定 agent:<a>:main(routes.py),同 agent 已存在 → exists 短路不
                 // 新建(create_session 不查 status → focus 到旧 session)。故生成唯一 conv
-                // key(agent:<a>:<ts>),orche 见 ":" 用之 → 必新建。
-                let agent_base = agent.split(':').nth(1).unwrap_or(&agent);
-                let conv = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| format!("t{:x}", d.as_secs() % 0x1000000))
-                    .unwrap_or_else(|_| "new".to_string());
-                let key = format!("agent:{}:{}", agent_base, conv);
+                // key(见 claw_session_key),orche 见 ":" 用之 → 必新建。
+                let key = claw_session_key(&agent);
                 if let Some(sid) = create_session("claw", Some(&key)) {
                     self.turn_status = Some(format!("created claw session: {}", trunc(&sid, 16)));
                     self.close_popup("new");
@@ -2867,6 +2876,57 @@ mod tests {
         app.handle_popup_key(&KeyEvent::new(KeyCode::Esc, crossterm::event::KeyModifiers::empty()));
         assert!(!app.popups.iter().any(|p| p.id == "new"), "esc 关 new 弹窗");
         assert!(app.new_popup.is_none());
+    }
+
+    /// 回归 bug1「new-session 弹窗只显 claw-02」:tui-popup render_ref 首次按 body 固定 area,
+    /// 之后用旧 area 不重算(tui-popup-0.5.1 popup.rs:143 `state.area.take()` 用 next.w/h)。
+    /// 修复:open_new_popup 打开即 new_popup=Claw+fetch,首帧 body(update_action_popup_bodies
+    /// 填)即含全部候选 → area 一次算大 → 全显。若 revert 回 None 态,首帧 body 仅 ~2 行 →
+    /// area 小 → 后续切 claw body 增 area 不扩 → 只显顶部候选。此测试锚定 render 层 body
+    /// 真全显(上方 normal_n/new_popup_claw_pick 只验 state 字段 new_popup==Claw,验不到 area)。
+    #[test]
+    fn new_popup_renders_all_candidates_not_truncated() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        // 注入 >1 候选(测试环境 fetch_claw_agents 兜底 ["main"],无法暴露多候选截断)。
+        let cands = vec!["claw-01".to_string(), "claw-02".to_string(), "claw-03".to_string()];
+        app.new_candidates = cands.clone();
+        app.open_new_popup(); // 修复态:new_popup=Claw(revert 为 None 则此测试失败)
+        app.new_candidates = cands; // 覆盖 fetch 兜底,模拟 orche 在线返多 agent
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::render::draw(f, &mut app)).unwrap();
+
+        // 拼 buffer 为字符串(同 main.rs print_buffer):遍历每 cell.symbol()。
+        let buf = term.backend().buffer();
+        let mut s = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                s.push_str(&buf[(x, y)].symbol());
+            }
+            s.push('\n');
+        }
+        for c in &["claw-01", "claw-02", "claw-03"] {
+            assert!(s.contains(c), "弹窗须显候选 {c}(回归:area 首次固定致只显顶部)");
+        }
+    }
+
+    /// 回归 bug2「创建不新建」:claw session_key 须含唯一 conv(时间戳 hex),非固定
+    /// `agent:<a>:main`。根因:orche routes.py 固定 main conv,同 agent 已存在 → exists
+    /// 短路不新建;TUI create_session 不查 status → focus 旧 session(体感"创建不新建")。
+    /// 修复:claw_session_key 生成 `agent:<a>:t<ts>`。真机复验(orche :8001):修复态 create
+    /// 返 agent:main:t59c570(list 含,r 刷新 oc 12→14);旧态固定 main 则 exists 短路不新建。
+    #[test]
+    fn claw_session_key_unique_conv_not_main() {
+        let k = claw_session_key("claw-02");
+        assert!(k.starts_with("agent:claw-02:"), "格式 agent:<a>:<conv>: {}", k);
+        // 核心:conv 不能固定 :main(否则 orche exists 短路,bug2 复发)。
+        assert!(!k.ends_with(":main"), "conv 须唯一(非 main): {}", k);
+        assert!(k.contains(":t"), "conv 含时间戳标识 t: {}", k);
+        // agent_base 剥前缀:带 "agent:" 的取第 2 段作 base。
+        let k2 = claw_session_key("agent:claw-03:main");
+        assert!(k2.starts_with("agent:claw-03:t"), "剥前缀取 base: {}", k2);
     }
 
     /// delete 弹窗 N/esc 取消(不删,弹窗关)。

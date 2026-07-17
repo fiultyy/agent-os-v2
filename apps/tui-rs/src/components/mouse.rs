@@ -90,6 +90,9 @@ impl<T: Clone> ClickMap<T> {
         self.regions.push(ClickRegion { area, id });
     }
     /// 左键命中测试:返回首个包含 (col,row) 的 region id。先注册的优先。
+    /// ponytail: O(n) 线扫区域 contains——区域 hit-test 本质难 O(1)(重叠区域查询,
+    /// HashMap 点查不适用);n=按钮+session 项几十个 + 鼠标点击低频,O(n) 可接受。
+    /// 升级路径:n 增大时改按 row 分桶(Vec<Vec<region>>)缩扫描集。
     pub fn hit(&self, col: u16, row: u16) -> Option<&T> {
         let p = Position { x: col, y: row };
         self.regions.iter().find(|r| r.area.contains(p)).map(|r| &r.id)
