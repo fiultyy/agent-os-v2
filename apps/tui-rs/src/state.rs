@@ -2869,6 +2869,40 @@ mod tests {
         assert!(app.new_popup.is_none());
     }
 
+    /// 回归 bug1「new-session 弹窗只显 claw-02」:tui-popup render_ref 首次按 body 固定 area,
+    /// 之后用旧 area 不重算(tui-popup-0.5.1 popup.rs:143 `state.area.take()` 用 next.w/h)。
+    /// 修复:open_new_popup 打开即 new_popup=Claw+fetch,首帧 body(update_action_popup_bodies
+    /// 填)即含全部候选 → area 一次算大 → 全显。若 revert 回 None 态,首帧 body 仅 ~2 行 →
+    /// area 小 → 后续切 claw body 增 area 不扩 → 只显顶部候选。此测试锚定 render 层 body
+    /// 真全显(上方 normal_n/new_popup_claw_pick 只验 state 字段 new_popup==Claw,验不到 area)。
+    #[test]
+    fn new_popup_renders_all_candidates_not_truncated() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        // 注入 >1 候选(测试环境 fetch_claw_agents 兜底 ["main"],无法暴露多候选截断)。
+        let cands = vec!["claw-01".to_string(), "claw-02".to_string(), "claw-03".to_string()];
+        app.new_candidates = cands.clone();
+        app.open_new_popup(); // 修复态:new_popup=Claw(revert 为 None 则此测试失败)
+        app.new_candidates = cands; // 覆盖 fetch 兜底,模拟 orche 在线返多 agent
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::render::draw(f, &mut app)).unwrap();
+
+        // 拼 buffer 为字符串(同 main.rs print_buffer):遍历每 cell.symbol()。
+        let buf = term.backend().buffer();
+        let mut s = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                s.push_str(&buf[(x, y)].symbol());
+            }
+            s.push('\n');
+        }
+        for c in &["claw-01", "claw-02", "claw-03"] {
+            assert!(s.contains(c), "弹窗须显候选 {c}(回归:area 首次固定致只显顶部)");
+        }
+    }
+
     /// delete 弹窗 N/esc 取消(不删,弹窗关)。
     #[test]
     fn delete_popup_n_cancels() {
