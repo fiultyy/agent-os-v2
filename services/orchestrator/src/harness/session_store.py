@@ -40,7 +40,9 @@ CREATE TABLE IF NOT EXISTS orch_sessions (
     cwd           TEXT,                  -- claude working dir(claw 为 NULL)
     agent_id      TEXT,                  -- claw agent key(claude 为 NULL)
     created_at    TEXT NOT NULL,
-    last_turn_at  TEXT
+    last_turn_at  TEXT,
+    messages      TEXT                   -- native agent-os-v2: ModelMessage JSON(重启续聊;
+                                         -- claw/claude-code 为 NULL,真相在原生 transcript)
 );
 
 CREATE INDEX IF NOT EXISTS idx_orch_harness ON orch_sessions(harness_type, last_turn_at);
@@ -68,7 +70,19 @@ class OrchSessionStore:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.executescript(SESSION_SCHEMA)
+        self._ensure_column("messages", "TEXT")
         self._conn.commit()
+
+    def _ensure_column(self, column: str, ddl: str) -> None:
+        """Add a column to orch_sessions if missing (migration for pre-existing dbs).
+
+        CREATE TABLE IF NOT EXISTS won't add columns to an existing table, so older
+        orch_sessions.db files need an explicit ALTER. Idempotent.
+        """
+        cols = {r["name"] for r in
+                self._conn.execute("PRAGMA table_info(orch_sessions)").fetchall()}
+        if column not in cols:
+            self._conn.execute(f"ALTER TABLE orch_sessions ADD COLUMN {column} {ddl}")
 
     # ── CRUD ──────────────────────────────────────────────────────────
 
@@ -136,6 +150,23 @@ class OrchSessionStore:
             "UPDATE orch_sessions SET last_turn_at=? WHERE ext_id=?", (now, ext_id)
         )
         self._conn.commit()
+
+    # ── native message_history persistence (agent-os-v2 续聊) ──────────
+
+    def save_messages(self, ext_id: str, messages_json: str) -> None:
+        """Persist native agent ModelMessage JSON after a turn (restart-safe recall)."""
+        self._conn.execute(
+            "UPDATE orch_sessions SET messages=? WHERE ext_id=?",
+            (messages_json, ext_id),
+        )
+        self._conn.commit()
+
+    def load_messages(self, ext_id: str) -> Optional[str]:
+        """Load persisted ModelMessage JSON, or None if never written."""
+        row = self._conn.execute(
+            "SELECT messages FROM orch_sessions WHERE ext_id=?", (ext_id,)
+        ).fetchone()
+        return row["messages"] if row else None
 
     def delete(self, harness_type: str, ext_id: str) -> bool:
         cur = self._conn.execute(

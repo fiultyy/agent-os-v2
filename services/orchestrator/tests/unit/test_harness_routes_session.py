@@ -210,10 +210,14 @@ def test_trigger_turn_stale_claw_returns_503(store, monkeypatch):
 
 def _mock_native_rec(response: str = "ok") -> dict:
     """mock _build_native_session 返回:agent.run + emitter.close 受控。"""
+    from pydantic_ai.messages import ModelResponse, TextPart
     agent = MagicMock()
     result = MagicMock()
     result.output = response
-    result.all_messages = MagicMock(return_value=[{"role": "assistant", "content": response}])
+    # 真 ModelMessage(非 dict)——让 _persist_native_messages 序列化干净(defer5)
+    result.all_messages = MagicMock(return_value=[
+        ModelResponse(parts=[TextPart(content=response)])
+    ])
     agent.run = AsyncMock(return_value=result)
     emitter = MagicMock()
     emitter.close = AsyncMock()
@@ -241,8 +245,9 @@ def test_trigger_turn_native_runs_agent_and_updates_messages(store, monkeypatch)
     assert res["status"] == "completed"
     assert res["response"] == "hello back"
     rec["agent"].run.assert_awaited_once()
-    # message_history 续聊:all_messages() 回写
-    assert rec["messages"] == [{"role": "assistant", "content": "hello back"}]
+    # message_history 续聊:all_messages() 回写真 ModelResponse
+    from pydantic_ai.messages import ModelResponse
+    assert len(rec["messages"]) == 1 and isinstance(rec["messages"][0], ModelResponse)
 
 
 def test_trigger_turn_native_store_only_orphan_rebuilds(store, monkeypatch):
@@ -288,4 +293,30 @@ def test_restore_native_session_rebuilds(store, monkeypatch):
     restored = asyncio.run(routes.restore_all_sessions())
     assert restored["agent-os-v2"] == 1
     assert routes._sessions[routes._key("agent-os-v2", "nat1")] is rec
+
+
+# ── native message_history 持久化 helper(defer5)──────────────────────
+
+def test_persist_load_native_messages_roundtrip(store):
+    """真 ModelMessage persist→load round-trip(续聊重启可重建)。"""
+    from pydantic_ai.messages import ModelRequest, UserPromptPart
+    store.create("s1", "agent-os-v2", native_sid="s1")
+    msgs = [ModelRequest(parts=[UserPromptPart(content="你好")])]
+    routes._persist_native_messages("s1", msgs)
+    loaded = routes._load_native_messages("s1")
+    assert len(loaded) == 1
+    assert isinstance(loaded[0], ModelRequest)
+    assert loaded[0].parts[0].content == "你好"
+
+
+def test_load_native_messages_bad_json_returns_empty(store):
+    """坏 JSON(老格式/损坏)→ [],降级 fresh start 不破续聊。"""
+    store.create("s2", "agent-os-v2", native_sid="s2")
+    store.save_messages("s2", "{not valid json")
+    assert routes._load_native_messages("s2") == []
+
+
+def test_load_native_messages_empty_when_unwritten(store):
+    store.create("s3", "agent-os-v2", native_sid="s3")
+    assert routes._load_native_messages("s3") == []
 

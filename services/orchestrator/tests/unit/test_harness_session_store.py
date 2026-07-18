@@ -88,3 +88,30 @@ def test_delete(tmp_path):
     assert s.delete("claude-code", "abc") is True
     assert s.get("claude-code", "abc") is None
     assert s.delete("claude-code", "abc") is False
+
+
+# ── native message_history 持久化(defer5)──────────────────────────────
+
+def test_save_load_messages_roundtrip(tmp_path):
+    s = _store(tmp_path)
+    s.create("s1", "agent-os-v2", native_sid="s1")
+    assert s.load_messages("s1") is None          # 未写 → None
+    s.save_messages("s1", '{"kind":"request"}')
+    assert s.load_messages("s1") == '{"kind":"request"}'
+    s.save_messages("s1", '{"kind":"response"}')  # 覆盖
+    assert s.load_messages("s1") == '{"kind":"response"}'
+
+
+def test_messages_column_migrated_from_legacy_db(tmp_path):
+    """旧库(无 messages 列)构造时 ALTER 补列,save/load 正常。"""
+    import sqlite3
+    db = tmp_path / "legacy.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("""CREATE TABLE orch_sessions (
+        ext_id TEXT PRIMARY KEY, harness_type TEXT NOT NULL, native_sid TEXT,
+        cwd TEXT, agent_id TEXT, created_at TEXT NOT NULL, last_turn_at TEXT)""")
+    conn.commit(); conn.close()
+    s = OrchSessionStore(str(db))                  # 构造触发 _ensure_column
+    s.create("s1", "agent-os-v2", native_sid="s1")
+    s.save_messages("s1", '{"k":1}')
+    assert s.load_messages("s1") == '{"k":1}'

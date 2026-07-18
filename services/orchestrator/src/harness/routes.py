@@ -189,7 +189,33 @@ async def _create_claude(
     return client
 
 
-async def _build_native_session(session_id: str) -> Dict[str, Any]:
+def _load_native_messages(session_id: str) -> list:
+    """Deserialize persisted ModelMessages for restart-safe recall (None/坏 → [])."""
+    from pydantic_ai.messages import ModelMessagesTypeAdapter
+    raw = _store.load_messages(session_id)
+    if not raw:
+        return []
+    try:
+        return ModelMessagesTypeAdapter.validate_json(raw)
+    except Exception:
+        logger.warning("native messages decode failed (%s), starting fresh", session_id)
+        return []
+
+
+def _persist_native_messages(session_id: str, messages: list) -> None:
+    """Serialize ModelMessages after a turn (best-effort; ADR-7 不破主路径)."""
+    from pydantic_ai.messages import ModelMessagesTypeAdapter
+    try:
+        _store.save_messages(
+            session_id, ModelMessagesTypeAdapter.dump_json(messages).decode()
+        )
+    except Exception:
+        logger.warning("native messages persist failed (%s)", session_id)
+
+
+async def _build_native_session(
+    session_id: str, messages: list | None = None,
+) -> Dict[str, Any]:
     """agent-os-v2 native in-process session:pydantic-ai Agent + ObserveEmitter + 消息历史。
 
     ADR pydantic-ai-v2-adoption P8:native turn 走 /h/agent-os-v2。capabilities 注入
@@ -239,7 +265,7 @@ async def _build_native_session(session_id: str) -> Dict[str, Any]:
         *skill_caps,
     ])
     return {
-        "agent": agent, "emitter": emitter, "messages": [],
+        "agent": agent, "emitter": emitter, "messages": messages or [],
         "session_id": session_id, "harness_type": "agent-os-v2",
         "native_sid": session_id,
     }
@@ -337,15 +363,18 @@ async def trigger_turn(
     if harness_type == "agent-os-v2":
         rec = _sessions.get(_key(harness_type, session_id))
         if rec is None:
-            # store 有但内存无(restore 孤儿)→ 重建 native agent
+            # store 有但内存无(restore 孤儿)→ 重建 native agent + 回填持久化 message_history
             if _store.get(harness_type, session_id) is None:
                 raise HTTPException(status_code=404, detail="session not found")
-            rec = await _build_native_session(session_id)
+            rec = await _build_native_session(
+                session_id, messages=_load_native_messages(session_id)
+            )
             _sessions[_key(harness_type, session_id)] = rec
         # in-process Agent run:ObserveCapability 自动推 observe,guardrail 自动护
         result = await rec["agent"].run(req.message, message_history=rec["messages"])
         rec["messages"] = result.all_messages()
         _store.touch(session_id)
+        _persist_native_messages(session_id, rec["messages"])  # 续聊持久化(重启不丢)
         return {"session_id": session_id, "status": "completed",
                 "response": result.output}
     client = await _ensure_client(harness_type, session_id)
@@ -632,9 +661,10 @@ async def restore_all_sessions() -> Dict[str, int]:
                 }
                 restored["claw"] += 1
             elif ht == "agent-os-v2":
-                # native in-process agent 重建(无外部 native id;message_history 内存级,
-                # 重启丢多轮上下文 — ponytail defer:后续 observe replay 补续聊)
-                _sessions[key] = await _build_native_session(ext)
+                # native in-process agent 重建:从 store 回填 message_history(重启续聊)
+                _sessions[key] = await _build_native_session(
+                    ext, messages=_load_native_messages(ext)
+                )
                 restored["agent-os-v2"] += 1
         except Exception as e:
             logger.warning("restore session failed (%s/%s): %s", ht, ext, e)
