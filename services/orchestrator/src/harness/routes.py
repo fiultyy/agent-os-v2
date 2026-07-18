@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/h", tags=["harness"])
 
-VALID_TYPES = {"claw", "claude-code"}
+VALID_TYPES = {"claw", "claude-code", "agent-os-v2"}
 
 # observe-service REST base (sessions are persisted in SQLite there; the TUI's
 # source of truth). orche delete must sync here or the count drifts.
@@ -41,7 +41,9 @@ OBSERVE_REST_URL = "http://localhost:8002"
 
 # routes use "claw" as the harness key, but the openclaw client registers with
 # observe under harness_type="openclaw". Map so the DELETE hits the right row.
-_OBSERVE_HARNESS_TYPE = {"claw": "openclaw", "claude-code": "claude-code"}
+_OBSERVE_HARNESS_TYPE = {
+    "claw": "openclaw", "claude-code": "claude-code", "agent-os-v2": "agent-os-v2",
+}
 
 
 async def _observe_delete_session(harness_type: str, session_id: str) -> bool:
@@ -186,6 +188,45 @@ async def _create_claude(
     return client
 
 
+async def _build_native_session(session_id: str) -> Dict[str, Any]:
+    """agent-os-v2 native in-process session:pydantic-ai Agent + ObserveEmitter + 消息历史。
+
+    ADR pydantic-ai-v2-adoption P8:native turn 走 /h/agent-os-v2。capabilities 注入
+    ObserveCapability(真 emitter→observe)+ GuardrailCapability(护 native tool)。
+    profile/memory/skill 可按需追加(P8 先 observe+guardrail 基础通电)。
+    """
+    from .native_agent import HARNESS_TYPE, build_native_agent
+    from .capabilities import (
+        GuardrailCapability,
+        ObserveCapability,
+        make_skill_capabilities,
+    )
+    from .emit import ObserveEmitter
+    from src.skills.skill_loader import SkillLoader
+    from src.tools.guardrail import Guardrail
+
+    harness_id = f"native_{session_id[:8]}"
+    emitter = ObserveEmitter(HARNESS_TYPE, harness_id=harness_id, session_id=session_id)
+    try:
+        await emitter.connect()  # best-effort(observe 断不影响 native run,ADR-7)
+    except Exception:
+        logger.warning("native emitter connect failed (%s)", harness_id)
+    try:
+        skill_caps = make_skill_capabilities(SkillLoader())  # 扫 SKILL.md(defer 披露)
+    except Exception:
+        skill_caps = []  # 扫描失败不阻塞 native(P6 孤岛通电 best-effort)
+    agent = build_native_agent(capabilities=[
+        ObserveCapability(emitter=emitter, harness_id=harness_id, session_id=session_id),
+        GuardrailCapability(guardrail=Guardrail()),
+        *skill_caps,
+    ])
+    return {
+        "agent": agent, "emitter": emitter, "messages": [],
+        "session_id": session_id, "harness_type": "agent-os-v2",
+        "native_sid": session_id,
+    }
+
+
 # ── routes ────────────────────────────────────────────────────────────
 
 @router.post("/{harness_type}/sessions")
@@ -193,6 +234,14 @@ async def create_session(
     harness_type: str, req: CreateSessionReq,
 ) -> Dict[str, Any]:
     _validate_type(harness_type)
+    if harness_type == "agent-os-v2":
+        session_id = str(uuid.uuid4().hex[:12])
+        key = _key(harness_type, session_id)
+        if key in _sessions:
+            return {"session_id": session_id, "type": harness_type, "status": "exists"}
+        _sessions[key] = await _build_native_session(session_id)
+        _store.create(session_id, "agent-os-v2", native_sid=session_id)
+        return {"session_id": session_id, "type": harness_type, "status": "created"}
     if harness_type == "claw":
         # claw gateway session_key 必须是 claw 格式 agent:<agent>:<conv>;或che session_id = claw key
         # (统一,前端查 observe 同 key;uuid hex claw 不认 → subscribe/send 到不存在 session → 0 events)
@@ -267,6 +316,20 @@ async def trigger_turn(
     harness_type: str, session_id: str, req: TurnReq,
 ) -> Dict[str, Any]:
     _validate_type(harness_type)
+    if harness_type == "agent-os-v2":
+        rec = _sessions.get(_key(harness_type, session_id))
+        if rec is None:
+            # store 有但内存无(restore 孤儿)→ 重建 native agent
+            if _store.get(harness_type, session_id) is None:
+                raise HTTPException(status_code=404, detail="session not found")
+            rec = await _build_native_session(session_id)
+            _sessions[_key(harness_type, session_id)] = rec
+        # in-process Agent run:ObserveCapability 自动推 observe,guardrail 自动护
+        result = await rec["agent"].run(req.message, message_history=rec["messages"])
+        rec["messages"] = result.all_messages()
+        _store.touch(session_id)
+        return {"session_id": session_id, "status": "completed",
+                "response": result.output}
     client = await _ensure_client(harness_type, session_id)
     if client is None:
         raise HTTPException(status_code=404, detail="session not found")
@@ -306,6 +369,11 @@ async def spawn_instance(
     harness_type: str, session_id: str,
 ) -> Dict[str, Any]:
     _validate_type(harness_type)
+    if harness_type == "agent-os-v2":
+        raise HTTPException(
+            status_code=400,
+            detail="agent-os-v2 native is in-process (no spawn; create a new session)",
+        )
     client = await _ensure_client(harness_type, session_id)
     if client is None:
         raise HTTPException(status_code=404, detail="session not found")
@@ -324,6 +392,17 @@ async def delete_session(
     harness_type: str, session_id: str,
 ) -> Dict[str, Any]:
     _validate_type(harness_type)
+    if harness_type == "agent-os-v2":
+        rec = _sessions.pop(_key(harness_type, session_id), None)
+        if rec is not None:
+            try:
+                await rec["emitter"].close()
+            except Exception:
+                pass
+        ob_deleted = await _observe_delete_session(harness_type, session_id)
+        _store.delete(harness_type, session_id)
+        return {"session_id": session_id, "status": "deleted",
+                "raw_deleted": True, "observe_deleted": ob_deleted}
     k = _key(harness_type, session_id)
     rec = _sessions.pop(k, None)
     if rec is None:
@@ -511,7 +590,7 @@ async def restore_all_sessions() -> Dict[str, int]:
     ponytail:claw 重连失败后不自动重试(running=False → turn 时 503);后续可加
     healthcheck/自动重连。本次先"重启不丢 + 尝试重连"。
     """
-    restored = {"claude-code": 0, "claw": 0, "failed": 0}
+    restored = {"claude-code": 0, "claw": 0, "agent-os-v2": 0, "failed": 0}
     for r in _store.list_all():
         ht = r["harness_type"]
         ext = r["ext_id"]
@@ -534,6 +613,11 @@ async def restore_all_sessions() -> Dict[str, int]:
                     "native_sid": r.get("native_sid") or ext, "cwd": None,
                 }
                 restored["claw"] += 1
+            elif ht == "agent-os-v2":
+                # native in-process agent 重建(无外部 native id;message_history 内存级,
+                # 重启丢多轮上下文 — ponytail defer:后续 observe replay 补续聊)
+                _sessions[key] = await _build_native_session(ext)
+                restored["agent-os-v2"] += 1
         except Exception as e:
             logger.warning("restore session failed (%s/%s): %s", ht, ext, e)
             restored["failed"] += 1

@@ -11,6 +11,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import HTTPException
 
 from src.harness import routes
 from src.harness.session_store import OrchSessionStore
@@ -203,4 +204,88 @@ def test_trigger_turn_stale_claw_returns_503(store, monkeypatch):
         asyncio.run(routes.trigger_turn("claw", sid, routes.TurnReq(message="hi")))
     assert ei.value.status_code == 503
     fake.send_message.assert_not_called()          # stale → 不发
+
+
+# ── P8:agent-os-v2 native routes(create/turn/delete)──────────────────
+
+def _mock_native_rec(response: str = "ok") -> dict:
+    """mock _build_native_session 返回:agent.run + emitter.close 受控。"""
+    agent = MagicMock()
+    result = MagicMock()
+    result.output = response
+    result.all_messages = MagicMock(return_value=[{"role": "assistant", "content": response}])
+    agent.run = AsyncMock(return_value=result)
+    emitter = MagicMock()
+    emitter.close = AsyncMock()
+    return {
+        "agent": agent, "emitter": emitter, "messages": [],
+        "session_id": "s", "harness_type": "agent-os-v2", "native_sid": "s",
+    }
+
+
+def test_create_native_session_persists(store, monkeypatch):
+    rec = _mock_native_rec()
+    monkeypatch.setattr(routes, "_build_native_session", AsyncMock(return_value=rec))
+    res = asyncio.run(routes.create_session("agent-os-v2", routes.CreateSessionReq()))
+    assert res["status"] == "created"
+    assert res["type"] == "agent-os-v2"
+    sid = res["session_id"]
+    assert store.get("agent-os-v2", sid)["native_sid"] == sid
+
+
+def test_trigger_turn_native_runs_agent_and_updates_messages(store, monkeypatch):
+    rec = _mock_native_rec("hello back")
+    monkeypatch.setattr(routes, "_build_native_session", AsyncMock(return_value=rec))
+    sid = asyncio.run(routes.create_session("agent-os-v2", routes.CreateSessionReq()))["session_id"]
+    res = asyncio.run(routes.trigger_turn("agent-os-v2", sid, routes.TurnReq(message="hi")))
+    assert res["status"] == "completed"
+    assert res["response"] == "hello back"
+    rec["agent"].run.assert_awaited_once()
+    # message_history 续聊:all_messages() 回写
+    assert rec["messages"] == [{"role": "assistant", "content": "hello back"}]
+
+
+def test_trigger_turn_native_store_only_orphan_rebuilds(store, monkeypatch):
+    """store 有、_sessions 无(restore 孤儿)→ trigger_turn 重建 native agent(不 404)。"""
+    store.create("orphan-native", "agent-os-v2", native_sid="orphan-native")
+    rec = _mock_native_rec("rebuilt")
+    monkeypatch.setattr(routes, "_build_native_session", AsyncMock(return_value=rec))
+    res = asyncio.run(routes.trigger_turn("agent-os-v2", "orphan-native", routes.TurnReq(message="hi")))
+    assert res["status"] == "completed"
+
+
+def test_trigger_turn_native_not_found_404(store):
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(routes.trigger_turn("agent-os-v2", "ghost", routes.TurnReq(message="hi")))
+    assert ei.value.status_code == 404
+
+
+def test_delete_native_session_closes_emitter(store, monkeypatch):
+    rec = _mock_native_rec()
+    monkeypatch.setattr(routes, "_build_native_session", AsyncMock(return_value=rec))
+    monkeypatch.setattr(routes, "_observe_delete_session", AsyncMock(return_value=True))
+    sid = asyncio.run(routes.create_session("agent-os-v2", routes.CreateSessionReq()))["session_id"]
+    res = asyncio.run(routes.delete_session("agent-os-v2", sid))
+    assert res["status"] == "deleted"
+    rec["emitter"].close.assert_awaited()
+    assert store.get("agent-os-v2", sid) is None
+
+
+def test_spawn_native_returns_400(store, monkeypatch):
+    monkeypatch.setattr(routes, "_build_native_session", AsyncMock(return_value=_mock_native_rec()))
+    sid = asyncio.run(routes.create_session("agent-os-v2", routes.CreateSessionReq()))["session_id"]
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(routes.spawn_instance("agent-os-v2", sid))
+    assert ei.value.status_code == 400  # in-process 无 spawn
+
+
+def test_restore_native_session_rebuilds(store, monkeypatch):
+    """restore_all_sessions 加 agent-os-v2 分支:store 有 → 重建 native agent。"""
+    store.create("nat1", "agent-os-v2", native_sid="nat1")
+    rec = _mock_native_rec()
+    monkeypatch.setattr(routes, "_build_native_session", AsyncMock(return_value=rec))
+    monkeypatch.setattr(routes, "_sessions", {})
+    restored = asyncio.run(routes.restore_all_sessions())
+    assert restored["agent-os-v2"] == 1
+    assert routes._sessions[routes._key("agent-os-v2", "nat1")] is rec
 
