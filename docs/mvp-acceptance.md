@@ -1,3 +1,5 @@
+> ⚠️ **历史快照(gateway 已退役,2026-07-18)**:本文档含 `:8000` curl 引用指向已删除的 gateway BFF(commit c594969)。现役服务:orchestrator `:8001` / observe `:8002` / native `/h`。文中 `:8000` 示例为失效死引用,不再维护。
+
 # MVP 验收脚本 — Agent-OS-V2
 
 > **端到端验证 MVP 北极星**:单 agent 对话 + function-calling 工具 + 记忆召回 + 可观测 + 重启不丢。

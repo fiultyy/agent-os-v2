@@ -142,12 +142,12 @@ P5/P6/P7 + test_multi_turn_tool_loop 重写)/ R2 cache_control 实测。
 
 | defer | 终态 | 证据 |
 |---|---|---|
-| **R2 cache_control 实测** | ✅ **实测命中** | `scripts/check_r2_cache.py`:智谱 `/api/anthropic`(glm-4.7)两 turn `cache_read_tokens=2176`(2208 input 中 98% cache 读)。AnthropicModelSettings cache_control 生效,零降级 |
+| **R2 cache_control 实测** | ✅ **实测命中** | `scripts/check_r2_cache.py`:智谱 `/api/anthropic`(glm-4.7)turn2 `cache_read_tokens=2176`(turn1=0 首次无缓存;turn2 38 非缓存+2176 缓存=2214 总输入,98% 命中)。AnthropicModelSettings cache_control 生效,零降级 |
 | **native message_history 持久化** | ✅ **done** | `OrchSessionStore` 加 `messages` 列(JSON)+ `_ensure_column` migration;turn 后 `_persist_native_messages` 写,restore/孤儿重建 `_load_native_messages` 回填。重启不丢多轮上下文(f743376) |
 | **profile/memory capability 注入** | ✅ **memory done / profile YAGNI** | MemoryCapability 注入 `_build_native_session`(ExperienceTool+KGMemoryTool 惰性单例 `_get_memory_tools`,defer_loading recall;env gate);ProfileCapability 不注入——native 用扁平 `instructions=system_prompt`,ProfileRegistry 全仓零装配,分层 profile 无 native 消费者(12ba6e6) |
 | **_execute_parallel 换 agent_turn_node** | ✅ **评估不做** | `run_agent_turn` 是 `_build_parallel_graph` 正确原语(v2 per-agent model/profile + None-safe 降级 + R1 分支不写 memory)。换 `agent_turn_node`(单一智谱 glm anthropic)会:① 扁平化多 agent(丢 per-agent model)② 破 R1(MemoryWriter 分支写 memory)③ 丢 None-safe(`ANTHROPIC_AUTH_TOKEN` 缺 raise vs 降级)④ 通道切换(paas→anthropic)。两路径职责分离:native `/h` 走 `agent_turn_node`,v2 编排走 `run_agent_turn` |
 | **P7 SubAgents** | ⬜ **YAGNI defer** | pydantic-ai-harness experimental 单-agent 内委派,锁版本 + 真需才上。native session 无委派需求(多 agent 走 graph loop)。capability 框架已支持,真需时再加 |
-| **docs curl :8000 归档** | ✅ **不存在** | `docs/` 零 .md,`:8000` 零命中(随 gateway/web 退役清理消除,无需归档) |
+| **docs curl :8000 归档** | ✅ **已归档(banner)** | 对抗验证订正:此前"零命中"为假(勘察时 cwd 路径误判 `ls docs/*.md` 在 services/orchestrator 下跑)。实际 `docs/` **11 文件 28 处 `:8000` 死引用**(curl 指向 commit c594969 删除的 gateway BFF)。10 文件(9 .md + architecture-report.html)加 DEPRECATED banner 标注死引用 + 现役端口(orchestrator:8001/observe:8002/native /h);历史快照不逐 curl 改(gateway 路由≠orchestrator 路由,逐改+验证=过度,ponytail) |
 
 **R2 实测结论关键**:此前"智谱端点命中率可能变"的 must_defer 经实测确认命中率优秀(98% input token cache 读),P8 主路径 cache 无虞——AnthropicModelSettings 替代 ContextCompiler/static_count 成立。
 
