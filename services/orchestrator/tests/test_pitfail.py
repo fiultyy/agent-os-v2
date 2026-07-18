@@ -155,8 +155,8 @@ def test_hook_branch_increment_when_match(tmp_path, monkeypatch):
 
 
 def test_classify_tool_error_branches():
-    """chat.py _classify_tool_error 关键词分类。"""
-    from src.api.routes.chat import _classify_tool_error
+    """_classify_tool_error 关键词分类(P8:已从 chat.py 移入 ToolBridgeCapability)。"""
+    from src.harness.capabilities.tool_bridge_capability import _classify_tool_error
     assert _classify_tool_error("Operation timed out") == "timeout"
     assert _classify_tool_error("request timeout reached") == "timeout"
     assert _classify_tool_error("File not found: /a/b") == "file_not_found"
