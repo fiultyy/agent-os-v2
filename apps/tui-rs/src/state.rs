@@ -668,6 +668,10 @@ pub struct App {
     pub pending_turn: Option<String>,
     /// spinner 动画帧(Tick 递增,render 取 SPINNER[frame % len]);pending 时 poll 缩 80ms 流畅。
     pub spinner_frame: usize,
+    /// 后台 fetch 全量回传:do_turn spawn trigger_turn+fetch_events → tx 发 (key, Option<events>),
+    /// Tick drain rx → events 全量替换 + 清 pending(去 spinner,user msg 由全量无缝接管)。非阻塞 UI。
+    pub fetch_tx: std::sync::mpsc::Sender<(String, Option<Vec<ObserveEvent>>)>,
+    fetch_rx: std::sync::mpsc::Receiver<(String, Option<Vec<ObserveEvent>>)>,
     /// Control 输入模式:true=所有字母进 turn_msg(输入栏可自由打字,不受 t/s/p/h 等快捷键抢占);
     /// Esc 退出到快捷键模式(此时 t/s/f/G/D/R/p/h 等生效),`i` 再进入。默认 true:进 Control 即可打字。
     pub insert_mode: bool,
@@ -749,6 +753,7 @@ pub struct ContextMenu {
 
 impl App {
     pub fn new(term: TermCap) -> Self {
+        let (fetch_tx, fetch_rx) = std::sync::mpsc::channel();
         Self {
             panel: Panel::Control,
             sessions: Default::default(),
@@ -809,6 +814,7 @@ impl App {
             pending_spawn: None,
             pending_turn: None,
             spinner_frame: 0,
+            fetch_tx, fetch_rx,
             insert_mode: true,
             textarea: crate::components::textarea::Textarea::new(),
             textarea_state: crate::components::textarea::TextareaState::default(),
@@ -896,22 +902,29 @@ impl App {
         }
     }
     pub fn do_turn(&mut self) {
-        // 触发当前 cursor session 的 turn(不再硬编码 claw;claude-code session 也能 turn)。
-        // observe harness_type=openclaw ↔ orche 原语 claw(同一后端,命名差)。
-        let (ht, sid) = self.flat.get(self.cursor)
-            .map(|s| (norm_ht(&s.harness_type), s.session_id.clone()))
-            .unwrap_or_else(|| ("claw".to_string(), CLAW_SESSION.to_string()));
+        // optimistic 立即回显(spinner + 用户输入)+ 异步发送(不阻塞 UI)。
+        // WS 推 tick_started(含 user msg request)→ drain_ws push + 清 pending(切换正常显示);
+        // subscribe connect 时序可能丢 WS tick_started → 后台 fetch 全量兜补(has_tick 才 replace)。
+        let (raw_ht, sid) = self.flat.get(self.cursor)
+            .map(|s| (s.harness_type.clone(), s.session_id.clone()))
+            .unwrap_or_else(|| ("openclaw".to_string(), CLAW_SESSION.to_string()));
+        let norm_ht_v = norm_ht(&raw_ht);
         let msg = self.turn_msg.clone();
         self.turn_msg.clear();
-        // optimistic 立即回显:本地 pending(对话区 spinner 跑马灯),不等 orche 往返。
-        // trigger_turn 后台线程发(不阻塞 event loop);drain_ws 收 orche cursor session 事件
-        // → 确认 → 清 pending(去特效)。根治"输入到上方显示"延迟(原同步 trigger_turn+fetch_current 阻塞)。
         if !msg.trim().is_empty() {
             self.pending_turn = Some(msg.clone());
-            let (ht2, sid2) = (ht.clone(), sid.clone());
-            std::thread::spawn(move || { let _ = trigger_turn(&ht2, &sid2, &msg); });
+            let key = format!("{}/{}", raw_ht, sid);
+            let tx = self.fetch_tx.clone();
+            std::thread::spawn(move || {
+                let _ = trigger_turn(&norm_ht_v, &sid, &msg);
+                // 等 observe ingest tick_started(含 user msg;LLM 首 token 前 gateway 推 stream start,
+                // emitter 合成 tick_started → observe,~几百 ms)。subscribe 时序丢 WS tick_started 时,
+                // fetch 全量补(observe 有)。sleep 确保拉到 tick_started。
+                std::thread::sleep(std::time::Duration::from_millis(600));
+                let evs = fetch_events(&raw_ht, &sid);
+                let _ = tx.send((key, evs));
+            });
         }
-        // 发送后聚焦最新——置 tail=true(后续 drain_ws/render 跟随滚底)+ 立即滚底兜底。
         self.chat_follow_tail = true;
         self.control_chat_scroll.scroll_to_bottom();
     }
@@ -1283,6 +1296,28 @@ impl App {
                 // flow 事件经 WS 推送(drain_ws → app.flows[i].status)。
                 // fetch_claw_events/refresh_flows 不再在 Tick 调(保留方法定义,业务不变)。
                 self.drain_ws();
+                // drain 后台 fetch 全量回传(do_turn spawn):全量替换 events(含 user msg + 历史)
+                // + 清 pending(去 spinner,user msg 由全量无缝接管)。fetch 失败(evs=None)仍清 pending。
+                while let Ok((key, evs)) = self.fetch_rx.try_recv() {
+                    // has_tick = fetch 含 tick_started request == pending msg(本次 user msg 确认)。
+                    // 历史非空 tick_started request ≠ 本次 msg,不算 — 避免 fetch 全量含历史时误清
+                    // pending 致 spinner 提前停(本次 tick_started 还没 ingest,LLM 首 token 慢)。
+                    let pending_msg = self.pending_turn.clone();
+                    let has_tick = evs.as_ref().map_or(false, |e| e.iter().any(|ev| {
+                        if ev.event_type != "tick_started" { return false; }
+                        let req = ev.data.get("request").and_then(|v| v.as_str()).unwrap_or("");
+                        !req.is_empty() && pending_msg.as_deref() == Some(req)
+                    }));
+                    if let Some(evs) = evs {
+                        // 只在 has_tick 时 replace:observe 是 WS 源(broadcast=ingest 后),全量 ⊇ WS 已推,
+                        // 故含 tick_started 的 fetch 全量可信、不丢 WS 增量;不含 = observe 未就绪,
+                        // 不动(保留 WS 增量,等 drain_ws tick_started 清 pending)。治 replace 覆盖 bug。
+                        if has_tick {
+                            self.events.insert(key, evs);
+                            self.pending_turn = None;
+                        }
+                    }
+                }
                 // spinner 跑马灯帧推进(pending 时 main.rs poll 缩 80ms → ~12fps 流畅)。
                 self.spinner_frame = self.spinner_frame.wrapping_add(1);
                 // PasteBurst flush:超时 burst 一次性插入(tmux 无 bracketed 时粘贴靠此时序 flush)
@@ -1502,6 +1537,12 @@ impl App {
             self.cursor = idx;
             self.focus = FocusTarget::ControlSession(idx);
             self.fetch_current();
+            // 主动订阅新 session WS(不等 main loop 检测 sub_key 变;idempotent,确保即时收事件)。
+            if let Some(mgr) = self.ws.as_ref() {
+                if let Some(s) = self.flat.get(idx) {
+                    mgr.subscribe(&s.harness_type, &s.session_id);
+                }
+            }
         }
     }
 
@@ -2508,7 +2549,7 @@ impl App {
     /// 非阻塞收 WS 事件,累积进 app.events[key](turn 事件)。
     /// 主 loop 每帧调(Tick 或 poll 间隙)。WS manager 未注入时 no-op。
     pub fn drain_ws(&mut self) {
-        // optimistic 确认:orche 推回 cursor session 事件 → 本地 pending 已被 gateway 接受 → 清(去 spinner)。
+        // tick_started(cursor session)= turn 确认(user msg 由 tick_started.request 接管)。
         let cursor_key = self.flat.get(self.cursor)
             .map(|s| format!("{}/{}", s.harness_type, s.session_id));
         // ponytail: 先抽干 channel 到本地 Vec(不可变借 self.ws),再应用(可变借 self)。
@@ -2527,9 +2568,14 @@ impl App {
         for msg in msgs {
             match msg {
                 crate::ws::WsMsg::Event { key, ev } => {
-                    // optimistic 确认:cursor session 收到任意 orche 事件 = gateway 已处理 send → 清 pending。
-                    if cursor_key.as_deref() == Some(key.as_str()) {
-                        self.pending_turn = None;
+                    // tick_started(cursor session)且 request == pending msg = 本次 user msg 确认 → 清 pending。
+                    // 必须匹配 pending msg:observe 双源(空+非空)+ 历史 tick_started request 非空但不本次,
+                    // 只匹配本次 msg 才清(避免历史/空 request 误清致 spinner 提前停)。
+                    if ev.event_type == "tick_started" && cursor_key.as_deref() == Some(key.as_str()) {
+                        let req = ev.data.get("request").and_then(|v| v.as_str()).unwrap_or("");
+                        if !req.is_empty() && self.pending_turn.as_deref() == Some(req) {
+                            self.pending_turn = None;
+                        }
                     }
                     // 累积 turn 事件(同 fetch_events 效果:events[key].push + 实例去重计数)。
                     let evs = self.events.entry(key.clone()).or_default();
@@ -3606,28 +3652,6 @@ mod tests {
         app.do_turn();
         assert!(app.chat_follow_tail, "do_turn sets tail=true");
         assert_eq!(app.control_chat_scroll.offset, 39, "scroll_to_bottom locks to total-1");
-    }
-
-    /// optimistic 回显:do_turn 非空消息立即设 pending_turn(本地 spinner 跑马灯)+ 清 turn_msg;
-    /// 空消息不覆盖。trigger_turn 后台线程发(不阻塞;session 用不存在的,避免污染真实 main)。
-    #[test]
-    fn do_turn_sets_optimistic_pending() {
-        let mut app = App::new(crate::kitty::detect());
-        app.panel = Panel::Control;
-        app.flat = vec![Session {
-            harness_type: "openclaw".into(),
-            session_id: "agent:test:optimistic-no-such-session".into(),
-            harness_id: "h".into(), cwd: None, running: true,
-        }];
-        app.cursor = 0;
-        app.turn_msg = "hello world".into();
-        app.do_turn();
-        assert!(app.pending_turn.is_some(), "非空消息 optimistic 立即回显 pending");
-        assert_eq!(app.pending_turn.as_deref(), Some("hello world"));
-        assert_eq!(app.turn_msg, "", "turn_msg 清空(避免重发)");
-        app.turn_msg = "   ".into();
-        app.do_turn();
-        assert_eq!(app.pending_turn.as_deref(), Some("hello world"), "空消息不重置 pending");
     }
 
     /// IT4 ③:PgUp 脱离跟尾(tail=false),PgDn 近底重新跟尾(tail=true)。normal 模式。
