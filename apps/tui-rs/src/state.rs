@@ -1627,6 +1627,12 @@ impl App {
                 self.new_idx = 0;
                 self.new_cc_input.clear();
             }
+            702 => {
+                // agent-os-v2:native harness,无候选(服务端自动生成 12-hex sid)。
+                self.new_popup = Some(NewKind::AoV2);
+                self.new_candidates = vec![];
+                self.new_idx = 0;
+            }
             790 => self.do_new_session(),
             791 => {
                 self.close_popup("new");
@@ -3766,6 +3772,10 @@ mod tests {
         // 701 = 选 cc。
         app.handle_new_popup_click(701);
         assert_eq!(app.new_popup, Some(NewKind::Cc));
+        // 702 = 选 agent-os-v2(自研 native harness,无候选,服务端自动生成 sid)。
+        app.handle_new_popup_click(702);
+        assert_eq!(app.new_popup, Some(NewKind::AoV2));
+        assert!(app.new_candidates.is_empty(), "ao 无候选");
     }
 
     #[test]

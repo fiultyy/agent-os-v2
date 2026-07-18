@@ -60,8 +60,12 @@ class ObserveCapability(AbstractCapability[Any]):
 
         tick_id = str(uuid.uuid4())
         tool_count = 0
+        # 用户消息优先(ctx.prompt);占位 [native run] 仅在 prompt 不可得时(避免 TUI 把
+        # 占位当用户消息渲染 → 内容跟 cc/oc harness 不一致)。
+        prompt = getattr(ctx, "prompt", None)
+        user_msg = prompt if isinstance(prompt, str) and prompt.strip() else "[native run]"
         await self._emit(
-            tick_started(HARNESS_TYPE, self.harness_id, self.session_id, tick_id, "[native run]")
+            tick_started(HARNESS_TYPE, self.harness_id, self.session_id, tick_id, user_msg)
         )
         try:
             async for event in stream:

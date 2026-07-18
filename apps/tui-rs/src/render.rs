@@ -1228,6 +1228,7 @@ fn register_new_popup_clickmap(app: &mut App) {
         let y = row_y(0);
         app.popup_clickmap.register(Rect::new(inner_x, y, 8, 1), 700); // [x]claw
         app.popup_clickmap.register(Rect::new(inner_x + 9, y, 6, 1), 701); // [x]cc
+        app.popup_clickmap.register(Rect::new(inner_x + 17, y, 7, 1), 702); // [x]ao
     }
     // 候选行:header 在 row 1,候选从 row 2 起。claw→710+i,cc→720+i。
     let cand_start = 2usize;
