@@ -31,9 +31,27 @@ from src.memory.hooks import (
 logger = logging.getLogger(__name__)
 
 
-def _estimate_tokens(messages: list[dict[str, Any]]) -> int:
+def _message_text(m: Any) -> str:
+    """Extract text from a message — 兼容 dict(老 chat.py 接口)和 pydantic-ai 2.0
+    ModelRequest/ModelResponse 对象(native harness 接入后,ctx.messages 是对象不是 dict)。"""
+    if isinstance(m, dict):
+        return str(m.get("content", ""))
+    # pydantic-ai 2.0:文本散在 instructions/user_text_prompt(+ ModelResponse parts)
+    chunks: list[str] = []
+    for attr in ("instructions", "user_text_prompt", "content", "output"):
+        v = getattr(m, attr, None)
+        if isinstance(v, str):
+            chunks.append(v)
+    for p in getattr(m, "parts", None) or []:
+        c = getattr(p, "content", None)
+        if isinstance(c, str):
+            chunks.append(c)
+    return " ".join(chunks)
+
+
+def _estimate_tokens(messages: list[Any]) -> int:
     """Rough token estimate mirroring chat.py's pre-P1 heuristic (~4 chars/token)."""
-    return sum(max(1, len(m.get("content", "")) // 4) for m in messages)
+    return sum(max(1, len(_message_text(m)) // 4) for m in messages)
 
 
 class DefaultMemoryHook(MemoryHook):
