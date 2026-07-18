@@ -198,10 +198,12 @@ async def _build_native_session(session_id: str) -> Dict[str, Any]:
     from .native_agent import HARNESS_TYPE, build_native_agent
     from .capabilities import (
         GuardrailCapability,
+        MemoryWriterCapability,
         ObserveCapability,
         make_skill_capabilities,
     )
     from .emit import ObserveEmitter
+    from src.services import _state
     from src.skills.skill_loader import SkillLoader
     from src.tools.guardrail import Guardrail
 
@@ -217,6 +219,14 @@ async def _build_native_session(session_id: str) -> Dict[str, Any]:
         skill_caps = []  # 扫描失败不阻塞 native(P6 孤岛通电 best-effort)
     agent = build_native_agent(capabilities=[
         ObserveCapability(emitter=emitter, harness_id=harness_id, session_id=session_id),
+        # P5 MemoryWriter(写侧,自动沉淀):每轮 tool_result + 用户轮结束四件套。
+        # env gate:memory_event_bus/knowledge_graph None → no-op(ADR-7)。
+        MemoryWriterCapability(
+            memory_event_bus=_state.memory_event_bus,
+            knowledge_graph=_state.knowledge_graph,
+            agent_id=session_id,
+            session_id=session_id,
+        ),
         GuardrailCapability(guardrail=Guardrail()),
         *skill_caps,
     ])

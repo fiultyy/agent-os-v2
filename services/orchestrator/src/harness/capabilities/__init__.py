@@ -10,6 +10,7 @@ P5 ObserveCapability / P6 SkillCapabilityFactory。
 
 from .guardrail_capability import GuardrailCapability
 from .memory_capability import MemoryCapability
+from .memory_writer_capability import MemoryWriterCapability
 from .observe_capability import ObserveCapability
 from .profile_capability import ProfileCapability
 from .skill_capability import SkillCapability, make_skill_capabilities
@@ -17,6 +18,7 @@ from .skill_capability import SkillCapability, make_skill_capabilities
 __all__ = [
     "ProfileCapability",
     "MemoryCapability",
+    "MemoryWriterCapability",
     "GuardrailCapability",
     "ObserveCapability",
     "SkillCapability",

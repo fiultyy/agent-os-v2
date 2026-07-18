@@ -116,6 +116,26 @@ defer(文档注明,非移植阻塞):
 
 **关键已核实**:pydantic_ai 2.12.0 `AbstractCapability` 暴露 `after_run`/`before_run`/`wrap_run`/`wrap_run_event_stream`/`wrap_tool_execute`/`on_tool_execute_error`/`wrap_model_request` 全套钩子(P5/P6/P7 技术可行,阻塞在语义非 API)。
 
+### P5 MemoryWriterCapability 鸿沟已解 + 落地(2026-07-18)
+
+workflow must_defer 的 P5 鸿沟(`after_run` 丢中间轮 tool_result 沉淀)**已解**:改用
+`wrap_run_event_stream`(非 `after_run`)在 `FunctionToolResultEvent` **per-result** emit ——
+N 轮 tool = N 次 TURN_END(tool_result_item)+ INGEST 沉淀,不丢中间轮;stream 耗尽触发用户轮
+四件套(TURN_END working + INGEST + KG + PRE_COMPRESS)。`ctx.prompt` / `ctx.messages` 提供
+user_prompt / history。
+
+- `src/harness/capabilities/memory_writer_capability.py`:写侧 capability(`defer_loading=False`,
+  不暴露 tool → 不破 R1;`position="inner"` 让 observe 包外做完整 tick 闭环)。env gate
+  (bus/kg None → no-op)+ ADR-7(全 try/except + fire-and-forget,不污染 Agent.run)
+- 接入 `_build_native_session`(P5 通电):native `/h/agent-os-v2` turn 注入 MemoryWriter
+  (`_state.memory_event_bus` + `_state.knowledge_graph`)
+- 7 单测绿(per-result 独立沉淀 / 用户轮四件套 / env gate / emit 失败不破主路径 / retry +
+  failed outcome 不误沉淀)
+
+剩余 must_defer 不变:P6 Canvas(canvas 双发无 capability 承接)/ P7 PitFail
+(`{status:'error'}` 返回值非 raise,`on_tool_execute_error` 不触发)/ P8 主路径退役(依赖
+P5/P6/P7 + test_multi_turn_tool_loop 重写)/ R2 cache_control 实测。
+
 ## 后续可选(非本 ADR 范围)
 
 - flow.py 拓扑层未来若评估用 pydantic-graph,需先解 data-driven DSL → type-driven graph 编译器问题(本 ADR 不做)
