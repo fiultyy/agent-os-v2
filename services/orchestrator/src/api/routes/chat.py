@@ -5,8 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
-import re as _re
 import uuid
 from typing import Any, AsyncGenerator
 
@@ -36,137 +34,18 @@ from src.memory.hooks import (
 from src.memory.types import MemoryItem, MemoryOrigin
 from src.communication.message import AgentMessage, MessageType
 from src.services import _state
-from src.canvas.events import (
-    TickStartedEvent,
-    ToolCallEvent,
-    ToolResultEvent,
-    TickCompletedEvent,
-)
 from src.services.llm_client import LLMError
-from src.canvas.events import (
-    TickStartedEvent,
-    ToolCallEvent,
-    ToolResultEvent,
-    TickCompletedEvent,
-)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
-# ── Canvas event emit helper(通电) ────────────────────────────────
-# fire-and-forget:emit tick/tool 事件到实时画布。None-guard(装配降级/单测未挂)
-# + try/except(emitter 内部异常)绝不 raise,主路径 /execute 零回归(对齐 pitfall 风格)。
-async def _canvas_emit(emitter, evt) -> None:
-    if emitter is None:
-        return
-    try:
-        await emitter.emit(evt)
-    except Exception:
-        logger.warning("canvas emit failed (%s)", getattr(evt, "event_type", "?"), exc_info=True)
-
-
-# ── SSE helpers ────────────────────────────────────────────────────
+# ── SSE helpers ────────────────────────────────────────────────────────────
 
 
 def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
-
-
-# ── Tool invocation detection ─────────────────────────────────────
-
-_TOOL_INVOCATION_RE = _re.compile(
-    r'\b(?:tool_call|function_call|action)\s*[:=]\s*["\']?(\w+)',
-    _re.IGNORECASE,
-)
-
-
-def _has_tool_invocation(text: str) -> bool:
-    return bool(_TOOL_INVOCATION_RE.search(text))
-
-
-# Multi-turn tool_use loop: hard ceiling on how many times the model may chain
-# tool calls before the ``llm`` conditional edge forces ``llm_synthesize``.
-# Guards against a tool-happy model looping forever (e.g. always re-emitting a
-# tool_use). Overridable via env for tuning.
-MAX_TOOL_ITERATIONS = int(os.environ.get("MAX_TOOL_ITERATIONS", "5"))
-
-
-def _inject_tool_history(
-    messages: list[dict[str, Any]],
-    history: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Append the accumulated tool_use/tool_result pairs to *messages*.
-
-    Replays each recorded round as the canonical anthropic tool-use turn
-    structure so the model observes every prior tool call and its result
-    before deciding the next step::
-
-        assistant: [{"type": "tool_use", "id", "name", "input"}]
-        user:      [{"type": "tool_result", "tool_use_id", "content"}]
-
-    The caller has already appended the user input once (first round); this
-    only adds the tool turns, so the resulting message list is a valid
-    alternating role sequence for the Anthropic channel.
-    """
-    out = list(messages)
-    for entry in history:
-        tu = entry.get("tool_use") or {}
-        tr = entry.get("tool_result", "")
-        tu_id = tu.get("id", "")
-        out.append(
-            {
-                "role": "assistant",
-                "content": [
-                    {
-                        "type": "tool_use",
-                        "id": tu_id,
-                        "name": tu.get("name", ""),
-                        "input": tu.get("input", {}) or {},
-                    }
-                ],
-            }
-        )
-        out.append(
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": tu_id,
-                        "content": tr,
-                    }
-                ],
-            }
-        )
-    return out
-
-
-def _build_native_tools() -> list[dict[str, Any]]:
-    """Convert the ToolRegistry listing to Anthropic-native tool schemas.
-
-    The registry stores each tool as ``{name, description, parameters}`` where
-    ``parameters`` is already a JSON Schema (type/properties/required) — exactly
-    what Anthropic expects under ``input_schema``. This is a thin rename so the
-    orchestrator can pass tools verbatim to ``LLMClient.chat(tools=...)`` and
-    get native ``tool_use`` back instead of fragile regex parsing.
-
-    Returns ``[]`` (empty → caller treats as "no tools") when the registry is
-    not initialized or is empty.
-    """
-    if _state.tool_executor is None or _state.tool_executor.registry is None:
-        return []
-    tools: list[dict[str, Any]] = []
-    for t in _state.tool_executor.registry.list_tools():
-        tools.append(
-            {
-                "name": t["name"],
-                "description": t.get("description", ""),
-                "input_schema": t.get("parameters") or {"type": "object", "properties": {}},
-            }
-        )
-    return tools
 
 
 # ── KG extraction helper ──────────────────────────────────────────
@@ -202,479 +81,6 @@ def _fire_write(agent_id: str, coro_fn: Any) -> None:
         wq.fire(agent_id, coro_fn)
     else:
         asyncio.create_task(coro_fn())
-
-
-def _trigger_ingest(
-    memory_id: str,
-    content: str,
-    agent_id: str,
-    session_id: str,
-    origin: MemoryOrigin,
-) -> None:
-    """Fire-and-forget ① IngestorAgent via ``EventType.INGEST``.
-
-    Runs as an independent ``asyncio.create_task`` so the request hot-path
-    never waits on LLM extraction. No-op when the MEMORY_INGESTOR_ENABLED
-    feature gate is off (no INGEST hook registered → bus.emit returns None).
-    The P0 FOREGROUND red-line is enforced inside the hook.
-    """
-    try:
-        ctx = IngestContext(
-            memory_id=memory_id,
-            content=content,
-            agent_id=agent_id,
-            session_id=session_id,
-            origin=origin.value if isinstance(origin, MemoryOrigin) else str(origin),
-        )
-        _fire_write(agent_id, lambda: _state.memory_event_bus.emit(EventType.INGEST, ctx))
-    except Exception:
-        logger.warning("INGEST trigger failed", exc_info=True)
-
-
-# ── Graph node handlers ───────────────────────────────────────────
-
-
-async def _node_start(state: GraphState) -> GraphState:
-    """Initialize the execution pipeline."""
-    # 不向 state.messages 注入 "Processing started" system message:它是状态
-    # 标记,不是对话内容。注入后会污染 _node_llm 的 conversation history,被
-    # ContextCompiler 放在 static_count 之外 → _to_anthropic raise "system
-    # message beyond static prefix"(R2 contract 违反,阻断 /execute 主路径)。
-    # start 状态已由 state.current_node / state.output / log_execution_step 标记。
-    state.context["original_input"] = state.input
-    state.current_node = "start"
-    state.output = "started"
-    _state.log_execution_step("start", state)
-    return state
-
-
-async def _node_llm(state: GraphState) -> GraphState:
-    """LLM processing with real API call and memory integration.
-
-    In the multi-turn tool_use loop this node is entered once after ``start``
-    (first round) and again after every ``tool`` round (``tool → llm``). Each
-    entry the model sees the *accumulated* tool history (anthropic
-    ``tool_use``/``tool_result`` content-block sequence) so it can decide
-    whether another tool call is needed or the request is answered.
-    """
-    agent_id = state.agent_id
-    session_id = state.session_id
-    user_input = state.input
-
-    agent = _state.agents.get(agent_id)
-    agent_model = agent.get("model") if agent else None
-
-    # First round only: append the user input to the persistent message
-    # history. On subsequent rounds the user turn is already there and the
-    # tool loop replays as assistant tool_use + user tool_result turns (see
-    # the history injection below). Without this guard the user input would
-    # be duplicated once per loop iteration.
-    first_round = state.tool_iteration == 0
-    conversation = list(state.messages)
-    if first_round:
-        conversation.append({"role": "user", "content": user_input})
-
-    # Multi-turn tool_result回注: replay the accumulated tool_use/tool_result
-    # history as an anthropic content-block sequence so the model observes
-    # prior tool calls and their results before deciding the next step. This
-    # mirrors the canonical anthropic tool-use turn structure:
-    #   assistant: [tool_use]
-    #   user:      [tool_result]
-    # Only injected when there is history (first round has none).
-    if state.tool_use_history:
-        conversation = _inject_tool_history(conversation, state.tool_use_history)
-
-    system_prompt = (agent.get("system_prompt") if agent else None) or "You are a helpful assistant."
-    compiled = await _state.context_compiler.compile(
-        system_prompt=system_prompt,
-        conversation=conversation,
-        agent_id=agent_id,
-        session_id=session_id,
-        cache_breakpoint=True,
-    )
-    llm_messages = compiled.messages
-
-    try:
-        # Native function-calling: build Anthropic-shaped tool schemas from
-        # the registry and pass them to the LLM. The model decides whether to
-        # call a tool; a tool_use block surfaces on ``last_tool_use`` when it
-        # does. ``_build_native_tools`` returns [] when no registry/tools.
-        native_tools = _build_native_tools()
-        response = await _state.llm_client.chat(
-            llm_messages,
-            model=agent_model,
-            static_count=compiled.static_count,
-            tools=native_tools or None,
-        )
-    except LLMError as exc:
-        state.errors.append(f"LLM error: {exc}")
-        state.output = f"[LLM unavailable] {exc}"
-        state.current_node = "llm"
-        _state.log_execution_step("llm", state, status="error")
-        return state
-
-    # Persist the user turn exactly once; persist the assistant reply every
-    # round (each loop iteration produces a fresh assistant message). This
-    # keeps state.messages a faithful transcript for synthesis + memory hooks.
-    if first_round:
-        state.messages.append({"role": "user", "content": user_input})
-    state.messages.append({"role": "assistant", "content": response})
-    state.output = response
-    state.current_node = "llm"
-
-    # Native tool_use is the primary path (model emitted a tool_use block).
-    # IMPORTANT: clear any stale tool_call from a previous round first, then
-    # set it only when the model actually emitted a new tool_use this round.
-    # Without the clear, a prior round's tool_call would linger and keep
-    # ``needs_tool`` True forever, looping the graph until MAX_TOOL_ITERATIONS.
-    tool_use = getattr(_state.llm_client, "last_tool_use", None)
-    state.context.pop("tool_call", None)
-    state.context.pop("tool_args", None)
-    if tool_use and tool_use.get("name"):
-        state.context["tool_call"] = tool_use["name"]
-        state.context["tool_args"] = tool_use.get("input", {}) or {}
-
-    # Memory hooks run only on the first round to avoid re-sedimenting the
-    # same user turn / re-firing KG extraction / re-compressing on every loop
-    # iteration. Subsequent rounds are tool-driven continuations; their tool
-    # results are sedimented by ``_node_tool``.
-    if first_round:
-        working_item = MemoryItem(
-            content=f"User: {user_input}\nAssistant: {response}",
-            agent_id=agent_id,
-            session_id=session_id,
-            memory_type=MemoryType.WORKING,
-            scope=MemoryScope.AGENT,
-        )
-        # migrate working→session via the event bus (was: memory_migrator call)
-        await _state.memory_event_bus.emit(
-            EventType.TURN_END,
-            TurnContext(agent_id=agent_id, session_id=session_id, working_item=working_item),
-        )
-        state.memory_refs.append(working_item.id)
-
-        # Fire-and-forget LLM semantic ingestion (IngestorAgent): after the
-        # core store (TURN_END above) completes, hand the stored memory to the
-        # ① side agent for KG entity/relation extraction + importance scoring +
-        # identity_category tagging. The hook is a no-op when the
-        # MEMORY_INGESTOR_ENABLED feature gate is off (no INGEST hook registered).
-        # P0 red-line is enforced inside the agent (origin=FOREGROUND → early
-        # return); working_item here is agent-self-sedimented.
-        _trigger_ingest(
-            memory_id=working_item.id,
-            content=working_item.content,
-            agent_id=agent_id,
-            session_id=session_id,
-            origin=MemoryOrigin.AGENT,
-        )
-
-        _trigger_kg_extraction(
-            user_message=user_input,
-            assistant_response=response,
-            session_id=working_item.id,
-        )
-
-        # Context compression via the event bus (was: inline recall/compress/
-        # store/update + emit_memory_event). The hook returns any SYNC summary
-        # ids so memory_refs stays in sync; ASYNC fires in the background.
-        compress_result = await _state.memory_event_bus.emit(
-            EventType.PRE_COMPRESS,
-            CompressContext(
-                agent_id=agent_id,
-                session_id=session_id,
-                accessor_id=agent_id,
-                messages=list(state.messages),
-            ),
-        )
-        if compress_result is not None and compress_result.summary_ids:
-            state.memory_refs.extend(compress_result.summary_ids)
-
-    if state.context.get("tool_call") or _has_tool_invocation(response):
-        state.context["needs_tool"] = True
-    else:
-        state.context["needs_tool"] = False
-
-    _state.log_execution_step("llm", state)
-    return state
-
-
-def _classify_tool_error(error_msg: str) -> str:
-    """粗粒度工具错误分类(供 PitFail error_type 维度)。
-
-    从 error_msg 关键词推断 timeout / file_not_found / permission_denied,否则
-    归为通用 tool_error。match(tool_name, error_type) 依赖稳定 error_type,故分
-    类规则保持简单确定性(无模糊启发式)。
-    """
-    _msg = (error_msg or "").lower()
-    if "timeout" in _msg or "timed out" in _msg:
-        return "timeout"
-    if "not found" in _msg or "no such file" in _msg or "filenotfound" in _msg:
-        return "file_not_found"
-    if "permission" in _msg or "denied" in _msg:
-        return "permission_denied"
-    return "tool_error"
-
-
-async def _node_tool(state: GraphState) -> GraphState:
-    """Execute a tool call via ToolExecutor."""
-    # Default to a *registered* tool whose signature matches the args. The old
-    # defaults (``web_search`` + ``{"query": ...}``) were doubly broken:
-    # ``web_search`` is not in the registry so the executor always returned
-    # "not found", and ``{"query": ...}`` did not match any handler signature
-    # (http_get(url,...) / file_read(path,...)). ``file_read`` is registered by
-    # engine.py and degrades gracefully (File not found) for arbitrary input,
-    # so a mis-routed tool call no longer forces the error branch.
-    tool_name = state.context.get("tool_call", "file_read")
-    tool_args = state.context.get("tool_args", {"path": state.input})
-    _canvas_tick_id = state.metadata.get("canvas_tick_id", "")
-    _canvas_call_id = f"toolu_iter{state.tool_iteration}"
-    # observe:工具调用开始(泛化 schema 推 observe-service)。
-    if _state.observe_client is not None:
-        try:
-            await _state.observe_client.on_tool_call(
-                session_id=state.session_id,
-                tick_id=_canvas_tick_id,
-                tool_name=tool_name,
-                arguments=dict(tool_args),
-                call_id=_canvas_call_id,
-            )
-        except Exception:
-            logger.warning("observe on_tool_call failed", exc_info=True)
-    # canvas:工具调用开始(实时画布回放,保留兼容)。
-    await _canvas_emit(
-        _state.canvas_emitter,
-        ToolCallEvent.create(
-            state.session_id, "main", _canvas_tick_id, tool_name, dict(tool_args),
-            call_id=_canvas_call_id,
-        ),
-    )
-
-    result = await _state.tool_executor.execute(tool_name, tool_args)
-
-    if result["status"] != "success":
-        error_msg = result.get("error", "Unknown error")
-        state.context["tool_result"] = f"[Tool error] {tool_name}: {error_msg}"
-        # PitFail 通电:工具失败 → 复发计数(match 命中)或新记录(record)。
-        # 全程 try/except 包裹 —— pitfail 任何异常都不影响主工具流程(零回归)。
-        if _state.pitfail_registry is not None:
-            try:
-                _pf_err_type = _classify_tool_error(error_msg)
-                _existing = _state.pitfail_registry.match(tool_name, _pf_err_type)
-                if _existing:
-                    _state.pitfail_registry.increment_recurrence(_existing[0].id)
-                else:
-                    from src.pitfail import PitfallRecord
-                    _state.pitfail_registry.record(PitfallRecord(
-                        id="", file_path=tool_name, error_type=_pf_err_type,
-                        symptom=error_msg, root_cause=error_msg, fix="",
-                        tags=[tool_name],
-                    ))
-            except Exception:
-                # pitfail 记录失败绝不能阻断主工具执行 —— 静默降级。
-                pass
-    else:
-        state.context["tool_result"] = str(result["output"])
-
-    # observe:工具结果(泛化 schema 推 observe-service)。
-    if _state.observe_client is not None:
-        try:
-            await _state.observe_client.on_tool_result(
-                session_id=state.session_id,
-                tick_id=_canvas_tick_id,
-                call_id=_canvas_call_id,
-                result=result.get("output", "") if result["status"] == "success" else None,
-                error="" if result["status"] == "success" else state.context.get("tool_result", ""),
-            )
-        except Exception:
-            logger.warning("observe on_tool_result failed", exc_info=True)
-    # canvas:工具结果(实时画布回放,保留兼容)。失败时带 error 字段。
-    await _canvas_emit(
-        _state.canvas_emitter,
-        ToolResultEvent.create(
-            state.session_id, "main", _canvas_tick_id, _canvas_call_id,
-            result.get("output", "") if result["status"] == "success" else "",
-            error="" if result["status"] == "success" else state.context.get("tool_result", ""),
-        ),
-    )
-    state.tool_results.append({"tool": tool_name, "result": state.context["tool_result"]})
-
-    # Multi-turn loop: record the {tool_use, tool_result} pair so the next
-    # ``_node_llm`` round can replay the full anthropic tool_use/tool_result
-    # sequence into messages (model sees prior results before deciding).
-    tool_use_block = {
-        "type": "tool_use",
-        "id": f"toolu_iter{state.tool_iteration}",
-        "name": tool_name,
-        "input": dict(tool_args),
-    }
-    state.tool_use_history.append(
-        {"tool_use": tool_use_block, "tool_result": state.context["tool_result"]}
-    )
-
-    # Anti-infinite-loop: count this round. The ``llm`` conditional edge reads
-    # ``tool_iteration`` against MAX_TOOL_ITERATIONS to force synthesis.
-    state.tool_iteration += 1
-
-    result_preview = str(result["output"])[:200] if result["status"] == "success" else error_msg
-    tool_item = MemoryItem(
-        content=f"Tool {tool_name} result: {result_preview}",
-        agent_id=state.agent_id,
-        session_id=state.session_id,
-        memory_type=MemoryType.WORKING,
-        scope=MemoryScope.AGENT,
-        metadata={"safety_deadline": True, "tool_result": True},
-    )
-    # store tool-result working memory via the event bus
-    await _state.memory_event_bus.emit(
-        EventType.TURN_END,
-        TurnContext(agent_id=state.agent_id, session_id=state.session_id, tool_result_item=tool_item),
-    )
-
-    # Fire-and-forget LLM semantic ingestion for the tool-result memory.
-    _trigger_ingest(
-        memory_id=tool_item.id,
-        content=tool_item.content,
-        agent_id=state.agent_id,
-        session_id=state.session_id,
-        origin=MemoryOrigin.AGENT,
-    )
-
-    state.current_node = "tool"
-    _state.log_execution_step("tool", state)
-    return state
-
-
-async def _node_llm_synthesize(state: GraphState) -> GraphState:
-    """LLM synthesizes the *full* tool history into a final answer.
-
-    Reached either after a single tool round (no further tool requested) or
-    when the multi-turn loop exhausts ``MAX_TOOL_ITERATIONS``. Reads every
-    recorded ``tool_use_history`` entry so the synthesized answer can draw on
-    all prior tool calls (not just the most recent result).
-    """
-    # Build a readable transcript of every tool round for the synthesis prompt.
-    if state.tool_use_history:
-        tool_lines = []
-        for i, entry in enumerate(state.tool_use_history, start=1):
-            tu = entry.get("tool_use") or {}
-            name = tu.get("name", "?")
-            args = tu.get("input", {}) or {}
-            res = entry.get("tool_result", "")
-            tool_lines.append(f"[{i}] {name}({args}) → {res}")
-        tool_result_block = "\n".join(tool_lines)
-    else:
-        # Fallback to the legacy single-result context field (covers any path
-        # that set tool_result without going through the loop history).
-        tool_result_block = state.context.get("tool_result", "")
-
-    agent = _state.agents.get(state.agent_id)
-    agent_model = agent.get("model") if agent else None
-    system_prompt = (agent.get("system_prompt") if agent else None) or "You are a helpful assistant."
-
-    if _state.context_compiler is not None:
-        # R2 contract:Tool results 是 dynamic content,注入 user message tail,
-        # 不作独立 role=system 消息(否则 compiler 把它放在 static_count 之外
-        # → _to_anthropic raise "system message beyond static prefix",阻断
-        # /execute 末尾综合)。system_prompt 已含 "Synthesize..." 指令(layer 1)。
-        synth_user = (
-            f"{state.input}\n\nTool results:\n{tool_result_block}"
-            if tool_result_block else state.input
-        )
-        conversation = list(state.messages) + [
-            {"role": "user", "content": synth_user},
-        ]
-        compiled = await _state.context_compiler.compile(
-            system_prompt=f"{system_prompt}\n\nSynthesize the tool results into a final answer for the user.",
-            conversation=conversation,
-            agent_id=state.agent_id,
-            session_id=state.session_id,
-            cache_breakpoint=True,
-        )
-        messages = compiled.messages
-        static_count: int | None = compiled.static_count
-    else:
-        messages = [
-            {"role": "system", "content": "Synthesize the tool results into a final answer for the user."},
-            {"role": "user", "content": f"Original question: {state.input}\n\nTool results:\n{tool_result_block}"},
-        ]
-        static_count = None
-
-    try:
-        response = await _state.llm_client.chat(
-            messages, model=agent_model, static_count=static_count,
-        )
-    except LLMError as exc:
-        state.errors.append(f"LLM synthesize error: {exc}")
-        state.output = state.context.get("tool_result", "[no result]")
-        state.current_node = "llm_synthesize"
-        _state.log_execution_step("llm_synthesize", state, status="error")
-        return state
-
-    state.messages.append({"role": "assistant", "content": response})
-    state.output = response
-    state.current_node = "llm_synthesize"
-
-    _trigger_kg_extraction(
-        user_message=state.input,
-        assistant_response=response,
-        session_id=state.session_id,
-    )
-
-    _state.log_execution_step("llm_synthesize", state)
-    return state
-
-
-# ── Graph builder ─────────────────────────────────────────────────
-
-
-def _build_execution_graph() -> StateGraph:
-    """Build the orchestration graph with nodes and edges.
-
-    Multi-turn tool_use loop (P1)::
-
-        start ──▶ llm ──(needs_tool AND tool_iteration < MAX?)──▶ tool ──▶ llm ──▶ …
-                    │                                              (loop back)
-                    └──(else)──▶ llm_synthesize ──▶ (end)
-
-    The ``tool`` node loops back to ``llm`` (not ``llm_synthesize``) so the
-    model reads the tool_result and decides whether another tool call is
-    needed. The ``llm`` conditional edge routes to ``tool`` only while the
-    model still wants a tool AND the iteration budget remains; otherwise it
-    routes to ``llm_synthesize`` for a final answer. ``llm_synthesize`` is a
-    terminal node (no outgoing edge) so the graph ends there.
-    """
-    graph = StateGraph("exec-graph")
-    graph.set_checkpoint_store(InMemoryCheckpointStore())
-
-    graph.add_node("start", FunctionNode("start", _node_start))
-    graph.add_node("llm", FunctionNode("llm", _node_llm))
-    graph.add_node("tool", FunctionNode("tool", _node_tool))
-    graph.add_node("llm_synthesize", FunctionNode("llm_synthesize", _node_llm_synthesize))
-
-    graph.add_edge("start", "llm")
-    # Loop back: tool → llm so the model reads tool_result and decides next.
-    # (Was: tool → llm_synthesize, which only ever allowed a single round.)
-    graph.add_edge("tool", "llm")
-
-    def _llm_route(state: GraphState) -> str:
-        # Stop chaining when the model no longer requests a tool, OR when the
-        # iteration budget is exhausted (force a synthesized answer rather
-        # than loop forever).
-        if state.context.get("needs_tool") and state.tool_iteration < MAX_TOOL_ITERATIONS:
-            return "tool"
-        return "llm_synthesize"
-
-    graph.add_conditional_edge(
-        source="llm",
-        targets={
-            "tool": "tool",
-            "llm_synthesize": "llm_synthesize",
-        },
-        condition=_llm_route,
-    )
-
-    graph.set_entry_point("start")
-    return graph
 
 
 # ── Parallel graph builder (P2) ────────────────────────────────────
@@ -862,193 +268,105 @@ async def chat(req: ChatRequest) -> dict:
 
 @router.post("/execute")
 async def execute(req: ExecuteRequest) -> StreamingResponse:
-    """Execute an agent graph and stream node status via SSE."""
+    """Execute a native pydantic-ai Agent (P8: 自研 graph tool 循环 → Agent.run)。
+
+    ObserveCapability/MemoryWriterCapability/ToolBridgeCapability 在 Agent.run 内横切
+    (tick 闭环 + 记忆沉淀 + tool dispatch)。SSE 简化为 agent_status/execution_complete/
+    error(web 弃用后 node SSE 无消费者)。canvas 随 web 弃用退役。
+    """
     agent = _state.agents.get(req.agent_id)
     if not agent:
         return JSONResponse({"error": "Agent not found"}, status_code=404)
 
     session_id = req.session_id or str(uuid.uuid4())
-    # 通信桥:把执行 agent 注册进 session,使 broadcast 收件人非空。否则
-    # on_node_complete 的 communication_bus.broadcast 在空 session 下投递数为 0
-    # (broadcast 跳过 sender,且 _session_members 里没有该 session 的成员)。
+    # 通信桥:把执行 agent 注册进 session,使 broadcast 收件人非空。
     _state.communication_bus.register_agent(req.agent_id, session_id)
     await _state.memory_event_bus.emit(
         EventType.SESSION_START,
         SessionContext(agent_id=req.agent_id, session_id=session_id),
     )
 
-    graph = _build_execution_graph()
-    initial_state = GraphState(
-        input=req.input,
-        agent_id=req.agent_id,
-        session_id=session_id,
-        metadata={"canvas_tick_id": str(uuid.uuid4())},
+    # native Agent:全 capability 横切 + AnthropicModel cache(R2 替代 ContextCompiler/static_count)
+    from src.harness.native_agent import build_native_agent
+    from src.harness.capabilities import (
+        GuardrailCapability, MemoryWriterCapability, ObserveCapability, ToolBridgeCapability,
     )
+    from src.harness.emit import ObserveEmitter
+    from src.tools.guardrail import Guardrail
 
-    event_queue: asyncio.Queue[str | None] = asyncio.Queue()
-
-    async def on_node_complete(node_name: str, state: GraphState) -> None:
-        try:
-            msg = AgentMessage(
-                sender_id=req.agent_id,
-                recipient_id=None,
-                session_id=session_id,
-                content=f"Node {node_name} completed: {state.output[:100] if state.output else ''}",
-                message_type=MessageType.NOTIFICATION,
-            )
-            await _state.communication_bus.broadcast(msg, session_id=session_id)
-        except Exception:
-            pass
-
-        if node_name == "start":
-            await event_queue.put(_sse("node_start", {"node": "start", "status": "running"}))
-            await event_queue.put(_sse("node_complete", {
-                "node": "start", "status": "done", "output": state.output or "started",
-            }))
-        elif node_name == "llm":
-            await event_queue.put(_sse("node_start", {"node": "llm", "status": "running"}))
-            await event_queue.put(_sse("node_complete", {
-                "node": "llm", "status": "done", "output": state.output,
-            }))
-        elif node_name == "tool":
-            await event_queue.put(_sse("node_start", {"node": "tool", "status": "running"}))
-            await event_queue.put(_sse("node_complete", {
-                "node": "tool", "status": "done",
-                "output": state.context.get("tool_result", ""),
-            }))
-        elif node_name == "llm_synthesize":
-            await event_queue.put(_sse("node_start", {"node": "llm_synthesize", "status": "running"}))
-            await event_queue.put(_sse("node_complete", {
-                "node": "llm_synthesize", "status": "done", "output": state.output,
-            }))
+    harness_id = f"exec_{session_id[:8]}"
+    emitter = ObserveEmitter("agent-os-v2", harness_id=harness_id, session_id=session_id)
+    native_agent = build_native_agent(
+        instructions=agent.get("system_prompt") or "You are a helpful assistant.",
+        capabilities=[
+            ObserveCapability(emitter=emitter, harness_id=harness_id, session_id=session_id),
+            MemoryWriterCapability(
+                memory_event_bus=_state.memory_event_bus,
+                knowledge_graph=_state.knowledge_graph,
+                agent_id=req.agent_id, session_id=session_id,
+            ),
+            ToolBridgeCapability(
+                tool_executor=_state.tool_executor, pitfail_registry=_state.pitfail_registry,
+            ),
+            GuardrailCapability(guardrail=Guardrail()),
+        ],
+        model_settings={
+            "anthropic_cache_instructions": "5m",      # R2: system prompt cache
+            "anthropic_cache_tool_definitions": "5m",  # R2: tool schema cache
+        },
+    )
 
     async def event_stream() -> AsyncGenerator[str, None]:
         await _state.concurrency_controller.acquire_agent_slot(req.agent_id)
         agent["status"] = "running"
         yield _sse("agent_status", {"agent_id": req.agent_id, "status": "running"})
-        _tick_id = initial_state.metadata.get("canvas_tick_id", "")
-        # observe:tick 开始(泛化 schema 推 observe-service)。
-        if _state.observe_client is not None:
+        try:
             try:
-                await _state.observe_client.on_tick_started(
-                    session_id=session_id,
-                    tick_id=_tick_id,
-                    request=req.input,
-                )
+                await emitter.connect()  # best-effort(observe 断不影响 run,ADR-7)
             except Exception:
-                logger.warning("observe on_tick_started failed", exc_info=True)
-        # canvas:tick 开始(实时画布回放,保留兼容)。tick_id 贯穿 graph → _node_tool 用同一 id 关联 tool 事件。
-        await _canvas_emit(
-            _state.canvas_emitter,
-            TickStartedEvent.create(
-                session_id, "main", _tick_id, req.input
-            ),
-        )
-
-        mem_event_q = _state.subscribe_memory_events()
-
-        async def run_graph():
-            try:
-                final_state = await graph.run(initial_state, on_node_complete=on_node_complete)
-                agent["status"] = "idle"
-                await event_queue.put(_sse("agent_status", {"agent_id": req.agent_id, "status": "idle"}))
-                await event_queue.put(_sse("execution_complete", {
-                    "output": final_state.output,
-                    "session_id": final_state.session_id,
-                    "memory_count": len(final_state.memory_refs),
-                }))
-                # 对话历史持久化:把这一轮 (user_input, assistant_response) 落库,
-                # 供 /v1/conversations 列表 + 历史回看。None-guard + try/except 不阻塞主路径。
-                if _state.conversation_registry is not None:
-                    try:
-                        _state.conversation_registry.record_turn(
-                            session_id=final_state.session_id,
-                            agent_id=req.agent_id,
-                            user_input=req.input,
-                            assistant_response=final_state.output or "",
-                        )
-                    except Exception:
-                        logger.warning("conversation record_turn failed", exc_info=True)
-                _tick_id = final_state.metadata.get("canvas_tick_id", "")
-                # observe:tick 完成(泛化 schema 推 observe-service)。
-                if _state.observe_client is not None:
-                    try:
-                        await _state.observe_client.on_tick_completed(
-                            session_id=session_id,
-                            tick_id=_tick_id,
-                            status="success",
-                            response=final_state.output or "",
-                            tool_count=len(final_state.tool_results),
-                        )
-                    except Exception:
-                        logger.warning("observe on_tick_completed failed", exc_info=True)
-                # canvas:tick 完成(实时画布回放,保留兼容)。tool_count = 该 tick 内工具调用数。
-                await _canvas_emit(
-                    _state.canvas_emitter,
-                    TickCompletedEvent.create(
-                        session_id, "main",
-                        _tick_id,
-                        "completed",
-                        final_state.output or "",
-                        tool_count=len(final_state.tool_results),
-                    ),
-                )
-                # P3: task-post online consolidation (fire-and-forget, non-blocking).
-                # Extracts key decisions/pitfalls and writes back via BackwardWriter.
-                if _state.task_consolidator is not None and final_state.messages:
+                logger.warning("execute emitter connect failed (%s)", harness_id)
+            result = await native_agent.run(req.input)
+            agent["status"] = "idle"
+            yield _sse("agent_status", {"agent_id": req.agent_id, "status": "idle"})
+            yield _sse("execution_complete", {
+                "output": result.output,
+                "session_id": session_id,
+                "memory_count": 0,  # MemoryWriter 内部沉淀,无 memory_refs 计数
+            })
+            # 对话历史持久化(供 /v1/conversations 列表 + 回看)。
+            if _state.conversation_registry is not None:
+                try:
+                    _state.conversation_registry.record_turn(
+                        session_id=session_id, agent_id=req.agent_id,
+                        user_input=req.input, assistant_response=result.output or "",
+                    )
+                except Exception:
+                    logger.warning("conversation record_turn failed", exc_info=True)
+            # task_consolidator: ModelMessage → list[dict] adapter(consolidate_task 签名要 list[dict])。
+            if _state.task_consolidator is not None:
+                try:
+                    msgs = [
+                        {"role": getattr(m, "role", ""), "content": getattr(m, "content", "")}
+                        for m in result.all_messages()
+                    ]
                     _fire_write(
-                        final_state.agent_id,
+                        req.agent_id,
                         lambda: _state.task_consolidator.consolidate_task(
-                            agent_id=final_state.agent_id,
-                            session_id=final_state.session_id,
-                            messages=list(final_state.messages),
+                            agent_id=req.agent_id, session_id=session_id, messages=msgs,
                         ),
                     )
-            except Exception as exc:
-                agent["status"] = "idle"
-                await event_queue.put(_sse("error", {"message": str(exc)}))
-                _tick_id = initial_state.metadata.get("canvas_tick_id", "")
-                # observe:tick 失败(泛化 schema 推 observe-service)。
-                if _state.observe_client is not None:
-                    try:
-                        await _state.observe_client.on_tick_completed(
-                            session_id=session_id,
-                            tick_id=_tick_id,
-                            status="error",
-                            response=str(exc),
-                        )
-                    except Exception:
-                        logger.warning("observe on_tick_completed (error) failed", exc_info=True)
-                # canvas:tick 失败(实时画布回放,保留兼容)。
-                await _canvas_emit(
-                    _state.canvas_emitter,
-                    TickCompletedEvent.create(
-                        session_id, "main",
-                        _tick_id,
-                        "failed",
-                        str(exc),
-                    ),
-                )
-            finally:
-                await _state.concurrency_controller.release_agent_slot(req.agent_id)
-                _state.unsubscribe_memory_events(mem_event_q)
-                await event_queue.put(None)
-
-        task = asyncio.create_task(run_graph())
-
-        while True:
-            while not mem_event_q.empty():
-                try:
-                    await event_queue.put(mem_event_q.get_nowait())
-                except asyncio.QueueEmpty:
-                    break
-            item = await event_queue.get()
-            if item is None:
-                break
-            yield item
-
+                except Exception:
+                    logger.warning("task_consolidator failed", exc_info=True)
+        except Exception as exc:
+            agent["status"] = "idle"
+            yield _sse("error", {"message": str(exc)})
+        finally:
+            try:
+                await emitter.close()
+            except Exception:
+                pass
+            await _state.concurrency_controller.release_agent_slot(req.agent_id)
         yield "data: [DONE]\n\n"
-        await task
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 

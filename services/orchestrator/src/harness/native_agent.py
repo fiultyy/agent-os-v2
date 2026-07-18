@@ -52,16 +52,20 @@ def build_native_agent(
     instructions: str = "",
     capabilities: Sequence[Any] | None = None,
     toolsets: Sequence[Any] | None = None,
+    model_settings: Any = None,
 ) -> Agent:
     """组装 native in-process Agent。
 
     capabilities / toolsets 在 P2-P6 注入;P1 骨架空跑,先验证 Agent + glm 连通。
+    model_settings:P8 R2 cache_control(AnthropicModelSettings,如
+    anthropic_cache_instructions/tool_definitions="5m"),替代老 ContextCompiler/static_count。
     """
     return Agent(
         build_model(),
         instructions=instructions,
         capabilities=list(capabilities) if capabilities else [],
         toolsets=list(toolsets) if toolsets else [],
+        model_settings=model_settings or {},
     )
 
 
