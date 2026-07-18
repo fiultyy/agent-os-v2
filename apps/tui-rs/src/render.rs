@@ -109,8 +109,33 @@ fn event_glyph(e: &ObserveEvent) -> (String, Color, bool, String) {
         "tool_call" => ("⚒".to_string(), Color::Blue, false, fmt_val(&e.data, "tool_name")),
         "tool_result" => ("◷".to_string(), Color::Cyan, false, fmt_val(&e.data, "result")),
         "token_delta" => ("δ".to_string(), Color::DarkGray, false, fmt_val(&e.data, "delta_text")),
-        "tick_completed" => ("✓".to_string(), Color::Magenta, true, fmt_val(&e.data, "response")),
+        "tick_completed" => {
+            // flow_* 事件(flow.py wire 成 tick_completed,data.response 空在 flow_event/flow_payload)。
+            let flow_ev = fmt_val(&e.data, "flow_event");
+            if !flow_ev.is_empty() {
+                ("✓".to_string(), Color::Magenta, true, flow_event_body(&flow_ev, &e.data))
+            } else {
+                ("✓".to_string(), Color::Magenta, true, fmt_val(&e.data, "response"))
+            }
+        }
         other => (other.to_string(), Color::DarkGray, false, String::new()),
+    }
+}
+
+/// flow_* 事件 body:从 data.flow_payload 取 node_id/response/状态(节点输出等内容)。
+fn flow_event_body(flow_ev: &str, data: &std::collections::HashMap<String, serde_json::Value>) -> String {
+    let p = data.get("flow_payload");
+    let ps = |k: &str| p.and_then(|v| v.get(k)).and_then(|v| v.as_str()).unwrap_or("");
+    match flow_ev {
+        "node_completed" => {
+            let nid = ps("node_id");
+            let resp = ps("response");
+            if resp.is_empty() { format!("{} ✓", nid) } else { format!("{}: {}", nid, resp) }
+        }
+        "node_started" => format!("→ {}", ps("node_id")),
+        "flow_started" => "flow ▶".to_string(),
+        "flow_completed" => format!("flow {}", ps("status")),
+        _ => flow_ev.to_string(),
     }
 }
 
@@ -226,16 +251,9 @@ pub fn draw_flow(f: &mut Frame, area: Rect, app: &App) {
         )));
         lines.push(Line::raw(""));
         lines.push(Line::from(Span::styled(
-            " ── fallback:observe 真实 turn lane(openclaw 单 session)──".to_string(),
+            " flow tab 显节点 DAG:创建 flow 后显示节点 box + 运行状态/输出明细".to_string(),
             Style::default().fg(Color::DarkGray),
         )));
-        match app.events.get("openclaw/agent:main:main") {
-            Some(evs) => lines.extend(observe_lanes(evs)),
-            None => {
-                let t = demo();
-                lines.extend(flow_lines(&t, 0));
-            }
-        }
         f.render_widget(Paragraph::new(lines), area);
         return;
     }
@@ -613,6 +631,8 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
         let hovered = app.mouse.in_rect(new_rect);
         let style = if hovered {
             Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)
+        } else if app.action_loading("new_btn") {
+            Style::default().fg(Color::Black).bg(Color::Magenta).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
         };
@@ -678,7 +698,9 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
                     let row_rect = Rect::new(list_area.x, list_area.y + row_idx, list_area.width, 1);
                     let hovered = app.mouse.in_rect(row_rect);
                     let is_cursor = ci == app.cursor;
-                    let (prefix, st) = if is_cursor {
+                    let (prefix, st) = if is_cursor && app.action_loading("session") {
+                        ("  ▸", Style::default().fg(Color::White).bg(Color::Magenta).add_modifier(Modifier::BOLD))
+                    } else if is_cursor {
                         ("  ▸", Style::default().fg(Color::White).bg(Color::Blue).add_modifier(Modifier::BOLD))
                     } else if hovered {
                         ("   ", Style::default().fg(Color::Black).bg(Color::Yellow))
@@ -763,38 +785,34 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
     // body:对话=chat 卷轴(主)、flow=lane+DAG、属性=props。
     match app.control_right_tabs.active {
         0 => {
-            let ev_lines = if let Some(evs) = app.events.get(&key) {
+            let (ev_lines, n_turns) = if let Some(evs) = app.events.get(&key) {
                 control::render_turn_stream(evs)
             } else if key.is_empty() {
-                vec![Line::from(Span::styled(
+                (vec![Line::from(Span::styled(
                     " (无 cursor session · 左大纲点选 session 或色块)", Style::default().fg(Color::DarkGray),
-                ))]
+                ))], 0)
             } else {
-                vec![Line::from(Span::styled(
+                (vec![Line::from(Span::styled(
                     " (observe 不可达 · r 刷新)", Style::default().fg(Color::DarkGray),
-                ))]
+                ))], 0)
             };
+            app.control_turn_count = n_turns;
             app.control_chat_scroll.set_content(ev_lines);
             // ScrollView.render 内部按 follow_tail_flag 自动追底(内容超视口→最后一页,不超→从顶)。
             app.control_chat_scroll.follow_tail_flag = app.chat_follow_tail;
             app.control_chat_scroll.render(f, body_area);
         }
         1 => {
+            // flow tab 纯节点 DAG(不混 cursor session 对话 lanes);选 flow 显示节点内容。
             let mut flow_lines_v: Vec<Line> = vec![];
-            if let Some(evs) = app.events.get(&key) {
-                if !evs.is_empty() {
-                    flow_lines_v.extend(observe_lanes(evs));
-                }
-            }
             if let Some(tf) = app.current_flow() {
-                flow_lines_v.push(Line::raw(""));
                 flow_lines_v.extend(flow_dag_lines(tf, app.flow_cursor));
-            } else if flow_lines_v.is_empty() {
+            } else {
                 flow_lines_v.push(Line::from(Span::styled(
-                    " (无 flow · f/G/D 创建预设)", Style::default().fg(Color::DarkGray),
+                    " (无 flow · 右键 Create Chain/Branch/DAG 或 f/G/D)", Style::default().fg(Color::DarkGray),
                 )));
             }
-            f.render_widget(Paragraph::new(flow_lines_v).block(region_block(" flow · lane+DAG ")), body_area);
+            f.render_widget(Paragraph::new(flow_lines_v).block(region_block(" flow · 节点 DAG ")), body_area);
         }
         _ => {
             let prop_lines = render_props_lines(app);
@@ -1071,11 +1089,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // z-order layer 2:modal popup 栈(栈顶最上)。每个弹窗 Clear 遮罩 + Block + 正文。
     // IT2 节点 C:new/delete 弹窗 body 按 state 实时刷新(picker 选中行/自由输入)。
     update_action_popup_bodies(app);
+    update_context_menu_body(app);
     for p in app.popups.iter_mut() {
         components::render_popup(f, area, p);
     }
     // IT7 ②:new 弹窗渲染后 area 已回填 → 注册可点击区到 popup_clickmap。
     register_new_popup_clickmap(app);
+    register_context_menu_clickmap(app);
+    register_delete_popup_clickmap(app);
 
     // 帧末:鼠标光标(ADR-2:最后渲染,黑底黄字高亮)。
     app.mouse.render(f);
@@ -1086,37 +1107,52 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 /// IT7 ②:统一布局——行 0 = [claw]/[cc] harness 按钮,行末 = [Create]/[Cancel] 按钮,
 /// 中间为 picker 候选行。clickmap id 见 register_new_popup_clickmap。
 fn update_action_popup_bodies(app: &mut App) {
+    use ratatui::style::{Color, Style};
+    use ratatui::text::{Line, Span};
     let is_new_top = app.popups.last().map(|p| p.id == "new").unwrap_or(false);
-    if is_new_top {
-        // 行 0:harness 选择按钮(可点击 700/701)。已选高亮 [x],未选 [ ]。
-        let claw_mark = if matches!(app.new_popup, Some(NewKind::Claw)) { "[x]claw" } else { "[ ]claw" };
-        let cc_mark = if matches!(app.new_popup, Some(NewKind::Cc)) { "[x]cc" } else { "[ ]cc" };
-        let mut lines: Vec<String> = vec![format!(" {}  {}   (或键 c/d)", claw_mark, cc_mark)];
-        match app.new_popup {
-            None => {
-                lines.push("(选类型后显候选)".to_string());
-            }
-            Some(NewKind::Claw) => {
-                lines.push("claw agents:".to_string());
-                for (i, a) in app.new_candidates.iter().enumerate() {
-                    let mark = if i == app.new_idx { "▸" } else { " " };
-                    lines.push(format!("{} {}", mark, a));
-                }
-            }
-            Some(NewKind::Cc) => {
-                lines.push(format!("cc cwd: [{}]", app.new_cc_input));
-                for (i, c) in app.new_candidates.iter().enumerate() {
-                    let mark = if i == app.new_idx { "▸" } else { " " };
-                    lines.push(format!("{} {}", mark, c));
-                }
+    if !is_new_top {
+        return;
+    }
+    let cyan_btn = |s: String| Span::styled(s, Style::default().fg(Color::Black).bg(Color::Cyan));
+    let sep = || Span::styled("│", Style::default().fg(Color::Cyan));
+    let mut lines: Vec<Line<'static>> = vec![];
+    // 行 0:harness 按钮(700/701),色块 + 公用描边分隔。
+    let claw_mark = if matches!(app.new_popup, Some(NewKind::Claw)) { "[x]claw" } else { "[ ]claw" };
+    let cc_mark = if matches!(app.new_popup, Some(NewKind::Cc)) { "[x]cc" } else { "[ ]cc" };
+    lines.push(Line::from(vec![
+        cyan_btn(format!(" {} ", claw_mark)),
+        sep(),
+        cyan_btn(format!(" {} ", cc_mark)),
+        Span::raw("  (c/d)"),
+    ]));
+    match app.new_popup {
+        None => lines.push(Line::from("(选类型后显候选)")),
+        Some(NewKind::Claw) => {
+            lines.push(Line::from("claw agents:"));
+            for (i, a) in app.new_candidates.iter().enumerate() {
+                let mark = if i == app.new_idx { "▸" } else { " " };
+                lines.push(Line::from(format!("{} {}", mark, a)));
             }
         }
-        // 行末:Create / Cancel 按钮(可点击 790/791)。
-        lines.push(" [Create]  [Cancel]".to_string());
-        if let Some(p) = app.popups.last_mut() {
-            p.height = (lines.len() as u16 + 4).clamp(8, 22);
-            p.body = std::mem::take(&mut lines);
+        Some(NewKind::Cc) => {
+            lines.push(Line::from(format!("cc cwd: [{}]", app.new_cc_input)));
+            for (i, c) in app.new_candidates.iter().enumerate() {
+                let mark = if i == app.new_idx { "▸" } else { " " };
+                lines.push(Line::from(format!("{} {}", mark, c)));
+            }
         }
+    }
+    // 末行:Create/Cancel(790/791),色块 + 公用描边。
+    lines.push(Line::from(vec![
+        Span::raw(" "),
+        cyan_btn(" Create ".into()),
+        sep(),
+        cyan_btn(" Cancel ".into()),
+    ]));
+    if let Some(p) = app.popups.last_mut() {
+        p.height = (lines.len() as u16 + 4).clamp(8, 22);
+        p.body_lines = lines;
+        p.body = vec![];
     }
 }
 
@@ -1135,8 +1171,8 @@ fn register_new_popup_clickmap(app: &mut App) {
     let inner_x = area.x + 1; // 跳左竖边框
     let inner_w = area.width.saturating_sub(2);
     // body 行索引(相对弹窗):row 0 = harness 按钮,1 = header,2.. = 候选,末行 = Create/Cancel。
-    let body = app.popups.last().map(|p| p.body.clone()).unwrap_or_default();
-    let body_len = body.len();
+    let body_lines = app.popups.last().map(|p| p.body_lines.clone()).unwrap_or_default();
+    let body_len = body_lines.len();
     let row_y = |i: usize| -> u16 { area.y + 1 + i as u16 }; // title 占顶边框,首行 = area.y+1
     // 行 0:[x]claw  [x]cc —— 按文本长度切两段(claw 段前半,cc 段后半)。
     if body_len >= 1 {
@@ -1146,7 +1182,7 @@ fn register_new_popup_clickmap(app: &mut App) {
     }
     // 候选行:header 在 row 1,候选从 row 2 起。claw→710+i,cc→720+i。
     let cand_start = 2usize;
-    for (i, _line) in body.iter().enumerate().skip(cand_start) {
+    for (i, _line) in body_lines.iter().enumerate().skip(cand_start) {
         if i + 1 >= body_len {
             break; // 末行是 Create/Cancel
         }
@@ -1162,6 +1198,57 @@ fn register_new_popup_clickmap(app: &mut App) {
     if body_len >= 1 {
         let last_y = row_y(body_len - 1);
         app.popup_clickmap.register(Rect::new(inner_x + 1, last_y, 8, 1), 790); // [Create]
-        app.popup_clickmap.register(Rect::new(inner_x + 11, last_y, 8, 1), 791); // [Cancel]
+        app.popup_clickmap.register(Rect::new(inner_x + 10, last_y, 8, 1), 791); // [Cancel]
     }
+}
+
+/// 栈顶 id="ctx" 时:菜单项 ▸ 标记 selected + 末行 [x] close。
+fn update_context_menu_body(app: &mut App) {
+    let is_ctx_top = app.popups.last().map(|p| p.id == "ctx").unwrap_or(false);
+    if !is_ctx_top {
+        return;
+    }
+    let Some(cm) = app.context_menu.as_ref() else { return; };
+    let mut lines: Vec<String> = cm.items.iter().enumerate().map(|(i, (label, _))| {
+        let mark = if i == cm.selected { "▸" } else { " " };
+        format!("{} {}", mark, label)
+    }).collect();
+    lines.push(" [x] close".into());
+    if let Some(p) = app.popups.last_mut() {
+        p.height = (lines.len() as u16 + 4).clamp(7, 22);
+        p.body = lines;
+    }
+}
+
+/// 栈顶 id="ctx" 时:注册菜单项(900+i)+ close(800)到 popup_clickmap。
+/// 不 clear:register_new_popup_clickmap 每帧已 clear;ctx 栈顶时 new 不注册,clean。
+fn register_context_menu_clickmap(app: &mut App) {
+    let is_ctx_top = app.popups.last().map(|p| p.id == "ctx").unwrap_or(false);
+    if !is_ctx_top {
+        return;
+    }
+    let Some(area) = app.popups.last().and_then(|p| p.state.area().as_ref().copied()) else { return; };
+    let Some(cm) = app.context_menu.as_ref() else { return; };
+    let inner_x = area.x + 1;
+    let inner_w = area.width.saturating_sub(2);
+    for i in 0..cm.items.len() {
+        let y = area.y + 1 + i as u16;
+        app.popup_clickmap.register(Rect::new(inner_x, y, inner_w, 1), 900 + i);
+    }
+    let close_y = area.y + 1 + cm.items.len() as u16;
+    app.popup_clickmap.register(Rect::new(inner_x, close_y, 10, 1), 800);
+}
+
+/// 栈顶 delete 弹窗:注册 [y]确认(600)/ [N]取消(601),对齐 delete_popup_body 行 1。
+fn register_delete_popup_clickmap(app: &mut App) {
+    let is_del_top = app.popups.last().map(|p| p.id == "delete").unwrap_or(false);
+    if !is_del_top {
+        return;
+    }
+    let Some(area) = app.popups.last().and_then(|p| p.state.area().as_ref().copied()) else { return; };
+    let inner_x = area.x + 1;
+    let btn_y = area.y + 2; // 跳 title 边框(行 0)+ "删除?"(行 1),按钮在行 2
+    // [y]确认 10 列(含中文宽)│ [N]取消 10 列,对齐 delete_popup_body Line 1 的 span 位置。
+    app.popup_clickmap.register(Rect::new(inner_x, btn_y, 10, 1), 600);
+    app.popup_clickmap.register(Rect::new(inner_x + 11, btn_y, 10, 1), 601);
 }

@@ -48,6 +48,12 @@ pub struct Session {
     pub session_id: String,
     #[allow(dead_code)]
     pub harness_id: String,
+    /// cwd(claude-code 才有,orche /h/{type}/sessions 合并)。None=未取到/cc 外类型。
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// claw 长连 running(orche 合并)。cc 无状态恒 false(按 turn spawn)。
+    #[serde(default)]
+    pub running: bool,
 }
 #[derive(Deserialize, Default, Clone)]
 pub struct SessionsGrouped {
@@ -72,11 +78,61 @@ struct EventsResp {
 }
 
 pub fn fetch_sessions() -> Option<SessionsGrouped> {
-    ureq::get(&format!("{}/sessions/grouped", OBSERVE))
+    let mut sg = ureq::get(&format!("{}/sessions/grouped", OBSERVE))
         .call()
         .ok()?
         .into_json::<SessionsGrouped>()
-        .ok()
+        .ok()?;
+    // 合并 orche cwd/running(orche type 用 norm_ht 后的 claw/claude-code;离线静默跳过)。
+    merge_orche_session_meta(&mut sg, "claw");
+    merge_orche_session_meta(&mut sg, "claude-code");
+    Some(sg)
+}
+
+/// 拉 orche GET /h/{type}/sessions,按 session_id 匹配,把 cwd/running 合并进 sg。
+/// observe harness_type 映射:openclaw↔claw(同一后端);claude-code 一致。
+/// 离线/失败静默跳过(保留默认 None/false),与现有 orche 离线容忍一致。
+fn merge_orche_session_meta(sg: &mut SessionsGrouped, orch_type: &str) {
+    #[derive(Deserialize)]
+    struct Item {
+        session_id: String,
+        #[serde(default)]
+        cwd: Option<String>,
+        #[serde(default)]
+        running: bool,
+    }
+    #[derive(Deserialize)]
+    struct Resp { sessions: Vec<Item> }
+    let resp = match ureq::get(&format!("{}/h/{}/sessions", ORCH, orch_type))
+        .call().ok()
+        .and_then(|r| r.into_json::<Resp>().ok())
+    {
+        Some(r) => r,
+        None => return, // orche 离线/解析失败:静默跳过
+    };
+    // orch_type → observe harness_type(claw 在 observe 叫 openclaw)。
+    let obs_ht = if orch_type == "claw" { "openclaw" } else { orch_type };
+    for it in &resp.sessions {
+        if let Some(list) = sg.sessions_by_harness.get_mut(obs_ht) {
+            for s in list.iter_mut() {
+                if s.session_id == it.session_id {
+                    s.cwd = it.cwd.clone();
+                    s.running = it.running;
+                }
+            }
+        }
+        // claw 对应项也可能以 "claw" 出现(norm_ht 归一前),一并匹配。
+        if orch_type == "claw" {
+            if let Some(list) = sg.sessions_by_harness.get_mut("claw") {
+                for s in list.iter_mut() {
+                    if s.session_id == it.session_id {
+                        s.cwd = it.cwd.clone();
+                        s.running = it.running;
+                    }
+                }
+            }
+        }
+    }
 }
 // ── IT2 节点 C session 管理辅助(接节点 B 后端端点)──────────────────
 // 不可达 graceful:返 None / 默认 / false,不 panic。
@@ -148,11 +204,17 @@ pub fn archive_session(ht: &str, sid: &str, prompt: Option<&str>) -> Option<Stri
 }
 /// DELETE /h/{type}/sessions/{id} → raw_deleted bool。失败 false。
 pub fn delete_session_raw(ht: &str, sid: &str) -> bool {
-    ureq::delete(&format!("{}/h/{}/sessions/{}", ORCH, ht, sid))
+    // 或che delete(flow type 无端点→400;observe-only session store 无→404)。observe 兜底清
+    // 镜像(TUI 不显)。observe ht 映射:claw→openclaw,其余原样(claude-code/flow)。
+    let orche_ok = ureq::delete(&format!("{}/h/{}/sessions/{}", ORCH, ht, sid))
         .call().ok()
         .and_then(|r| r.into_json::<serde_json::Value>().ok())
         .and_then(|v| v.get("raw_deleted").and_then(|x| x.as_bool()))
-        .unwrap_or(false)
+        .unwrap_or(false);
+    let ob_ht = match ht { "claw" => "openclaw", other => other };
+    let observe_ok = ureq::delete(&format!("{}/sessions/{}/{}", OBSERVE, ob_ht, sid))
+        .call().is_ok();
+    orche_ok || observe_ok
 }
 
 pub fn fetch_events(h: &str, sid: &str) -> Option<Vec<ObserveEvent>> {
@@ -253,6 +315,34 @@ pub fn fetch_flow(flow_id: &str) -> Option<FlowStatus> {
         .ok()?
         .into_json::<FlowStatus>()
         .ok()
+}
+
+/// claw 手动重连(POST /h/claw/sessions/{sid}/reconnect)。返回 connected。
+/// orche 不可达 / 4xx·5xx / 解析失败 → None(调用方已保证仅 claw 调本 fn)。
+pub fn reconnect_claw(sid: &str) -> Option<bool> {
+    let v: serde_json::Value = ureq::post(&format!("{}/h/claw/sessions/{}/reconnect", ORCH, sid))
+        .send_string("")
+        .ok()?
+        .into_json()
+        .ok()?;
+    v.get("connected").and_then(|x| x.as_bool())
+}
+
+/// 复制到系统剪贴板(xclip)。无 xclip/失败静默。
+fn copy_to_clipboard(s: &str) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = match Command::new("xclip")
+        .arg("-selection").arg("clipboard")
+        .stdin(Stdio::piped()).spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    if let Some(stdin) = child.stdin.as_mut() {
+        let _ = stdin.write_all(s.as_bytes());
+    }
+    let _ = child.wait();
 }
 
 /// 触发一个 turn(POST /h/{type}/sessions/{sid}/turn)。type∈{claw,claude-code}。
@@ -434,6 +524,8 @@ pub struct Popup {
     pub position: Option<(u16, u16)>,
     /// offset 是否已应用(避免每帧重复 move_to)。
     pub placed: bool,
+    /// styled 正文行(per-span style,按钮色块用)。非空时 render_popup 优先于 md_text/body。
+    pub body_lines: Vec<ratatui::text::Line<'static>>,
 }
 
 impl Popup {
@@ -449,6 +541,7 @@ impl Popup {
             height: h,
             position: None,
             placed: false,
+            body_lines: vec![],
         }
     }
     /// 带 markdown 渲染正文的弹窗(ADR-3)。md_text 优先于 body。
@@ -542,8 +635,12 @@ pub struct App {
     /// IT4:chat tail 跟随。true=有新事件自动滚底;do_turn 发送置 true,PgUp/上滚置 false,
     /// PgDn/scroll_to_bottom 置 true。默认 true(进 Control 即跟最新)。
     pub chat_follow_tail: bool,
+    /// Control 对话区 turn 总数(render_turn_stream 分组数,footer N/M 用)。
+    pub control_turn_count: usize,
     /// Control 区域缓存(draw 算 → handle mouse drag hit 用)。
     pub control_area: Rect,
+    /// 输入栏 textarea 实际区(render_input_bar 算 + 存,鼠标划选用)。
+    pub input_area: Rect,
     /// 鼠标正在拖 control 主分隔条(左|右 HSplit bar)。
     pub control_h_dragging: bool,
     /// 右主区 tab(对话 | flow | 属性)。复用 TabBar。
@@ -599,6 +696,8 @@ pub struct App {
     // ── IT2 节点 C:new/delete 弹窗态(session 管理)──────────────────────
     /// new 弹窗激活态。None=关;Some(Claw/Cc)=开并已选 harness 类型。
     pub new_popup: Option<NewKind>,
+    /// 右键上下文菜单态(栈顶 Popup id="ctx" 时激活)。
+    pub context_menu: Option<ContextMenu>,
     /// new 弹窗 picker 候选(agents 或 cwds,按 new_popup 渲染)。
     pub new_candidates: Vec<String>,
     /// new 弹窗 picker 选中索引。
@@ -616,6 +715,34 @@ pub struct App {
 /// IT2 节点 C:new 弹窗 harness 类型选择。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum NewKind { Claw, Cc }
+
+/// 右键分区上下文菜单的可执行操作。
+#[derive(Clone, Debug)]
+pub enum CtxAction {
+    Turn, Spawn, Reconnect, Fork, Archive, Delete, RawExec, NewSession, Refresh,
+    CopySid, CopyLastResponse, ScrollBottom, ClearInput, Newline, CopySelection,
+    CreateChain, CreateBranch, CreateDag, RunFlow, JumpToControl(usize), Close,
+}
+
+/// 右键命中的分区目标(决定弹哪些菜单项)。
+#[derive(Clone, Debug)]
+pub enum RightClickTarget {
+    OutlineSession(usize),
+    OutlineBlank,
+    Chat,
+    Flow,
+    Input,
+    ObserveSession(usize),
+    Other,
+}
+
+/// 激活的上下文菜单态(类比 new_popup;栈顶 Popup id="ctx" 时激活)。
+#[derive(Clone, Debug)]
+pub struct ContextMenu {
+    pub anchor: (u16, u16),
+    pub items: Vec<(String, CtxAction)>,
+    pub selected: usize,
+}
 
 impl App {
     pub fn new(term: TermCap) -> Self {
@@ -654,9 +781,12 @@ impl App {
             control_split: HSplit::new(22),
             control_chat_scroll: ScrollView::new(vec![])
                 .border_mode(crate::components::scrollbar::BorderMode::Top)
-                .title(" 对话 "),
+                .title(" 对话 ")
+                .show_scrollbar(false),
             chat_follow_tail: true,
+            control_turn_count: 0,
             control_area: Rect::default(),
+            input_area: Rect::default(),
             control_h_dragging: false,
             control_right_tabs: TabBar::new(vec![
                 // ADR-3:属性改 props 弹窗(i 键),右 tab 缩 2(对话/flow)。
@@ -685,6 +815,7 @@ impl App {
             observe_view_cursor: None,
             props_open: false,
             new_popup: None,
+            context_menu: None,
             new_candidates: vec![],
             new_idx: 0,
             new_cc_input: String::new(),
@@ -810,6 +941,28 @@ impl App {
         self.fetch_current();
     }
 
+    /// `r` 键:claw → 重连(POST reconnect),cc → 无状态提示,无 cursor → 普通刷新兜底。
+    /// 重连后刷新 sessions(更新 running 显示)。
+    pub fn do_reconnect_or_refresh(&mut self) {
+        let Some(s) = self.flat.get(self.cursor).cloned() else {
+            self.refresh_sessions();
+            self.fetch_claw_events();
+            return;
+        };
+        let ht = norm_ht(&s.harness_type);
+        if ht == "claw" {
+            match reconnect_claw(&s.session_id) {
+                Some(true) => self.turn_status = Some(format!("claw 已重连:{}", trunc(&s.session_id, 12))),
+                Some(false) => self.turn_status = Some("重连失败,gateway 离线?".to_string()),
+                None => self.turn_status = Some("重连失败,gateway 离线?".to_string()),
+            }
+            self.refresh_sessions();
+        } else {
+            // cc(claude-code)无状态(子进程按 turn spawn),重连无意义。
+            self.turn_status = Some("cc 无状态无需重连".to_string());
+        }
+    }
+
     /// 请求 raw-exec:按 cursor session 的 harness_type 决定拉起哪个 harness
     /// (claude-code → `claude --resume <sid>`;其余 → `openclaw`)。
     /// 不直接 spawn(无 terminal 句柄做挂起/恢复);设置 pending_spawn,run() loop 消费。
@@ -897,6 +1050,149 @@ impl App {
     pub fn close_popup(&mut self, id: &str) {
         self.popups.retain(|p| p.id != id);
     }
+    /// 关 ctx 菜单(弹窗 + 状态)。
+    fn close_context_menu(&mut self) {
+        self.close_popup("ctx");
+        self.context_menu = None;
+    }
+    /// ctx 菜单键盘:j/k 选、Enter 执行、Esc 关。
+    fn handle_context_menu_key(&mut self, k: &KeyEvent) -> bool {
+        match k.code {
+            KeyCode::Esc => { self.close_context_menu(); true }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if let Some(cm) = self.context_menu.as_mut() {
+                    if cm.selected + 1 < cm.items.len() { cm.selected += 1; }
+                }
+                true
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if let Some(cm) = self.context_menu.as_mut() {
+                    if cm.selected > 0 { cm.selected -= 1; }
+                }
+                true
+            }
+            KeyCode::Enter => {
+                let action = self.context_menu.as_ref()
+                    .and_then(|c| c.items.get(c.selected).map(|(_, a)| a.clone()));
+                if let Some(a) = action { self.run_ctx_action(a); }
+                true
+            }
+            _ => false,
+        }
+    }
+    /// 执行菜单项动作(调现有方法)。除切弹窗类(Delete/NewSession/JumpToControl 内部自关),
+    /// 末尾统一 close_context_menu(单击/Enter 后菜单消失)。
+    /// delete 弹窗 styled body:[y]确认 Green │ [N]取消 Red,公用描边分隔。
+    fn delete_popup_body(sid: &str) -> Vec<ratatui::text::Line<'static>> {
+        use ratatui::style::{Color, Style};
+        use ratatui::text::{Line, Span};
+        vec![
+            Line::from(format!("删除 {} ?", trunc(sid, 24))),
+            Line::from(vec![
+                Span::styled(" [y] 确认 ", Style::default().fg(Color::Black).bg(Color::Green)),
+                Span::styled("│", Style::default().fg(Color::Cyan)),
+                Span::styled(" [N] 取消 ", Style::default().fg(Color::Black).bg(Color::Red)),
+            ]),
+        ]
+    }
+    /// 开 delete 确认弹窗(styled body_lines + 设 delete_popup)。
+    fn open_delete_popup(&mut self, sid: &str) {
+        self.delete_popup = Some(sid.to_string());
+        let mut p = Popup::centered("delete", " delete session ", vec![], 48, 7);
+        p.body_lines = Self::delete_popup_body(sid);
+        self.open_popup(p);
+    }
+    /// 确认删 cursor session(键盘 y / 鼠标 [y] 共用)。
+    fn confirm_delete(&mut self) {
+        let sid = self.delete_popup.take().unwrap_or_default();
+        if sid.is_empty() {
+            self.close_popup("delete");
+            return;
+        }
+        let ht = self.flat.iter()
+            .find(|s| s.session_id == sid)
+            .map(|s| norm_ht(&s.harness_type))
+            .unwrap_or_else(|| "claw".to_string());
+        let ok = delete_session_raw(&ht, &sid);
+        self.turn_status = Some(if ok {
+            format!("deleted: {}", trunc(&sid, 12))
+        } else {
+            format!("delete 失败(orche 不可达?): {}", trunc(&sid, 12))
+        });
+        self.close_popup("delete");
+        self.refresh_sessions();
+    }
+    /// 取消删(键盘 n/esc / 鼠标 [N] 共用)。
+    fn cancel_delete(&mut self) {
+        self.close_popup("delete");
+        self.delete_popup = None;
+    }
+
+    fn run_ctx_action(&mut self, a: CtxAction) {
+        use CtxAction::*;
+        match a {
+            Turn => self.do_turn(),
+            Spawn => self.do_spawn(),
+            Reconnect => self.do_reconnect_or_refresh(),
+            Fork => self.do_fork(),
+            Archive => {
+                if let Some(s) = self.flat.get(self.cursor).cloned() {
+                    let ht = norm_ht(&s.harness_type);
+                    match archive_session(&ht, &s.session_id, None) {
+                        Some(msg) => self.turn_status = Some(format!("archived: {}", trunc(msg.trim(), 40))),
+                        None => self.turn_status = Some("archive 失败".into()),
+                    }
+                }
+            }
+            Delete => {
+                let sid = self.current_sid();
+                if !sid.starts_with("(无") {
+                    self.close_context_menu();
+                    self.open_delete_popup(&sid);
+                    return; // 切 delete 弹窗,不统一 close
+                }
+            }
+            RawExec => self.request_raw_exec(),
+            NewSession => { self.close_context_menu(); self.open_new_popup(); return; }
+            Refresh => { self.refresh_sessions(); self.refresh_flows(); }
+            CopySid => {
+                if let Some(s) = self.flat.get(self.cursor) {
+                    copy_to_clipboard(&s.session_id);
+                }
+            }
+            CopyLastResponse => {
+                let key = self.flat.get(self.cursor)
+                    .map(|s| format!("{}/{}", s.harness_type, s.session_id));
+                if let Some(k) = key {
+                    if let Some(evs) = self.events.get(&k) {
+                        if let Some(last) = evs.last() {
+                            let txt = ["message", "text", "content", "response", "output"].iter()
+                                .find_map(|f| last.data.get(*f).and_then(|v| v.as_str()))
+                                .unwrap_or("").to_string();
+                            if !txt.is_empty() { copy_to_clipboard(&txt); }
+                        }
+                    }
+                }
+            }
+            ScrollBottom => { self.control_chat_scroll.scroll_to_bottom(); self.chat_follow_tail = true; }
+            ClearInput => { self.textarea.clear(); self.turn_msg.clear(); }
+            Newline => self.textarea.insert_newline(),
+            CreateChain => { self.create_preset_flow(FlowPreset::Chain); }
+            CreateBranch => { self.create_preset_flow(FlowPreset::Branch); }
+            CreateDag => { self.create_preset_flow(FlowPreset::Dag); }
+            RunFlow => self.run_current_flow(),
+            CopySelection => {
+                if let Some((a, b)) = self.textarea.selection_range() {
+                    if a < b {
+                        copy_to_clipboard(&self.textarea.text()[a..b]);
+                    }
+                }
+            }
+            JumpToControl(idx) => { self.close_context_menu(); self.jump_to_control(idx); return; }
+            Close => {}
+        }
+        self.close_context_menu();
+    }
     pub fn top_popup_mut(&mut self) -> Option<&mut Popup> {
         self.popups.last_mut()
     }
@@ -927,6 +1223,16 @@ impl App {
             self.term.poll_interval.as_millis(),
         );
         let mut full_md = md;
+        // cursor session 属性(props 并入 help;open_props/props_open 闲置保留)
+        if let Some(s) = self.flat.get(self.cursor) {
+            let inst = self.instance_count(&s.harness_type, &s.session_id);
+            let ev_key = format!("{}/{}", s.harness_type, &s.session_id);
+            let ev_n = self.events.get(&ev_key).map(|e| e.len()).unwrap_or(0);
+            full_md.push_str(&format!(
+                "\n## 当前 session\n\n- sid `{}`\n- harness `{}`\n- 实例 {}\n- 事件 {}\n",
+                trunc(&s.session_id, 30), s.harness_type, inst, ev_n,
+            ));
+        }
         if !self.term.hint.is_empty() {
             full_md.push_str(&format!("\n> ⚠ {}\n", self.term.hint));
         }
@@ -1035,6 +1341,10 @@ impl App {
         if self.handle_action_popup_key(k) {
             return true;
         }
+        // ctx 菜单(栈顶 id="ctx"):j/k 导航、Enter 执行、Esc 关。
+        if self.popups.last().map(|p| p.id == "ctx").unwrap_or(false) {
+            return self.handle_context_menu_key(k);
+        }
         match k.code {
             KeyCode::Esc | KeyCode::Enter => {
                 self.close_top_popup();
@@ -1062,27 +1372,10 @@ impl App {
         }
         // delete 确认弹窗(栈顶 id="delete")
         if self.popups.last().map(|p| p.id == "delete").unwrap_or(false) {
-            if let Some(_sid) = self.delete_popup.clone() {
+            if self.delete_popup.is_some() {
                 match k.code {
-                    KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
-                        self.close_popup("delete");
-                        self.delete_popup = None;
-                    }
-                    KeyCode::Char('y') | KeyCode::Char('Y') => {
-                        let sid = self.delete_popup.take().unwrap_or_default();
-                        let ht = self.flat.iter()
-                            .find(|s| s.session_id == sid)
-                            .map(|s| norm_ht(&s.harness_type))
-                            .unwrap_or_else(|| "claw".to_string());
-                        let ok = delete_session_raw(&ht, &sid);
-                        self.turn_status = Some(if ok {
-                            format!("deleted: {}", trunc(&sid, 12))
-                        } else {
-                            format!("delete 失败(orche 不可达?): {}", trunc(&sid, 12))
-                        });
-                        self.close_popup("delete");
-                        self.refresh_sessions();
-                    }
+                    KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => self.cancel_delete(),
+                    KeyCode::Char('y') | KeyCode::Char('Y') => self.confirm_delete(),
                     _ => {}
                 }
                 return true;
@@ -1212,6 +1505,36 @@ impl App {
                 return;
             }
         }
+        if m.kind == MouseEventKind::Down(MouseButton::Left)
+            && self.popups.last().map(|p| p.id == "ctx").unwrap_or(false)
+        {
+            if let Some(id) = self.popup_clickmap.hit(m.column, m.row).copied() {
+                if id == 800 {
+                    self.close_context_menu();
+                } else if id >= 900 {
+                    let i = id - 900;
+                    let action = self.context_menu.as_ref()
+                        .and_then(|c| c.items.get(i).map(|(_, a)| a.clone()));
+                    if let Some(a) = action {
+                        self.run_ctx_action(a);
+                    }
+                }
+                return;
+            }
+        }
+        // delete 弹窗:600=[y]确认 → confirm_delete / 601=[N]取消 → cancel_delete
+        if m.kind == MouseEventKind::Down(MouseButton::Left)
+            && self.popups.last().map(|p| p.id == "delete").unwrap_or(false)
+        {
+            if let Some(id) = self.popup_clickmap.hit(m.column, m.row).copied() {
+                match id {
+                    600 => self.confirm_delete(),
+                    601 => self.cancel_delete(),
+                    _ => {}
+                }
+                return;
+            }
+        }
         if let Some(p) = self.popups.last_mut() {
             p.state.handle_mouse_event(*m);
         }
@@ -1261,11 +1584,10 @@ impl App {
             0 => { self.do_turn(); self.mark_action("trigger"); }
             1 => { self.do_spawn(); self.mark_action("spawn"); }
             2 => {
-                if let Some(sg) = fetch_sessions() {
-                    self.set_sessions(sg);
-                }
-                self.fetch_claw_events();
+                // 对齐 r 键:claw→重连+刷新,cc→无状态提示,无 cursor→刷新兜底
+                self.do_reconnect_or_refresh();
                 self.orche_online = fetch_orche_health();
+                self.mark_action("reconnect");
             }
             3 => self.request_raw_exec(),
             4 => { self.create_preset_flow(FlowPreset::Chain); self.mark_action("create_chain"); }
@@ -1283,7 +1605,8 @@ impl App {
         self.mouse.track(*m);
         match m.kind {
             MouseEventKind::Down(MouseButton::Right) => {
-                self.open_help();
+                let target = self.classify_right_click(m.column, m.row);
+                self.open_context_menu((m.column, m.row), target);
             }
             MouseEventKind::ScrollDown => {
                 if self.panel == Panel::Observe || self.panel == Panel::Control {
@@ -1310,6 +1633,19 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
+                // 输入栏 textarea 划选起点(底部输入栏,优先于 HSplit/clickmap)
+                if self.panel == Panel::Control
+                    && self.input_area.contains(ratatui::layout::Position { x: m.column, y: m.row })
+                {
+                    if let Some(p) = self.textarea.pos_at_point(
+                        (m.column, m.row), self.input_area, &self.textarea_state,
+                    ) {
+                        self.textarea.set_cursor(p);
+                        self.textarea.start_selection(p);
+                        self.turn_msg = self.textarea.text().to_string();
+                    }
+                    return;
+                }
                 // Control 左|右 HSplit 分隔条命中(仅水平 bar;垂直堆叠已 tab 化,无 VStack 分隔条)。
                 if self.panel == Panel::Control && self.control_area.contains(ratatui::layout::Position { x: m.column, y: m.row }) {
                     let [_left, hbar, _right] = self.control_split.rects(self.control_area);
@@ -1327,7 +1663,7 @@ impl App {
                         return;
                     }
                     if *id == 998 {
-                        self.open_props();
+                        self.open_help();
                         return;
                     }
                 }
@@ -1350,6 +1686,7 @@ impl App {
                         if *id == 300 {
                             // IT2 节点 C:大纲侧 [+] new 按钮。
                             self.open_new_popup();
+                            self.mark_action("new_btn");
                             return;
                         }
                         if *id >= 200 {
@@ -1363,6 +1700,7 @@ impl App {
                             if idx < self.flat.len() {
                                 self.cursor = idx;
                                 self.fetch_current();
+                                self.mark_action("session");
                             }
                         } else {
                             // 按钮 id 0-7。
@@ -1405,6 +1743,15 @@ impl App {
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
+                // textarea 划选拖动(selection 已开始)
+                if self.panel == Panel::Control && self.textarea.selection_range().is_some() {
+                    if let Some(p) = self.textarea.pos_at_point(
+                        (m.column, m.row), self.input_area, &self.textarea_state,
+                    ) {
+                        self.textarea.extend_selection(p);
+                    }
+                    return;
+                }
                 // Control 左|右 HSplit bar 拖拽(垂直堆叠已 tab 化,无 VStack 拖拽)。
                 if self.control_h_dragging {
                     let [_left, hbar, _right] = self.control_split.rects(self.control_area);
@@ -1415,6 +1762,7 @@ impl App {
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
+                // 划选释放:保持选区(不自动删;Backspace 删 / Ctrl+C 复制)
                 self.control_h_dragging = false;
             }
             _ => {}
@@ -1489,6 +1837,131 @@ impl App {
     /// ADR-3:`i`(顶栏右)开 props 弹窗(替代常驻「属性」tab)。
     /// 置 props_open=true;render 据此画 props modal;esc/enter 关。
     /// IT3 ②:终端能力(protocol/image_ok/poll)从原右下 icat 框并入此弹窗。
+    /// fork cursor session(cc-only;claw 501 ADR-4)。textarea 文本作 first_msg。
+    /// 供 F 快捷键 + 右键菜单 Fork 复用。
+    pub fn do_fork(&mut self) {
+        let (ht, sid) = self.flat.get(self.cursor)
+            .map(|s| (norm_ht(&s.harness_type), s.session_id.clone()))
+            .unwrap_or_else(|| ("claw".to_string(), String::new()));
+        if sid.is_empty() {
+            return;
+        }
+        let first_msg = self.textarea.text().to_string();
+        match fork_session(&ht, &sid, &first_msg) {
+            Some((new_sid, forked)) if forked => {
+                self.turn_status = Some(format!("forked → {}", trunc(&new_sid, 16)));
+                self.refresh_sessions();
+                self.focus_new_session(&new_sid);
+            }
+            Some((_new_sid, _forked)) => {
+                self.turn_status = Some("fork 未生效(forked=false)".to_string());
+            }
+            None => {
+                self.turn_status = Some(if ht == "claw" {
+                    "claw fork 暂不支持(ADR-4)".to_string()
+                } else {
+                    "fork 失败(orche 不可达?)".to_string()
+                });
+            }
+        }
+    }
+
+    /// 右键落点 → 分区目标(panel + rect + clickmap id 归一)。
+    fn classify_right_click(&self, col: u16, row: u16) -> RightClickTarget {
+        use RightClickTarget::*;
+        let pos = ratatui::layout::Position { x: col, y: row };
+        if self.panel == Panel::Control && self.input_area.contains(pos) {
+            return Input;
+        }
+        if self.panel == Panel::Control && self.control_area.contains(pos) {
+            let [left, _, _] = self.control_split.rects(self.control_area);
+            if !left.contains(pos) {
+                // 右主区:tab0=对话,tab1=flow
+                return match self.control_right_tabs.active { 1 => Flow, _ => Chat };
+            }
+            if let Some(id) = self.clickmap.hit(col, row).copied() {
+                if id >= 100 && id < 200 {
+                    return OutlineSession(id - 100);
+                }
+            }
+            return OutlineBlank;
+        }
+        if self.panel == Panel::Observe {
+            if let Some(id) = self.clickmap.hit(col, row).copied() {
+                if id >= 600 {
+                    return ObserveSession(id - 600);
+                }
+            }
+            return Other;
+        }
+        Other
+    }
+
+    /// 按分区目标构建菜单项 + 推 id="ctx" Popup(锚点跟随右键光标)。
+    pub fn open_context_menu(&mut self, anchor: (u16, u16), target: RightClickTarget) {
+        let items: Vec<(String, CtxAction)> = match target {
+            RightClickTarget::OutlineSession(idx) => {
+                if idx < self.flat.len() {
+                    self.cursor = idx;
+                    self.fetch_current();
+                }
+                let ht = self.flat.get(self.cursor)
+                    .map(|s| norm_ht(&s.harness_type)).unwrap_or_else(|| "claw".to_string());
+                let mut v = vec![
+                    ("Trigger turn".into(), CtxAction::Turn),
+                    ("Spawn".into(), CtxAction::Spawn),
+                ];
+                if ht == "claw" { v.push(("Reconnect".into(), CtxAction::Reconnect)); }
+                if ht == "claude-code" { v.push(("Fork".into(), CtxAction::Fork)); }
+                v.push(("Archive".into(), CtxAction::Archive));
+                v.push(("Delete…".into(), CtxAction::Delete));
+                v.push(("Raw exec".into(), CtxAction::RawExec));
+                v.push(("Copy sid".into(), CtxAction::CopySid));
+                v
+            }
+            RightClickTarget::OutlineBlank => vec![
+                ("New session".into(), CtxAction::NewSession),
+                ("Refresh".into(), CtxAction::Refresh),
+            ],
+            RightClickTarget::Chat => vec![
+                ("Send turn".into(), CtxAction::Turn),
+                ("Copy last response".into(), CtxAction::CopyLastResponse),
+                ("Scroll bottom".into(), CtxAction::ScrollBottom),
+            ],
+            RightClickTarget::Flow => vec![
+                ("Create Chain".into(), CtxAction::CreateChain),
+                ("Create Branch".into(), CtxAction::CreateBranch),
+                ("Create DAG".into(), CtxAction::CreateDag),
+                ("Run flow".into(), CtxAction::RunFlow),
+                ("Refresh".into(), CtxAction::Refresh),
+            ],
+            RightClickTarget::Input => vec![
+                ("Send".into(), CtxAction::Turn),
+                ("Clear".into(), CtxAction::ClearInput),
+                ("Newline".into(), CtxAction::Newline),
+                ("Copy selection".into(), CtxAction::CopySelection),
+            ],
+            RightClickTarget::ObserveSession(idx) => {
+                if idx < self.flat.len() {
+                    self.cursor = idx;
+                    self.fetch_current();
+                }
+                vec![
+                    ("Jump to Control".into(), CtxAction::JumpToControl(idx)),
+                    ("Copy sid".into(), CtxAction::CopySid),
+                ]
+            }
+            RightClickTarget::Other => return,
+        };
+        let h = (items.len() as u16 + 5).clamp(7, 22);
+        self.context_menu = Some(ContextMenu { anchor, items, selected: 0 });
+        self.open_popup(Popup {
+            id: "ctx", title: " context ".into(), body: vec![], md_text: None,
+            state: tui_popup::PopupState::default(), modal: true,
+            width: 28, height: h, position: Some(anchor), placed: false, body_lines: vec![],
+        });
+    }
+
     pub fn open_props(&mut self) {
         self.props_open = true;
         // props body:cursor session 属性 + 终端能力段。
@@ -1679,6 +2152,42 @@ impl App {
                     }
                     self.textarea.insert_newline();
                     self.paste_burst.clear_window_after_non_char();
+                    self.turn_msg = self.textarea.text().to_string();
+                    return false;
+                }
+                KeyCode::Char('r') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                    // Ctrl+R 重连(insert 内键盘触发,不切模式;normal 模式用 r)
+                    if let Some(p) = self.paste_burst.flush_before_modified_input() {
+                        self.textarea.insert_text(&p);
+                        self.turn_msg = self.textarea.text().to_string();
+                    }
+                    self.paste_burst.clear_window_after_non_char();
+                    self.do_reconnect_or_refresh();
+                    return false;
+                }
+                KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                    // Ctrl+C:有选区→复制到剪贴板(选区保持);无选区→清空输入区
+                    if let Some((a, b)) = self.textarea.selection_range() {
+                        if a < b {
+                            copy_to_clipboard(&self.textarea.text()[a..b]);
+                        }
+                    } else {
+                        if let Some(p) = self.paste_burst.flush_before_modified_input() {
+                            self.textarea.insert_text(&p);
+                        }
+                        self.paste_burst.clear_window_after_non_char();
+                        self.textarea.clear();
+                        self.turn_msg.clear();
+                    }
+                    return false;
+                }
+                KeyCode::Char('h') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                    // Ctrl+H = 多数终端 Ctrl+Backspace 的编码(^H),等同删词。
+                    if let Some(p) = self.paste_burst.flush_before_modified_input() {
+                        self.textarea.insert_text(&p);
+                    }
+                    self.paste_burst.clear_window_after_non_char();
+                    self.textarea.delete_word_backward();
                     self.turn_msg = self.textarea.text().to_string();
                     return false;
                 }
@@ -1918,10 +2427,7 @@ impl App {
                 false
             }
             KeyCode::Char('r') => {
-                if let Some(sg) = fetch_sessions() {
-                    self.set_sessions(sg);
-                }
-                self.fetch_claw_events();
+                self.do_reconnect_or_refresh();
                 false
             }
             KeyCode::Char('p') => {
@@ -1960,12 +2466,7 @@ impl App {
                 // 开 delete 确认弹窗(光标 session)。
                 let sid = self.current_sid();
                 if !sid.starts_with("(无") {
-                    self.delete_popup = Some(sid.clone());
-                    self.open_popup(Popup::centered(
-                        "delete", " delete session ",
-                        vec![format!("删除 {} ?", trunc(&sid, 24)), "y 确认 · N/esc 取消".to_string()],
-                        50, 7,
-                    ));
+                    self.open_delete_popup(&sid);
                 }
                 false
             }
@@ -1982,32 +2483,7 @@ impl App {
                 false
             }
             KeyCode::Char('F') if self.panel == Panel::Control => {
-                // fork:用当前 textarea 文本作 first_msg(空则空串)。
-                let (ht, sid) = self.flat.get(self.cursor)
-                    .map(|s| (norm_ht(&s.harness_type), s.session_id.clone()))
-                    .unwrap_or_else(|| ("claw".to_string(), String::new()));
-                if !sid.is_empty() {
-                    let first_msg = self.textarea.text().to_string();
-                    match fork_session(&ht, &sid, &first_msg) {
-                        Some((new_sid, forked)) if forked => {
-                            self.turn_status = Some(format!("forked → {}", trunc(&new_sid, 16)));
-                            self.refresh_sessions();
-                            self.focus_new_session(&new_sid);
-                        }
-                        Some((_new_sid, _forked)) => {
-                            // forked=false:fork 端点回执但未真 fork。
-                            self.turn_status = Some("fork 未生效(forked=false)".to_string());
-                        }
-                        None => {
-                            // None:claw 501(ADR-4)或 orche 不可达。
-                            self.turn_status = Some(if ht == "claw" {
-                                "claw fork 暂不支持(ADR-4)".to_string()
-                            } else {
-                                "fork 失败(orche 不可达?)".to_string()
-                            });
-                        }
-                    }
-                }
+                self.do_fork();
                 false
             }
             // normal 模式下普通字母/退格无动作:打字统一由 insert 模式处理(见函数顶 capture)。
@@ -2189,7 +2665,7 @@ mod tests {
         let mut app = App::new(crate::kitty::detect());
         app.panel = Panel::Control;
         app.flat = vec![Session {
-            harness_type: "claude-code".into(), session_id: "abc123".into(), harness_id: "h1".into(),
+            harness_type: "claude-code".into(), session_id: "abc123".into(), harness_id: "h1".into(), cwd: None, running: false,
         }];
         app.cursor = 0;
         app.clickmap.clear();
@@ -2217,8 +2693,8 @@ mod tests {
         let mut app = App::new(crate::kitty::detect());
         app.panel = Panel::Observe;
         app.flat = vec![
-            Session { harness_type: "claw".into(), session_id: "sess-a".into(), harness_id: "h1".into() },
-            Session { harness_type: "claw".into(), session_id: "sess-b".into(), harness_id: "h2".into() },
+            Session { harness_type: "claw".into(), session_id: "sess-a".into(), harness_id: "h1".into(), cwd: None, running: false },
+            Session { harness_type: "claw".into(), session_id: "sess-b".into(), harness_id: "h2".into(), cwd: None, running: false },
         ];
         app.cursor = 0;
         // session 行 clickmap id = 600 + flat_idx(模拟 draw_stack 注册 session 行 1)。
@@ -2242,8 +2718,8 @@ mod tests {
         let mut app = App::new(crate::kitty::detect());
         app.panel = Panel::Observe;
         app.flat = vec![
-            Session { harness_type: "claw".into(), session_id: "sess-a".into(), harness_id: "h1".into() },
-            Session { harness_type: "claw".into(), session_id: "sess-b".into(), harness_id: "h2".into() },
+            Session { harness_type: "claw".into(), session_id: "sess-a".into(), harness_id: "h1".into(), cwd: None, running: false },
+            Session { harness_type: "claw".into(), session_id: "sess-b".into(), harness_id: "h2".into(), cwd: None, running: false },
         ];
         app.observe_view_cursor = Some(1);
         // 跳转按钮 clickmap id=400。
@@ -2266,8 +2742,8 @@ mod tests {
         let mut app = App::new(crate::kitty::detect());
         app.panel = Panel::Observe;
         app.flat = vec![
-            Session { harness_type: "claude-code".into(), session_id: "cc-1".into(), harness_id: "h1".into() },
-            Session { harness_type: "openclaw".into(), session_id: "oc-1".into(), harness_id: "h2".into() },
+            Session { harness_type: "claude-code".into(), session_id: "cc-1".into(), harness_id: "h1".into(), cwd: None, running: false },
+            Session { harness_type: "openclaw".into(), session_id: "oc-1".into(), harness_id: "h2".into(), cwd: None, running: false },
         ];
         // 组 id=500+0 = claude-code(排序首)。
         app.clickmap.clear();
@@ -2303,8 +2779,8 @@ mod tests {
         app.panel = Panel::Observe;
         app.focus = FocusTarget::ObserveSession;
         app.flat = vec![
-            Session { harness_type: "claw".into(), session_id: "sess-a".into(), harness_id: "h1".into() },
-            Session { harness_type: "claw".into(), session_id: "sess-b".into(), harness_id: "h2".into() },
+            Session { harness_type: "claw".into(), session_id: "sess-a".into(), harness_id: "h1".into(), cwd: None, running: false },
+            Session { harness_type: "claw".into(), session_id: "sess-b".into(), harness_id: "h2".into(), cwd: None, running: false },
         ];
         app.cursor = 1;
         // Enter on ObserveSession → panel=Control + cursor 仍 1。
@@ -2599,9 +3075,9 @@ mod tests {
         let mut app = App::new(crate::kitty::detect());
         app.panel = Panel::Control;
         app.flat = vec![
-            Session { harness_type: "claude-code".into(), session_id: "cc-1".into(), harness_id: "h1".into() },
-            Session { harness_type: "claude-code".into(), session_id: "cc-2".into(), harness_id: "h2".into() },
-            Session { harness_type: "openclaw".into(), session_id: "oc-1".into(), harness_id: "h3".into() },
+            Session { harness_type: "claude-code".into(), session_id: "cc-1".into(), harness_id: "h1".into(), cwd: None, running: false },
+            Session { harness_type: "claude-code".into(), session_id: "cc-2".into(), harness_id: "h2".into(), cwd: None, running: false },
+            Session { harness_type: "openclaw".into(), session_id: "oc-1".into(), harness_id: "h3".into(), cwd: None, running: false },
         ];
         app.control_groups = vec!["claude-code".into(), "openclaw".into()];
         app.cursor = 0;
@@ -2767,9 +3243,9 @@ mod tests {
         assert!(quit, "handle 返 true(run loop 退出)");
     }
 
-    /// ADR-3:i(clickmap id998)→ open_props 弹窗(props_open=true + popups 栈顶 props)。
+    /// ADR-3:i(clickmap id998)→ open_help(全局 help;props 内容并入 help 段)。
     #[test]
-    fn props_button_opens_props_popup() {
+    fn info_button_opens_help_popup() {
         let mut app = App::new(crate::kitty::detect());
         app.clickmap.clear();
         app.clickmap.register(Rect::new(0, 0, 2, 1), 998);
@@ -2779,8 +3255,58 @@ mod tests {
             modifiers: crossterm::event::KeyModifiers::empty(),
         };
         app.handle_base_mouse(&m);
-        assert!(app.props_open, "i → props_open=true");
-        assert!(app.popups.iter().any(|x| x.id == "props"), "props 弹窗入栈");
+        assert!(app.popups.iter().any(|x| x.id == "help"), "info(998) → help 弹窗入栈");
+    }
+
+    #[test]
+    fn ctx_outline_cc_shows_fork_hides_reconnect() {
+        let mut app = App::new(crate::kitty::detect());
+        app.flat = vec![Session {
+            harness_type: "claude-code".into(), session_id: "abc".into(), harness_id: "h".into(),
+            cwd: None, running: false,
+        }];
+        app.cursor = 0;
+        app.open_context_menu((1, 1), RightClickTarget::OutlineSession(0));
+        let labels: Vec<&str> = app.context_menu.as_ref().unwrap().items.iter().map(|(l, _)| l.as_str()).collect();
+        assert!(labels.contains(&"Fork"), "cc 显 Fork: {:?}", labels);
+        assert!(!labels.contains(&"Reconnect"), "cc 隐 Reconnect");
+    }
+
+    #[test]
+    fn ctx_outline_claw_shows_reconnect_hides_fork() {
+        let mut app = App::new(crate::kitty::detect());
+        app.flat = vec![Session {
+            harness_type: "openclaw".into(), session_id: "agent:main:main".into(), harness_id: "h".into(),
+            cwd: None, running: false,
+        }];
+        app.cursor = 0;
+        app.open_context_menu((1, 1), RightClickTarget::OutlineSession(0));
+        let labels: Vec<&str> = app.context_menu.as_ref().unwrap().items.iter().map(|(l, _)| l.as_str()).collect();
+        assert!(labels.contains(&"Reconnect"), "claw 显 Reconnect: {:?}", labels);
+        assert!(!labels.contains(&"Fork"), "claw 隐 Fork");
+    }
+
+    #[test]
+    fn ctx_esc_closes_menu() {
+        let mut app = App::new(crate::kitty::detect());
+        app.open_context_menu((1, 1), RightClickTarget::OutlineBlank);
+        assert!(app.context_menu.is_some());
+        app.handle_context_menu_key(&KeyEvent::new(KeyCode::Esc, crossterm::event::KeyModifiers::empty()));
+        assert!(app.context_menu.is_none(), "Esc 关 ctx");
+        assert!(!app.popups.iter().any(|p| p.id == "ctx"));
+    }
+
+    #[test]
+    fn ctx_jk_moves_selected() {
+        let mut app = App::new(crate::kitty::detect());
+        app.open_context_menu((1, 1), RightClickTarget::OutlineBlank); // 2 items
+        let n = app.context_menu.as_ref().unwrap().items.len();
+        app.handle_context_menu_key(&KeyEvent::new(KeyCode::Char('j'), crossterm::event::KeyModifiers::empty()));
+        assert_eq!(app.context_menu.as_ref().unwrap().selected, 1, "j 下移");
+        app.handle_context_menu_key(&KeyEvent::new(KeyCode::Char('j'), crossterm::event::KeyModifiers::empty()));
+        assert_eq!(app.context_menu.as_ref().unwrap().selected, n - 1, "j clamp 末尾");
+        app.handle_context_menu_key(&KeyEvent::new(KeyCode::Char('k'), crossterm::event::KeyModifiers::empty()));
+        assert_eq!(app.context_menu.as_ref().unwrap().selected, 0, "k 上移");
     }
 
     /// ADR-4:toggle_group 增删 control_collapsed(折叠/展开)。
@@ -2828,12 +3354,97 @@ mod tests {
         app.panel = Panel::Control;
         app.insert_mode = false;
         app.flat = vec![Session {
-            harness_type: "claude-code".into(), session_id: "abc".into(), harness_id: "h".into(),
+            harness_type: "claude-code".into(), session_id: "abc".into(), harness_id: "h".into(), cwd: None, running: false,
         }];
         app.cursor = 0;
         app.handle_base_key(&KeyEvent::new(KeyCode::Char('d'), crossterm::event::KeyModifiers::empty()));
         assert!(app.popups.iter().any(|p| p.id == "delete"), "d → delete 弹窗入栈");
         assert_eq!(app.delete_popup.as_deref(), Some("abc"));
+    }
+
+    /// r(normal)cc cursor → "cc 无状态无需重连"(reconnect 仅 claw 有意义)。
+    #[test]
+    fn r_key_cc_shows_no_reconnect() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        app.insert_mode = false;
+        app.flat = vec![Session {
+            harness_type: "claude-code".into(), session_id: "abc".into(), harness_id: "h".into(),
+            cwd: None, running: false,
+        }];
+        app.cursor = 0;
+        app.handle_base_key(&KeyEvent::new(KeyCode::Char('r'), crossterm::event::KeyModifiers::empty()));
+        assert_eq!(app.turn_status.as_deref(), Some("cc 无状态无需重连"));
+    }
+
+    /// r(normal)claw cursor orche 离线 → 重连失败文案(测试环境 orche 不可达)。
+    #[test]
+    fn r_key_claw_offline_reconnect_fail() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        app.insert_mode = false;
+        app.flat = vec![Session {
+            harness_type: "openclaw".into(), session_id: "agent:main:main".into(), harness_id: "h".into(),
+            cwd: None, running: false,
+        }];
+        app.cursor = 0;
+        app.handle_base_key(&KeyEvent::new(KeyCode::Char('r'), crossterm::event::KeyModifiers::empty()));
+        let st = app.turn_status.clone().unwrap_or_default();
+        assert!(st.contains("重连"), "claw r → 触发重连(turn_status 含'重连'),实际: {}", st);
+    }
+
+    /// Ctrl+R(insert_mode 输入栏)claw cursor orche 离线 → 重连失败。
+    /// 验证 insert 内键盘触发重连(不需 esc 切 normal)。
+    #[test]
+    fn ctrl_r_insert_mode_triggers_reconnect() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        app.insert_mode = true;
+        app.flat = vec![Session {
+            harness_type: "openclaw".into(), session_id: "agent:main:main".into(), harness_id: "h".into(),
+            cwd: None, running: false,
+        }];
+        app.cursor = 0;
+        app.handle_base_key(&KeyEvent::new(KeyCode::Char('r'), crossterm::event::KeyModifiers::CONTROL));
+        let st = app.turn_status.clone().unwrap_or_default();
+        assert!(st.contains("重连"), "insert Ctrl+R claw → 触发重连,实际: {}", st);
+    }
+
+    /// Ctrl+C(insert 无选区)清空输入区。
+    #[test]
+    fn ctrl_c_clears_input() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        app.insert_mode = true;
+        app.textarea.set_text("hello world");
+        app.turn_msg = "hello world".to_string();
+        app.handle_base_key(&KeyEvent::new(KeyCode::Char('c'), crossterm::event::KeyModifiers::CONTROL));
+        assert!(app.textarea.is_empty(), "Ctrl+C 清空: {}", app.textarea.text());
+        assert!(app.turn_msg.is_empty());
+    }
+
+    /// Ctrl+Backspace(insert)删一个词。
+    #[test]
+    fn ctrl_bs_deletes_word() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        app.insert_mode = true;
+        app.textarea.set_text("hello world");
+        app.textarea.set_cursor(11);
+        app.handle_base_key(&KeyEvent::new(KeyCode::Backspace, crossterm::event::KeyModifiers::CONTROL));
+        assert_eq!(app.textarea.text(), "hello ", "Ctrl+BS 删词: {}", app.textarea.text());
+    }
+
+    /// r(normal)无 cursor session → 兜底普通刷新(不 panic)。
+    #[test]
+    fn r_key_no_cursor_falls_back_to_refresh() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        app.insert_mode = false;
+        app.flat = vec![];
+        // 不 panic 即通过(handle_base_key 返 false)。
+        let quit = app.handle_base_key(&KeyEvent::new(KeyCode::Char('r'), crossterm::event::KeyModifiers::empty()));
+        assert!(!quit);
     }
 
     /// new 弹窗 picker:c=claw 选(不触网,orche 离线 → 候选默认 ["main"])。
@@ -2947,7 +3558,7 @@ mod tests {
         app.panel = Panel::Control;
         app.insert_mode = false;
         app.flat = vec![Session {
-            harness_type: "openclaw".into(), session_id: "s1".into(), harness_id: "h".into(),
+            harness_type: "openclaw".into(), session_id: "s1".into(), harness_id: "h".into(), cwd: None, running: false,
         }];
         app.cursor = 0;
         app.handle_base_key(&KeyEvent::new(KeyCode::Char('F'), crossterm::event::KeyModifiers::empty()));
