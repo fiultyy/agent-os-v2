@@ -58,11 +58,6 @@ pitfail_registry: Any = None
 # 后 record_turn 落库;/v1/conversations API + call-site 均 ``is not None`` guard。
 conversation_registry: Any = None
 
-# ── Canvas event emitter(通电) ────────────────────────────────────
-# SessionEventEmitter 实例(engine.py 装配)。chat.py /execute + _node_tool 经事件
-# 工厂 emit tick/tool 事件 → WS 推实时画布。None-guard(装配失败不崩主路径)。
-canvas_emitter: Any = None
-
 # ── Observe client (T4 multi-harness-observe) ─────────────────────
 # ObserveClient 实例(engine.py 装配)。chat.py /execute + _node_tool 经此推泛化
 # turn 事件 → observe-service WS ingest。None-guard(observe-service 不可达不崩
