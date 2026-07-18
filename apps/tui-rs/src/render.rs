@@ -789,7 +789,7 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
     // body:对话=chat 卷轴(主)、flow=lane+DAG、属性=props。
     match app.control_right_tabs.active {
         0 => {
-            let (ev_lines, n_turns) = if let Some(evs) = app.events.get(&key) {
+            let (mut ev_lines, n_turns) = if let Some(evs) = app.events.get(&key) {
                 // B1 缓存:cursor session key + 事件数不变 → 复用(消除每帧 render_turn_stream 重建)。
                 let count = evs.len();
                 let need = app.cached_turn_lines.as_ref().map_or(true, |c| c.0 != key || c.1 != count);
@@ -811,6 +811,17 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
                 ))], 0)
             };
             app.control_turn_count = n_turns;
+            // optimistic pending 行(cache 外,每帧 spinner 变):本地立即回显 + 跑马灯特效,
+            // drain_ws 收 orche 事件清 pending_turn 后自动消失(被真实 user message 行替代)。
+            if let Some(msg) = app.pending_turn.as_ref() {
+                use crate::components::control::SPINNER;
+                let sp = SPINNER[app.spinner_frame % SPINNER.len()];
+                ev_lines.push(Line::from(vec![
+                    Span::styled(format!("{} ", sp),
+                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::styled(msg.clone(), Style::default().fg(Color::White)),
+                ]));
+            }
             app.control_chat_scroll.set_content(ev_lines);
             // ScrollView.render 内部按 follow_tail_flag 自动追底(内容超视口→最后一页,不超→从顶)。
             app.control_chat_scroll.follow_tail_flag = app.chat_follow_tail;

@@ -19,6 +19,10 @@ use ratatui::{
     Frame,
 };
 
+/// codex 风格 braille spinner(跑马灯):optimistic pending 行前缀动画特效,
+/// orche 真事件确认前显(render.rs 取 SPINNER[spinner_frame % len])。
+pub const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
 /// Control 按钮(label, id, base_color, action_name)。
 /// ADR-1:按钮已从 InputBar 删除(动作走键盘)。本常量保留供 key 路由参考(id→action 映射)。
 pub const CONTROL_BUTTONS: [(&str, usize, Color, &str); 8] = [

@@ -663,6 +663,11 @@ pub struct App {
     /// raw-exec 待执行 spawn(`e` 键 / 按钮3 设置)。run() loop 消费它:
     /// 挂起 TUI raw mode + alt screen → 子进程(claude --resume / openclaw)接管终端 → 退出后恢复 + 全重绘。
     pub pending_spawn: Option<(crate::components::raw_exec::Harness, Option<String>)>,
+    /// optimistic 回显:do_turn 立即存用户消息(本地显 spinner 跑马灯),
+    /// drain_ws 收 orche 该 cursor session 事件 → 确认 → None(去特效)。根治输入回显延迟。
+    pub pending_turn: Option<String>,
+    /// spinner 动画帧(Tick 递增,render 取 SPINNER[frame % len]);pending 时 poll 缩 80ms 流畅。
+    pub spinner_frame: usize,
     /// Control 输入模式:true=所有字母进 turn_msg(输入栏可自由打字,不受 t/s/p/h 等快捷键抢占);
     /// Esc 退出到快捷键模式(此时 t/s/f/G/D/R/p/h 等生效),`i` 再进入。默认 true:进 Control 即可打字。
     pub insert_mode: bool,
@@ -802,6 +807,8 @@ impl App {
             orche_online: true, // 默认假设在线,首次预检刷新
             last_action: None,
             pending_spawn: None,
+            pending_turn: None,
+            spinner_frame: 0,
             insert_mode: true,
             textarea: crate::components::textarea::Textarea::new(),
             textarea_state: crate::components::textarea::TextareaState::default(),
@@ -894,15 +901,17 @@ impl App {
         let (ht, sid) = self.flat.get(self.cursor)
             .map(|s| (norm_ht(&s.harness_type), s.session_id.clone()))
             .unwrap_or_else(|| ("claw".to_string(), CLAW_SESSION.to_string()));
-        let st = trigger_turn(&ht, &sid, &self.turn_msg);
-        self.turn_status = st;
-        self.fetch_current();
-        if ht == "claw" {
-            self.fetch_claw_events();
-        }
-        // 发送后清空输入栏(Enter/t 发送即清,Cursor 式 chat 语义)。
+        let msg = self.turn_msg.clone();
         self.turn_msg.clear();
-        // IT4:发送后聚焦最新——置 tail=true(后续 drain_ws/render 跟随滚底)+ 立即滚底兜底。
+        // optimistic 立即回显:本地 pending(对话区 spinner 跑马灯),不等 orche 往返。
+        // trigger_turn 后台线程发(不阻塞 event loop);drain_ws 收 orche cursor session 事件
+        // → 确认 → 清 pending(去特效)。根治"输入到上方显示"延迟(原同步 trigger_turn+fetch_current 阻塞)。
+        if !msg.trim().is_empty() {
+            self.pending_turn = Some(msg.clone());
+            let (ht2, sid2) = (ht.clone(), sid.clone());
+            std::thread::spawn(move || { let _ = trigger_turn(&ht2, &sid2, &msg); });
+        }
+        // 发送后聚焦最新——置 tail=true(后续 drain_ws/render 跟随滚底)+ 立即滚底兜底。
         self.chat_follow_tail = true;
         self.control_chat_scroll.scroll_to_bottom();
     }
@@ -1274,6 +1283,8 @@ impl App {
                 // flow 事件经 WS 推送(drain_ws → app.flows[i].status)。
                 // fetch_claw_events/refresh_flows 不再在 Tick 调(保留方法定义,业务不变)。
                 self.drain_ws();
+                // spinner 跑马灯帧推进(pending 时 main.rs poll 缩 80ms → ~12fps 流畅)。
+                self.spinner_frame = self.spinner_frame.wrapping_add(1);
                 // PasteBurst flush:超时 burst 一次性插入(tmux 无 bracketed 时粘贴靠此时序 flush)
                 if self.panel == Panel::Control && self.insert_mode {
                     use crate::components::paste_burst::FlushResult;
@@ -2497,6 +2508,9 @@ impl App {
     /// 非阻塞收 WS 事件,累积进 app.events[key](turn 事件)。
     /// 主 loop 每帧调(Tick 或 poll 间隙)。WS manager 未注入时 no-op。
     pub fn drain_ws(&mut self) {
+        // optimistic 确认:orche 推回 cursor session 事件 → 本地 pending 已被 gateway 接受 → 清(去 spinner)。
+        let cursor_key = self.flat.get(self.cursor)
+            .map(|s| format!("{}/{}", s.harness_type, s.session_id));
         // ponytail: 先抽干 channel 到本地 Vec(不可变借 self.ws),再应用(可变借 self)。
         // 避免 try_recv 借 self.ws 期间可变借 self.events/instances 的 borrow 冲突。
         let msgs: Vec<crate::ws::WsMsg> = {
@@ -2513,6 +2527,10 @@ impl App {
         for msg in msgs {
             match msg {
                 crate::ws::WsMsg::Event { key, ev } => {
+                    // optimistic 确认:cursor session 收到任意 orche 事件 = gateway 已处理 send → 清 pending。
+                    if cursor_key.as_deref() == Some(key.as_str()) {
+                        self.pending_turn = None;
+                    }
                     // 累积 turn 事件(同 fetch_events 效果:events[key].push + 实例去重计数)。
                     let evs = self.events.entry(key.clone()).or_default();
                     // IT7:去重——REST fetch_events(替换)+ WS drain_ws(追加)时序重叠时,
@@ -3588,6 +3606,28 @@ mod tests {
         app.do_turn();
         assert!(app.chat_follow_tail, "do_turn sets tail=true");
         assert_eq!(app.control_chat_scroll.offset, 39, "scroll_to_bottom locks to total-1");
+    }
+
+    /// optimistic 回显:do_turn 非空消息立即设 pending_turn(本地 spinner 跑马灯)+ 清 turn_msg;
+    /// 空消息不覆盖。trigger_turn 后台线程发(不阻塞;session 用不存在的,避免污染真实 main)。
+    #[test]
+    fn do_turn_sets_optimistic_pending() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        app.flat = vec![Session {
+            harness_type: "openclaw".into(),
+            session_id: "agent:test:optimistic-no-such-session".into(),
+            harness_id: "h".into(), cwd: None, running: true,
+        }];
+        app.cursor = 0;
+        app.turn_msg = "hello world".into();
+        app.do_turn();
+        assert!(app.pending_turn.is_some(), "非空消息 optimistic 立即回显 pending");
+        assert_eq!(app.pending_turn.as_deref(), Some("hello world"));
+        assert_eq!(app.turn_msg, "", "turn_msg 清空(避免重发)");
+        app.turn_msg = "   ".into();
+        app.do_turn();
+        assert_eq!(app.pending_turn.as_deref(), Some("hello world"), "空消息不重置 pending");
     }
 
     /// IT4 ③:PgUp 脱离跟尾(tail=false),PgDn 近底重新跟尾(tail=true)。normal 模式。
