@@ -136,6 +136,21 @@ user_prompt / history。
 (`{status:'error'}` 返回值非 raise,`on_tool_execute_error` 不触发)/ P8 主路径退役(依赖
 P5/P6/P7 + test_multi_turn_tool_loop 重写)/ R2 cache_control 实测。
 
+## defer 收尾(2026-07-18,全部闭环)
+
+原 must_defer / 后续可选 6 项逐一终态(主编排逐项解决,commit f743376/12ba6e6/28138e8):
+
+| defer | 终态 | 证据 |
+|---|---|---|
+| **R2 cache_control 实测** | ✅ **实测命中** | `scripts/check_r2_cache.py`:智谱 `/api/anthropic`(glm-4.7)两 turn `cache_read_tokens=2176`(2208 input 中 98% cache 读)。AnthropicModelSettings cache_control 生效,零降级 |
+| **native message_history 持久化** | ✅ **done** | `OrchSessionStore` 加 `messages` 列(JSON)+ `_ensure_column` migration;turn 后 `_persist_native_messages` 写,restore/孤儿重建 `_load_native_messages` 回填。重启不丢多轮上下文(f743376) |
+| **profile/memory capability 注入** | ✅ **memory done / profile YAGNI** | MemoryCapability 注入 `_build_native_session`(ExperienceTool+KGMemoryTool 惰性单例 `_get_memory_tools`,defer_loading recall;env gate);ProfileCapability 不注入——native 用扁平 `instructions=system_prompt`,ProfileRegistry 全仓零装配,分层 profile 无 native 消费者(12ba6e6) |
+| **_execute_parallel 换 agent_turn_node** | ✅ **评估不做** | `run_agent_turn` 是 `_build_parallel_graph` 正确原语(v2 per-agent model/profile + None-safe 降级 + R1 分支不写 memory)。换 `agent_turn_node`(单一智谱 glm anthropic)会:① 扁平化多 agent(丢 per-agent model)② 破 R1(MemoryWriter 分支写 memory)③ 丢 None-safe(`ANTHROPIC_AUTH_TOKEN` 缺 raise vs 降级)④ 通道切换(paas→anthropic)。两路径职责分离:native `/h` 走 `agent_turn_node`,v2 编排走 `run_agent_turn` |
+| **P7 SubAgents** | ⬜ **YAGNI defer** | pydantic-ai-harness experimental 单-agent 内委派,锁版本 + 真需才上。native session 无委派需求(多 agent 走 graph loop)。capability 框架已支持,真需时再加 |
+| **docs curl :8000 归档** | ✅ **不存在** | `docs/` 零 .md,`:8000` 零命中(随 gateway/web 退役清理消除,无需归档) |
+
+**R2 实测结论关键**:此前"智谱端点命中率可能变"的 must_defer 经实测确认命中率优秀(98% input token cache 读),P8 主路径 cache 无虞——AnthropicModelSettings 替代 ContextCompiler/static_count 成立。
+
 ## 后续可选(非本 ADR 范围)
 
 - flow.py 拓扑层未来若评估用 pydantic-graph,需先解 data-driven DSL → type-driven graph 编译器问题(本 ADR 不做)
