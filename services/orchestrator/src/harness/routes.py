@@ -201,6 +201,7 @@ async def _build_native_session(session_id: str) -> Dict[str, Any]:
         GuardrailCapability,
         MemoryWriterCapability,
         ObserveCapability,
+        ToolBridgeCapability,
         make_skill_capabilities,
     )
     from .emit import ObserveEmitter
@@ -227,6 +228,12 @@ async def _build_native_session(session_id: str) -> Dict[str, Any]:
             knowledge_graph=_state.knowledge_graph,
             agent_id=session_id,
             session_id=session_id,
+        ),
+        # P8 ToolBridge:v2 ToolRegistry → execute_tool dispatch(模型经它调 v2 tool)。
+        # P7 pitfail:tool_executor 返 {status:'error'} 非 raise → wrapper 内显式计数。
+        ToolBridgeCapability(
+            tool_executor=_state.tool_executor,
+            pitfail_registry=_state.pitfail_registry,
         ),
         GuardrailCapability(guardrail=Guardrail()),
         *skill_caps,

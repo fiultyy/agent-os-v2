@@ -14,6 +14,7 @@ from .memory_writer_capability import MemoryWriterCapability
 from .observe_capability import ObserveCapability
 from .profile_capability import ProfileCapability
 from .skill_capability import SkillCapability, make_skill_capabilities
+from .tool_bridge_capability import ToolBridgeCapability
 
 __all__ = [
     "ProfileCapability",
@@ -22,5 +23,6 @@ __all__ = [
     "GuardrailCapability",
     "ObserveCapability",
     "SkillCapability",
+    "ToolBridgeCapability",
     "make_skill_capabilities",
 ]
