@@ -721,7 +721,7 @@ pub struct App {
 
 /// IT2 节点 C:new 弹窗 harness 类型选择。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum NewKind { Claw, Cc }
+pub enum NewKind { Claw, Cc, AoV2 }
 
 /// 右键分区上下文菜单的可执行操作。
 #[derive(Clone, Debug)]
@@ -1453,6 +1453,13 @@ impl App {
                 self.new_cc_input.clear();
                 true
             }
+            KeyCode::Char('o') => {
+                // 选 agent-os-v2(自研 native harness):无需 agent/cwd,服务端自动生成 sid。
+                self.new_popup = Some(NewKind::AoV2);
+                self.new_candidates = vec![];
+                self.new_idx = 0;
+                true
+            }
             KeyCode::Char('j') | KeyCode::Down => {
                 if self.new_popup.is_some() && self.new_idx + 1 < self.new_candidates.len() {
                     self.new_idx += 1;
@@ -1525,8 +1532,21 @@ impl App {
                     self.turn_status = Some("create cc session 失败(orche :8001 不可达?)".to_string());
                 }
             }
+            Some(NewKind::AoV2) => {
+                // agent-os-v2:native in-process pydantic-ai Agent(自研 harness)。
+                // POST 空 body,服务端 routes.py 自动生成 12-hex sid(无需 cwd/agent)。
+                if let Some(sid) = create_session("agent-os-v2", None) {
+                    self.turn_status = Some(format!("created ao session: {}", trunc(&sid, 16)));
+                    self.close_popup("new");
+                    self.new_popup = None;
+                    self.refresh_sessions();
+                    self.focus_new_session(&sid);
+                } else {
+                    self.turn_status = Some("create ao session 失败(orche :8001 不可达?)".to_string());
+                }
+            }
             None => {
-                self.turn_status = Some("(先选类型:c=claw / d=claude-code)".to_string());
+                self.turn_status = Some("(先选类型:c=claw / d=claude-code / o=agent-os-v2)".to_string());
             }
         }
     }
@@ -3720,6 +3740,18 @@ mod tests {
         app.new_popup = Some(NewKind::Cc);
         app.handle(&crate::events::AppEvent::Paste("/home/x".into()));
         assert_eq!(app.new_cc_input, "/home/x");
+    }
+
+    /// new 弹窗 o=agent-os-v2 选(自研 native harness,无候选,服务端自动生成 sid)。
+    #[test]
+    fn new_popup_ao_pick_sets_no_candidates() {
+        let mut app = App::new(crate::kitty::detect());
+        app.open_new_popup();
+        let handled = app.handle_popup_key(&KeyEvent::new(
+            KeyCode::Char('o'), crossterm::event::KeyModifiers::empty()));
+        assert!(handled, "new 弹窗 o 被消费");
+        assert_eq!(app.new_popup, Some(NewKind::AoV2));
+        assert!(app.new_candidates.is_empty(), "ao 无候选");
     }
 
     // ── IT7 ② 弹窗可点击 ────────────────────────────────────────────

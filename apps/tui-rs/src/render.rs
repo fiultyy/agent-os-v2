@@ -1161,11 +1161,14 @@ fn update_action_popup_bodies(app: &mut App) {
     // 行 0:harness 按钮(700/701),色块 + 公用描边分隔。
     let claw_mark = if matches!(app.new_popup, Some(NewKind::Claw)) { "[x]claw" } else { "[ ]claw" };
     let cc_mark = if matches!(app.new_popup, Some(NewKind::Cc)) { "[x]cc" } else { "[ ]cc" };
+    let ao_mark = if matches!(app.new_popup, Some(NewKind::AoV2)) { "[x]ao" } else { "[ ]ao" };
     lines.push(Line::from(vec![
         cyan_btn(format!(" {} ", claw_mark)),
         sep(),
         cyan_btn(format!(" {} ", cc_mark)),
-        Span::raw("  (c/d)"),
+        sep(),
+        cyan_btn(format!(" {} ", ao_mark)),
+        Span::raw("  (c/d/o)"),
     ]));
     match app.new_popup {
         None => lines.push(Line::from("(选类型后显候选)")),
@@ -1182,6 +1185,10 @@ fn update_action_popup_bodies(app: &mut App) {
                 let mark = if i == app.new_idx { "▸" } else { " " };
                 lines.push(Line::from(format!("{} {}", mark, c)));
             }
+        }
+        Some(NewKind::AoV2) => {
+            lines.push(Line::from("agent-os-v2:自研 native harness(无需 agent/cwd)"));
+            lines.push(Line::from("Enter 创建(服务端自动生成 session_id)"));
         }
     }
     // 末行:Create/Cancel(790/791),色块 + 公用描边。
@@ -1232,6 +1239,7 @@ fn register_new_popup_clickmap(app: &mut App) {
         let id = match app.new_popup {
             Some(NewKind::Claw) => 710 + (i - cand_start),
             Some(NewKind::Cc) => 720 + (i - cand_start),
+            Some(NewKind::AoV2) => continue, // ao 无候选行
             None => continue,
         };
         app.popup_clickmap.register(Rect::new(inner_x, y, inner_w, 1), id);
