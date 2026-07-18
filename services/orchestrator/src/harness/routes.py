@@ -213,6 +213,36 @@ def _persist_native_messages(session_id: str, messages: list) -> None:
         logger.warning("native messages persist failed (%s)", session_id)
 
 
+_memory_tools: tuple | None = None  # 惰性单例 (ExperienceTool, KGMemoryTool)
+
+
+def _get_memory_tools() -> tuple | None:
+    """惰性构造 ExperienceTool + KGMemoryTool 单例(避免 per-session executor 泄漏)。
+
+    依赖 _state.knowledge_graph;None 或构造失败 → None(MemoryCapability 不注入,
+    ADR-7)。首次调用构造,后续复用缓存(executor/conn 跨 session 共享)。
+    """
+    global _memory_tools
+    if _memory_tools is not None:
+        return _memory_tools
+    from src.services import _state
+    if _state.knowledge_graph is None:
+        return None
+    try:
+        from src.memory.experience_kg import ExperienceKG
+        from src.memory.kg_query_interface import KGQueryInterface
+        from src.memory.tools.experience_tool import ExperienceTool
+        from src.memory.tools.kg_memory_tool import KGMemoryTool
+        _memory_tools = (
+            ExperienceTool(ExperienceKG()),
+            KGMemoryTool(KGQueryInterface(_state.knowledge_graph)),
+        )
+        return _memory_tools
+    except Exception:
+        logger.warning("memory tools construct failed; MemoryCapability not injected")
+        return None
+
+
 async def _build_native_session(
     session_id: str, messages: list | None = None,
 ) -> Dict[str, Any]:
@@ -220,11 +250,13 @@ async def _build_native_session(
 
     ADR pydantic-ai-v2-adoption P8:native turn 走 /h/agent-os-v2。capabilities 注入
     ObserveCapability(真 emitter→observe)+ GuardrailCapability(护 native tool)。
-    profile/memory/skill 可按需追加(P8 先 observe+guardrail 基础通电)。
+    memory(P3 recall,defer_loading)+ skill 已通电;profile YAGNI(native 用扁平
+    instructions=system_prompt,分层 ProfileRegistry 未装配,ADR)。
     """
     from .native_agent import HARNESS_TYPE, build_native_agent
     from .capabilities import (
         GuardrailCapability,
+        MemoryCapability,
         MemoryWriterCapability,
         ObserveCapability,
         ToolBridgeCapability,
@@ -245,7 +277,7 @@ async def _build_native_session(
         skill_caps = make_skill_capabilities(SkillLoader())  # 扫 SKILL.md(defer 披露)
     except Exception:
         skill_caps = []  # 扫描失败不阻塞 native(P6 孤岛通电 best-effort)
-    agent = build_native_agent(capabilities=[
+    caps = [
         ObserveCapability(emitter=emitter, harness_id=harness_id, session_id=session_id),
         # P5 MemoryWriter(写侧,自动沉淀):每轮 tool_result + 用户轮结束四件套。
         # env gate:memory_event_bus/knowledge_graph None → no-op(ADR-7)。
@@ -263,7 +295,13 @@ async def _build_native_session(
         ),
         GuardrailCapability(guardrail=Guardrail()),
         *skill_caps,
-    ])
+    ]
+    # P3 MemoryCapability(recall 读侧,defer_loading):模型 load_capability('memory')
+    # 后见 experience_memory + kg_memory tool。glm 是否触发 load 需 e2e 验证(ADR)。
+    mt = _get_memory_tools()
+    if mt is not None:
+        caps.append(MemoryCapability(experience_tool=mt[0], kg_tool=mt[1]))
+    agent = build_native_agent(capabilities=caps)
     return {
         "agent": agent, "emitter": emitter, "messages": messages or [],
         "session_id": session_id, "harness_type": "agent-os-v2",

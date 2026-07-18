@@ -320,3 +320,35 @@ def test_load_native_messages_empty_when_unwritten(store):
     store.create("s3", "agent-os-v2", native_sid="s3")
     assert routes._load_native_messages("s3") == []
 
+
+# ── MemoryCapability 注入(defer4)─────────────────────────────────────
+
+def test_get_memory_tools_none_when_no_kg(monkeypatch):
+    """env gate:_state.knowledge_graph None → 不注入 MemoryCapability(ADR-7)。"""
+    import src.services._state as _st
+    monkeypatch.setattr(routes, "_memory_tools", None)
+    monkeypatch.setattr(_st, "knowledge_graph", None)
+    assert routes._get_memory_tools() is None
+
+
+def test_get_memory_tools_constructs_and_caches(monkeypatch):
+    """knowledge_graph 通电 → 构造 ExperienceTool+KGMemoryTool 单例,二次调缓存同对象
+    (避免 per-session ThreadPoolExecutor 泄漏)。"""
+    import src.memory.experience_kg as ekg_mod
+    import src.memory.tools.experience_tool as et_mod
+    import src.memory.tools.kg_memory_tool as kmt_mod
+    import src.memory.kg_query_interface as kqi_mod
+    import src.services._state as _st
+
+    monkeypatch.setattr(routes, "_memory_tools", None)
+    monkeypatch.setattr(_st, "knowledge_graph", MagicMock())  # 通电
+    exp_fake, kg_fake = MagicMock(), MagicMock()
+    monkeypatch.setattr(ekg_mod, "ExperienceKG", MagicMock())
+    monkeypatch.setattr(kqi_mod, "KGQueryInterface", MagicMock())
+    monkeypatch.setattr(et_mod, "ExperienceTool", MagicMock(return_value=exp_fake))
+    monkeypatch.setattr(kmt_mod, "KGMemoryTool", MagicMock(return_value=kg_fake))
+
+    mt1 = routes._get_memory_tools()
+    assert mt1 == (exp_fake, kg_fake)
+    assert routes._get_memory_tools() is mt1   # 缓存:二次调同对象
+
