@@ -64,10 +64,10 @@ pub fn render_popup(f: &mut Frame, screen: Rect, p: &mut Popup) {
     };
     let popup = tui_popup::Popup::new(body_text)
         .title(Line::from(format!(" {} ", p.title)).style(
-            Style::default().fg(Color::Black).bg(Color::Cyan),
+            Style::default().fg(crate::theme::DARK.bg).bg(crate::theme::DARK.border_accent),
         ))
-        .style(Style::default().bg(Color::Black))
-        .border_style(Style::default().fg(Color::Cyan));
+        .style(Style::default().bg(crate::theme::DARK.bg_surface))
+        .border_style(Style::default().fg(crate::theme::DARK.border_accent));
 
     // StatefulWidgetRef::render_ref 自带 Clear + Block + area 回填(支持后续 drag)。
     use ratatui::widgets::StatefulWidgetRef;

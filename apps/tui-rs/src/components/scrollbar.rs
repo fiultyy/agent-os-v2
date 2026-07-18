@@ -160,16 +160,10 @@ impl ScrollView {
             || (self.border_mode.is_none() && self.bordered);
         let inner = if use_top {
             // 与 render::region_block 同款:DarkGray 顶线 + Black bg + Cyan bold 标题。
-            let mut block = Block::default()
+            let block = Block::default()
                 .borders(Borders::TOP)
-                .border_style(Style::default().fg(Color::DarkGray))
-                .style(Style::default().bg(Color::Black));
-            if let Some(t) = &self.title {
-                block = block.title(ratatui::text::Line::from(Span::styled(
-                    t.clone(),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                )));
-            }
+                .border_style(Style::default().fg(crate::theme::DARK.border_accent))
+                .style(Style::default().bg(crate::theme::DARK.bg_surface));
             let inner = block.inner(area);
             f.render_widget(block, area);
             inner

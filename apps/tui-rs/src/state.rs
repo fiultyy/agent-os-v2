@@ -480,7 +480,6 @@ pub struct TrackedFlow {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Panel {
-    Home,
     Flows,
     Observe,
     Control,
@@ -488,7 +487,6 @@ pub enum Panel {
 impl Panel {
     pub fn label(self) -> &'static str {
         match self {
-            Panel::Home => "HOME ◉ 概览",
             Panel::Flows => "FLOWS ◐ 编排 DAG",
             Panel::Observe => "OBSERVE ☰ 纵向堆叠",
             Panel::Control => "CONTROL ⌘ orchestrator",
@@ -496,10 +494,9 @@ impl Panel {
     }
     pub fn next(self) -> Self {
         match self {
-            Panel::Home => Panel::Flows,
             Panel::Flows => Panel::Observe,
             Panel::Observe => Panel::Control,
-            Panel::Control => Panel::Home,
+            Panel::Control => Panel::Flows,
         }
     }
 }
@@ -581,7 +578,6 @@ impl FocusTarget {
                 Panel::Control => FocusTarget::ControlSession(0), // F3:大纲首(左大纲主)
                 Panel::Observe => FocusTarget::ObserveSession,
                 Panel::Flows => FocusTarget::FlowsFlow(0),
-                Panel::Home => FocusTarget::TabBar, // Home 无可聚焦元素,停在 TabBar
             },
             FocusTarget::ControlSession(_) if panel == Panel::Control => FocusTarget::ControlButton(0), // F3:大纲 → 输入栏按钮
             _ => FocusTarget::TabBar,
@@ -749,7 +745,7 @@ pub struct ContextMenu {
 impl App {
     pub fn new(term: TermCap) -> Self {
         Self {
-            panel: Panel::Home,
+            panel: Panel::Control,
             sessions: Default::default(),
             flat: vec![],
             cursor: 0,
@@ -762,18 +758,20 @@ impl App {
             instances: HashMap::new(),
             flows: vec![],
             flow_cursor: 0,
-            tabbar: TabBar::new(vec![
-                "Home".to_string(),
-                "Flows".to_string(),
-                "Observe".to_string(),
-                "Control".to_string(),
-            ])
-            .colors(vec![
-                ratatui::style::Color::Green,
-                ratatui::style::Color::Blue,
-                ratatui::style::Color::Cyan,
-                ratatui::style::Color::Magenta,
-            ]),
+            tabbar: {
+                let mut t = TabBar::new(vec![
+                    "Flows".to_string(),
+                    "Observe".to_string(),
+                    "Control".to_string(),
+                ])
+                .colors(vec![
+                    crate::theme::DARK.accent2,
+                    crate::theme::DARK.accent,
+                    crate::theme::DARK.done,
+                ]);
+                t.active = 2; // 默认主 tab Control
+                t
+            },
             mouse: MouseCursor::default(),
             tab_area: Rect::default(),
             observe_split: HSplit::new(35),
@@ -793,10 +791,9 @@ impl App {
             control_h_dragging: false,
             control_right_tabs: TabBar::new(vec![
                 // ADR-3:属性改 props 弹窗(i 键),右 tab 缩 2(对话/flow)。
-                " 对话 ".to_string(),
-                " flow ".to_string(),
-            ])
-            .top_border(),
+                "对话".to_string(),
+                "flow".to_string(),
+            ]),
             right_tab_area: Rect::default(),
             control_groups: vec![],
             clickmap: ClickMap::new(),
@@ -1772,22 +1769,20 @@ impl App {
         }
     }
 
-    /// 把 tabbar.active 同步到 self.panel(0=Home,1=Flows,2=Observe,3=Control)。
+    /// 把 tabbar.active 同步到 self.panel(0=Flows,1=Observe,2=Control)。
     pub fn sync_panel_from_tab(&mut self) {
         self.panel = match self.tabbar.active {
-            0 => Panel::Home,
-            1 => Panel::Flows,
-            2 => Panel::Observe,
+            0 => Panel::Flows,
+            1 => Panel::Observe,
             _ => Panel::Control,
         };
     }
     /// 把 self.panel 同步到 tabbar.active(render 前确保一致)。
     pub fn sync_tab_from_panel(&mut self) {
         let idx = match self.panel {
-            Panel::Home => 0,
-            Panel::Flows => 1,
-            Panel::Observe => 2,
-            Panel::Control => 3,
+            Panel::Flows => 0,
+            Panel::Observe => 1,
+            Panel::Control => 2,
         };
         self.tabbar.select(idx);
     }
@@ -2327,21 +2322,16 @@ impl App {
                 false
             }
             KeyCode::Char('1') => {
-                self.panel = Panel::Home;
-                self.sync_tab_from_panel();
-                false
-            }
-            KeyCode::Char('2') => {
                 self.panel = Panel::Flows;
                 self.sync_tab_from_panel();
                 false
             }
-            KeyCode::Char('3') => {
+            KeyCode::Char('2') => {
                 self.panel = Panel::Observe;
                 self.sync_tab_from_panel();
                 false
             }
-            KeyCode::Char('4') => {
+            KeyCode::Char('3') | KeyCode::Char('4') => {
                 self.panel = Panel::Control;
                 self.sync_tab_from_panel();
                 // ADR-3:进入 Control 时预检 orche health(非阻塞,失败默认 false)。
@@ -2953,8 +2943,6 @@ mod tests {
         assert_eq!(FocusTarget::TabBar.cycle(Panel::Observe), FocusTarget::ObserveSession);
         // Flows:TabBar → FlowsFlow(0)。
         assert_eq!(FocusTarget::TabBar.cycle(Panel::Flows), FocusTarget::FlowsFlow(0));
-        // Home:无元素,停在 TabBar。
-        assert_eq!(FocusTarget::TabBar.cycle(Panel::Home), FocusTarget::TabBar);
     }
 
     /// ADR-2:键盘 BackTab(Shift+Tab)切焦点(经 handle)。
@@ -3115,7 +3103,7 @@ mod tests {
         assert_eq!(app.turn_msg, "ab");
         assert_eq!(app.textarea.text(), "ab");
         // 非 Control panel:Backspace 不影响 turn_msg。
-        app.panel = Panel::Home;
+        app.panel = Panel::Flows;
         app.handle_base_key(&KeyEvent::new(KeyCode::Backspace, crossterm::event::KeyModifiers::empty()));
         assert_eq!(app.turn_msg, "ab", "Backspace outside Control must not edit turn_msg");
     }
@@ -3655,7 +3643,7 @@ mod tests {
     #[test]
     fn paste_ignored_outside_control() {
         let mut app = App::new(crate::kitty::detect());
-        app.panel = Panel::Home;
+        app.panel = Panel::Flows;
         app.handle(&crate::events::AppEvent::Paste("x".into()));
         assert_eq!(app.textarea.text(), "", "Home panel ignores paste");
     }

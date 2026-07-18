@@ -25,7 +25,7 @@ pub struct Theme {
 
 pub const DARK: Theme = Theme {
     bg: Color::Black,
-    bg_surface: Color::DarkGray,
+    bg_surface: Color::Rgb(26, 27, 38),  // 卡片/面板层(比 bg 稍亮,层次区分)
     fg: Color::White,
     fg_muted: Color::DarkGray,
     fg_subtle: Color::Gray,

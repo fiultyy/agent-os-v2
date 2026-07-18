@@ -18,15 +18,12 @@ use ratatui::{
 };
 
 /// 功能分区:ADR-5 色块 + 顶部描边(去左/右/下全边框省空间)。cyan bold 标题 + 顶线 + bg 色块。
-fn region_block(title: &'static str) -> Block<'static> {
+fn region_block(_title: &'static str) -> Block<'static> {
+    // title 去掉(分区标题难堪);保参数避免改 9 处调用。仅留顶线 + bg_surface 卡片层。
     Block::default()
         .borders(Borders::TOP)
-        .border_style(Style::default().fg(DARK.border))
-        .style(Style::default().bg(DARK.bg))
-        .title(Line::from(Span::styled(
-            title,
-            Style::default().fg(DARK.accent).add_modifier(Modifier::BOLD),
-        )))
+        .border_style(Style::default().fg(DARK.border_accent))
+        .style(Style::default().bg(DARK.bg_surface))
 }
 
 // ═══ mock flow 演示数据(P1 保留)═══════════════════════════════════
@@ -608,6 +605,12 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
     // 窄大纲(色块组标签 + session 列)| 右主区(StatusBar + 右tab + body + 输入栏)。
     app.control_area = area; // 缓存供 mouse drag/hit。
     let [left, bar, right] = app.control_split.rects(area);
+    // HSplit bar:单线分隔(border_accent 竖线,替代空白间隔;可拖拽调大纲宽)。
+    for y in bar.y..bar.bottom() {
+        if let Some(cell) = f.buffer_mut().cell_mut((bar.x, y)) {
+            cell.set_char('│').set_style(Style::default().fg(DARK.border_accent));
+        }
+    }
 
     // ── 左区:region_block 边框内水平切 [色块列(2) | session 列] ──
     let left_block = region_block(" 大纲 ");
@@ -771,7 +774,7 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
     let input_h = (dh + 4).min(12);
     let right_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(1), Constraint::Length(input_h)])
+        .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(input_h)])
         .split(right);
     let [tabs_area, body_area, input_area] = [right_chunks[0], right_chunks[1], right_chunks[2]];
 
@@ -882,6 +885,8 @@ fn render_props_lines(app: &App) -> Vec<Line<'static>> {
 /// Home dashboard 三张结构化卡片(ADR-5 region_block:TOP 描边 + bg + cyan 标题)。
 /// 布局:[Sessions 50% | Flows 50%](上半) + [Cursor Session 全宽](下半)。
 /// read-only 读 App 业务字段。cursor 所在 harness 组高亮。
+/// Home tab 已移除(默认 Control),保留供 --dump 演示/未来用。
+#[allow(dead_code)]
 pub fn draw_home(f: &mut Frame, area: Rect, app: &App) {
     use crate::components::position;
     use crate::state::harness_tag;
@@ -1033,7 +1038,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // 顶栏 TabBar(3) / 主区(Min)/ 底栏 hint(1)。
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(1), Constraint::Length(1)])
+        .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)])
         .split(area);
 
     // 顶栏:TabBar 渲染(ADR-1:传鼠标位置做悬停高亮)+ 缓存 tab_area 供鼠标 hit。
@@ -1041,15 +1046,31 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     app.tabbar.render_with_hover(f, chunks[0], hover);
     app.tab_area = chunks[0];
 
-    // ADR-2:键盘焦点在 TabBar 时,在 tab 栏底部加 ▶ 聚焦标记。
-    if matches!(app.focus, FocusTarget::TabBar) {
-        let focus_rect = Rect::new(chunks[0].x, chunks[0].y, 1, chunks[0].height);
-        if let Some(cell) = f.buffer_mut().cell_mut((focus_rect.x, focus_rect.y + focus_rect.height.saturating_sub(1))) {
-            let mut s = cell.style();
-            s = s.fg(Color::Yellow).add_modifier(Modifier::BOLD);
-            cell.set_char('▶').set_style(s);
+    // status(tab 右侧,info 按钮左):Flows R/C/F 计数 + cursor sid(opencode 紧凑)。
+    let (mut fr, mut fc, mut ff) = (0u32, 0u32, 0u32);
+    for tf in &app.flows {
+        match tf.status.as_ref().map(|s| s.status.as_str()).unwrap_or("") {
+            "running" => fr += 1,
+            "completed" => fc += 1,
+            "failed" => ff += 1,
+            _ => {}
         }
     }
+    let cur_sid = app.flat.get(app.cursor).map(|s| trunc(&s.session_id, 16)).unwrap_or_default();
+    let st_line = Line::from(vec![
+        Span::styled(" Flows ", Style::default().fg(DARK.fg_muted)),
+        Span::styled(format!("R{} ", fr), Style::default().fg(DARK.success)),
+        Span::styled(format!("C{} ", fc), Style::default().fg(DARK.done)),
+        Span::styled(format!("F{} ", ff), Style::default().fg(DARK.error)),
+        Span::styled(format!("· {}", cur_sid), Style::default().fg(DARK.fg_muted)),
+    ]);
+    let st_w = (st_line.width() as u16).min(chunks[0].width.saturating_sub(16));
+    if st_w > 0 {
+        let st_area = Rect::new(chunks[0].right().saturating_sub(st_w as u16 + 8), chunks[0].y + 1, st_w as u16, 1);
+        f.render_widget(Paragraph::new(st_line).style(Style::default().bg(DARK.bg_surface)), st_area);
+    }
+
+    // ADR-2:键盘焦点 TabBar 标记(▶)已移除(多余,与 DARK 风格不搭)。
 
     // ADR-3:顶栏右端 i(id998→open_props)/×(id999→quit_requested)按钮。
     // IT5 ①:clickmap 区域覆盖顶栏全高(top.height=3:边框行+tab 行+边框行),
@@ -1080,7 +1101,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     // 主区:按 active tab 分发(ADR-1)。
     match app.panel {
-        Panel::Home => draw_home(f, chunks[1], app),
         Panel::Flows => draw_flow(f, chunks[1], app),
         Panel::Observe => draw_stack(f, chunks[1], app),
         Panel::Control => draw_control(f, chunks[1], app),

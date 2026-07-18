@@ -90,18 +90,11 @@ pub fn status_spans(app: &App) -> Vec<Span<'static>> {
     let turn_span = Span::styled(format!(" · {}/{}", cur_turn, tc), Style::default().fg(Color::DarkGray));
     let ht = crate::state::norm_ht(&s.harness_type);
     if ht == "claw" {
-        let conn = if s.running {
-            Span::styled(" ●连", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
-        } else {
-            Span::styled(" ⚠断", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
-        };
+        // 连接状态由最左 orche● 统一示(绿连/红断);claw 重连用 ^R / 右键 Reconnect(不占输入区)。
         vec![
             orche,
             Span::styled("  ", Style::default()),
             sid_span,
-            Span::styled(" · ", Style::default().fg(Color::DarkGray)),
-            conn,
-            Span::styled(" · [^R 重连]", Style::default().fg(Color::DarkGray)),
             turn_span,
         ]
     } else {
@@ -512,20 +505,15 @@ mod tests {
     }
 
     #[test]
-    fn status_claw_running_shows_connected_and_reconnect_hint() {
+    fn status_claw_shows_orche_and_sid_no_legacy_hint() {
+        // claw 连接状态由最左 orche● 统一示;claw 重连走 ^R/右键(不占输入区)。
+        // 故 status 不显旧 ●连/⚠断/^R 重连,只 orche● + sid + turn。
         let app = app_with_session("openclaw", "agent:main:main", true, None);
         let s = spans_content(&status_spans(&app));
-        assert!(s.contains("●连"), "claw running 应显 ●连: {}", s);
-        assert!(s.contains("^R 重连"), "claw 应显重连提示: {}", s);
-        assert!(!s.contains("⚠断"), "running 不应显断: {}", s);
-    }
-
-    #[test]
-    fn status_claw_disconnected_shows_warn() {
-        let app = app_with_session("claw", "s1", false, None);
-        let s = spans_content(&status_spans(&app));
-        assert!(s.contains("⚠断"), "claw not running 应显 ⚠断: {}", s);
-        assert!(s.contains("^R 重连"), "claw 应显重连提示: {}", s);
+        assert!(s.contains("●"), "claw 应显 orche●: {}", s);
+        assert!(s.contains("agent:main"), "claw 应显 sid: {}", s);
+        assert!(!s.contains("●连"), "不再显 ●连(由 orche● 统一): {}", s);
+        assert!(!s.contains("^R 重连"), "不再占输入区显 ^R 重连: {}", s);
     }
 
     #[test]

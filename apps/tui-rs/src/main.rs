@@ -219,7 +219,7 @@ fn run_dump() {
     let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
 
     // 1. base panels(4 tab:Home/Flows/Observe/Control,分层 layer 0)。
-    for (idx, panel) in [state::Panel::Home, state::Panel::Flows, state::Panel::Observe, state::Panel::Control].iter().enumerate() {
+    for (idx, panel) in [state::Panel::Flows, state::Panel::Observe, state::Panel::Control].iter().enumerate() {
         app.panel = *panel;
         terminal.draw(|f| render::draw(f, &mut app)).unwrap();
         println!("═══ ratatui · {} 视图(layer 0 base panel)═══", panel.label());
