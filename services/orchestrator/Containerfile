@@ -28,7 +28,8 @@ COPY src/ src/
 # data/ 运行时用 named volume 挂载(独立持久化,不与 host 服务共享);
 # LLM key 运行时 -e 注入(绝不 baked 进镜像)。
 RUN mkdir -p data
-EXPOSE 8000
+EXPOSE 8001
 
 # uvicorn src.engine:app —— cwd=/app 在 sys.path,src/__init__.py 使 src 成包
-CMD ["uvicorn", "src.engine:app", "--host", "0.0.0.0", "--port", "8000"]
+# 端口 8001 对齐 Dockerfile/start.sh/docker-compose(orchestrator 现役端口)
+CMD ["uvicorn", "src.engine:app", "--host", "0.0.0.0", "--port", "8001"]
