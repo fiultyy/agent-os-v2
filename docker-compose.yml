@@ -1,20 +1,7 @@
 services:
-  web:
-    build:
-      context: .
-      dockerfile: apps/web/Dockerfile
-      args:
-        # Next.js standalone rewrites 在 next build 时固化 env(runtime 无效),须 build 时注入容器名
-        # API_URL 不带 /v1:gateway 路由裸路径(main.py: /memories /agents /debug),带 /v1 会 404
-        - API_URL=http://gateway:8000
-        - ORCHESTRATOR_WS_URL=http://orchestrator:8001
-    ports:
-      - "3000:3000"
-    depends_on:
-      gateway:
-        condition: service_healthy
-
   gateway:
+    # web 弃用后 gateway SSE 代理(execute.py 已删)零消费者;保留待整体退役决策
+    # (auth.py JWT web 登录去留)。TUI/native 不经 gateway(走 /h + observe)。
     build:
       context: ./services/gateway
       dockerfile: Dockerfile
@@ -22,18 +9,15 @@ services:
       - "8000:8000"
     environment:
       - ORCHESTRATOR_URL=http://orchestrator:8001
-      # login intent 闭环:仅设 AUTH_API_KEYS 即可(/auth/token 独立于 AUTH_ENABLED 校验,
-      # auth.py:111 直接查 AUTH_API_KEYS)。不设 AUTH_ENABLED=true:那会让 require_auth 中间件
-      # 给全路由强制 Bearer(middleware.py:44-56),破坏其他 intent 无认证访问。login default_skip: true。
+      # login intent 闭环:仅设 AUTH_API_KEYS 即可(/auth/token 独立于 AUTH_ENABLED 校验)
       - AUTH_API_KEYS=qa-test-key-1
-      # aux 兜底 URL:aux profile 默认不启动,调用时 503(gateway _aux_call 降级),不阻塞启动
       - PROMPT_MANAGER_URL=http://prompt-manager:8002
       - RESOURCE_MANAGER_URL=http://resource-manager:8004
     depends_on:
       orchestrator:
         condition: service_healthy
     healthcheck:
-      # CMD-SHELL:docker-compose v1 把 CMD 数组按空格分割致 -c 脚本截断;改单字符串 sh -c 执行
+      # CMD-SHELL:docker-compose v1 把 CMD 数组按空格分割致 -c 脚本截断;改单字符串 sh -c
       test: ["CMD-SHELL", "python -c 'import urllib.request;urllib.request.urlopen(\"http://localhost:8000/health\")' || exit 1"]
       interval: 10s
       timeout: 5s
@@ -46,10 +30,12 @@ services:
     ports:
       - "8001:8001"
     volumes:
-      # sqlite 持久化:sqlitestore.py db_path="data/memories.db" + engine.py PITFALLS_DB=data/pitfalls.db(相对 /app)
+      # sqlite 持久化:sqlitestore.py db_path="data/memories.db" + engine.py PITFALLS_DB=data/pitfalls.db
       - ./services/orchestrator/data:/app/data
     environment:
       - GATEWAY_URL=http://gateway:8000
+      # orchestrator→observe(TUI 观测层;容器内用服务名,localhost 解析自身致 ingest 断)
+      - OBSERVE_URL=http://observe:8002
       # 私人系统:智谱 anthropic 协议 + glm-4.7(coding plan 额度在 /api/anthropic 通道)
       - LLM_API_FORMAT=anthropic
       - ANTHROPIC_BASE_URL=https://open.bigmodel.cn/api/anthropic
@@ -57,9 +43,6 @@ services:
       - LLM_ANTHROPIC_MODEL=glm-4.7
       - MEMORY_EVENT_BUS_ENABLED=1
       - MEMORY_RETRIEVER_ENABLED=1
-      # Embedding 配置化:本地 sentence-transformers(默认,需 torch)或 OpenAI 兼容 API
-      # 范例本地 LM Studio:host 127.0.0.1:16666 → 容器内 host.docker.internal(extra_hosts 映射)
-      # LM Studio 须先启动+加载 embedding 模型+开 server;否则召回失败(orchestrator 仍 healthy)
       - EMBEDDING_PROVIDER=api
       - EMBEDDING_BASE_URL=http://host.docker.internal:16666/v1
       - EMBEDDING_API_KEY=lm-studio
@@ -69,6 +52,26 @@ services:
       - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD-SHELL", "python -c 'import urllib.request;urllib.request.urlopen(\"http://localhost:8001/health\")' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  observe:
+    # TUI 观测层(web 弃用后 TUI 接力):收 orchestrator /ws/ingest + 推 TUI /ws/subscribe。
+    # 端口 8002 固定(tui-rs 硬编码 OBSERVE_WS=ws://localhost:8002)。与 prompt-manager
+    # aux profile 端口互斥(aux 默认不启动;若 --profile aux up 同启需手动处理)。
+    build:
+      context: ./services/observe
+      dockerfile: Dockerfile
+    ports:
+      - "8002:8002"
+    environment:
+      - OBSERVE_PORT=8002
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request;urllib.request.urlopen(\"http://localhost:8002/health\")' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5

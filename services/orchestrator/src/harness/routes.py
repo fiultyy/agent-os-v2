@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
 from typing import Any, Dict, Optional
 
@@ -37,7 +38,7 @@ VALID_TYPES = {"claw", "claude-code", "agent-os-v2"}
 
 # observe-service REST base (sessions are persisted in SQLite there; the TUI's
 # source of truth). orche delete must sync here or the count drifts.
-OBSERVE_REST_URL = "http://localhost:8002"
+OBSERVE_REST_URL = os.getenv("OBSERVE_URL", "http://localhost:8002")  # 容器部署 compose 注入 OBSERVE_URL=http://observe:8002
 
 # routes use "claw" as the harness key, but the openclaw client registers with
 # observe under harness_type="openclaw". Map so the DELETE hits the right row.

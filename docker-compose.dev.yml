@@ -5,30 +5,22 @@
 #   - `volumes` 列表:追加(production 已有项保留 + 新增项叠加)。
 #   - `environment` 列表:按 KEY 合并(同 KEY 覆盖,新 KEY 追加)。
 #   - `build`:mapping 合并,`dockerfile` 子键被覆盖(production → Dockerfile.dev)。
-#   - `build.args`:production web 的 API_URL / ORCHESTRATOR_WS_URL args 在 dev 无效
-#     (dev 不跑 next build),可保留不动。
 #
-# production 不受影响(重命名为 .dev.yml):
-#   非 override.yml 命名 → compose 不自动发现。production 裸 `podman compose up` 安全
-#   (仍跑 standalone node + 无 --reload)。dev 需显式:
-#   `podman compose -f docker-compose.yml -f docker-compose.dev.yml up`。
-
+# web 弃用(2026-07-18):web service + Dockerfile.dev 已从 production compose 删除,
+# 此 override 不再含 web 段。TUI 接力:orchestrator + observe + (gateway 待退役)。
+#
 # 使用:
-#   首次/依赖变更后:`podman compose build`(会用 Dockerfile.dev 重建 web dev 镜像)
-#   日常开发:    `podman compose -f docker-compose.yml -f docker-compose.dev.yml up`(显式合并 dev)
+#   首次/依赖变更后:`docker compose build`
+#   日常开发:    `docker compose -f docker-compose.yml -f docker-compose.dev.yml up`
 #   改 Python(host 编辑 services/*/src)→ uvicorn --reload 自动重启
-#   改前端(host 编辑 apps/web/src)→ next dev Turbopack HMR 热更
 
 services:
   # ── orchestrator:uvicorn --reload + src bind mount ──────────────────────
   orchestrator:
     volumes:
-      # 追加(production 的 data volume 保留):host 源码覆盖镜像内 COPY 的 src/
       - ./services/orchestrator/src:/app/src
     environment:
-      # dev 关掉健康依赖链路里能省的(可选):保持 default 即可,这里显式确保运行态
       - PYTHONUNBUFFERED=1
-    # 覆盖 CMD:加 --reload + --reload-dir(只监听 src/,避免 data/ sqlite 写入触发抖动重启)
     command:
       - uvicorn
       - src.engine:app
@@ -40,7 +32,7 @@ services:
       - --reload-dir
       - /app/src
 
-  # ── gateway:同 orchestrator ─────────────────────────────────────────────
+  # ── gateway:同 orchestrator(保留,待整体退役)─────────────────────────
   gateway:
     volumes:
       - ./services/gateway/src:/app/src
@@ -57,31 +49,19 @@ services:
       - --reload-dir
       - /app/src
 
-  # ── web:切到 Dockerfile.dev + next dev --turbopack(HMR) ────────────────
-  web:
-    build:
-      # 覆盖 production 的 apps/web/Dockerfile(standalone)→ dev 镜像(带 devDeps)
-      context: .
-      dockerfile: apps/web/Dockerfile.dev
-      # production 的 args(API_URL / ORCHESTRATOR_WS_URL)在 dev 无意义(next dev
-      # rewrites 在请求时读 env,不固化);此处不重复 args。
+  # ── observe:uvicorn --reload + src bind mount(TUI 观测层)──────────────
+  observe:
     volumes:
-      # 源码 bind mount → 改 host 的 apps/web 触发 Turbopack HMR
-      - ./apps/web:/app/apps/web
-      # 匿名卷屏蔽 host node_modules:用镜像内 pnpm install 的 node_modules,
-      # 避免 host(可能未 install / pnpm symlink / 宿主 OS 不一致)覆盖容器依赖。
-      - /app/apps/web/node_modules
+      - ./services/observe/src:/app/src
     environment:
-      # next dev rewrites() 请求时求值 process.env(区别于 standalone build 固化)。
-      # 用容器服务名,gateway/orchestrator 在同一 compose network 内可达。
-      - API_URL=http://gateway:8000
-      - ORCHESTRATOR_WS_URL=http://orchestrator:8001
-      - NODE_ENV=development
-      - NEXT_TELEMETRY_DISABLED=1
-      - WATCHPACK_POLLING=true
-      # Turbopack HMR 在某些 bind-mount 场景需要 polling;Linux 原生 inotify 通常无需,
-      # 但保留以兜底 podman/macOS bridge 的 fs 事件丢失问题。
+      - PYTHONUNBUFFERED=1
     command:
-      - pnpm
-      - dev
-    # dev 不需要 depends_on 健康门(production 已有);保留也无害,这里不动。
+      - uvicorn
+      - src.app:app
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8002"
+      - --reload
+      - --reload-dir
+      - /app/src

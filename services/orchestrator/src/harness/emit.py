@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from typing import Any, Dict
 from urllib.parse import quote
 
@@ -22,7 +23,18 @@ import websockets.client as ws_client
 
 logger = logging.getLogger(__name__)
 
-OBSERVE_INGEST_URL = "ws://localhost:8002/ws/ingest"
+def _observe_ws_ingest_url() -> str:
+    """observe /ws/ingest URL;从 OBSERVE_URL env 推(默认 localhost:8002)。
+
+    容器部署 compose 注入 OBSERVE_URL=http://observe:8002(localhost 在容器内解析
+    自身,orchestrator→observe 容器间断)。http→ws / https→wss。
+    """
+    base = os.getenv("OBSERVE_URL", "http://localhost:8002").rstrip("/")
+    ws = base.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
+    return f"{ws}/ws/ingest"
+
+
+OBSERVE_INGEST_URL = _observe_ws_ingest_url()
 
 
 class ObserveEmitter:
