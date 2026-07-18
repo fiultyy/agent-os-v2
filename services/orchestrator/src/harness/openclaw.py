@@ -394,6 +394,21 @@ class OpenClawClient:
         self._pending_run_id = res.get("payload", {}).get("runId")
         logger.info("Sent message to %s: %s...", self.session_key, message[:50])
 
+    async def create_session(self) -> bool:
+        """gateway sessions.create 建 session entry。非 main conv gateway 不自动建(send 时
+        createAgentMainSessionForSend 只 main conv),send 会 not found → 新建 session 先 create。
+        main conv 幂等(send 时查 entry 有则跳过自动 create)。"""
+        parts = self.session_key.split(":")
+        agent_id = parts[1] if len(parts) >= 2 and parts[0] == "agent" else self.session_key
+        try:
+            res = await self._request("sessions.create",
+                                      {"key": self.session_key, "agentId": agent_id}, timeout=10)
+            logger.info("sessions.create %s ok=%s", self.session_key, res.get("ok"))
+            return bool(res.get("ok"))
+        except Exception as e:
+            logger.warning("sessions.create (%s): %s", self.session_key, e)
+            return False
+
     async def _fail_turn(self, reason: str) -> None:
         """死 key / send 超时收场:emit error tick 闭环 + 标 stale。
 
