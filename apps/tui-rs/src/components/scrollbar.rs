@@ -43,11 +43,13 @@ pub struct ScrollView {
     pub follow_tail_flag: bool,
     /// 是否画右侧 Scrollbar 柱状指示器。false=不画(用 footer N/M 代位置)。
     pub show_scrollbar: bool,
+    /// wrap 后 display 行缓存(key=width);set_content 内容变时失效。避免每帧 wrap_line。
+    wrap_cache: Option<(usize, Vec<ratatui::text::Line<'static>>)>,
 }
 
 impl ScrollView {
     pub fn new(lines: Vec<ratatui::text::Line<'static>>) -> Self {
-        Self { lines, offset: 0, wrap: true, trim: false, bordered: true, border_mode: None, title: None, follow_tail_flag: true, show_scrollbar: true }
+        Self { lines, offset: 0, wrap: true, trim: false, bordered: true, border_mode: None, title: None, follow_tail_flag: true, show_scrollbar: true, wrap_cache: None }
     }
     pub fn wrap(mut self, w: bool) -> Self {
         self.wrap = w;
@@ -72,9 +74,12 @@ impl ScrollView {
         self
     }
     pub fn set_content(&mut self, lines: Vec<ratatui::text::Line<'static>>) {
-        self.lines = lines;
-        // 不重置 offset(每帧调,重置让滚轮失效);也不 clamp——total() 是未 wrap 行数,
-        // clamp 会把 offset 卡在 wrap 真底之上(滚不动)。render 时按 wrap_total + 视口 clamp。
+        // 内容同(每帧 render_turn_stream 缓存 clone 同内容)→ 不更新 lines + 保 wrap_cache;
+        // 内容变 → 更新 + 失效 wrap_cache(render 重建)。避免每帧 wrap_line。
+        if self.lines != lines {
+            self.lines = lines;
+            self.wrap_cache = None;
+        }
     }
     /// content_length(未 wrap 行数近似;scroll 按键/scroll_to_bottom 用)。
     fn total(&self) -> usize {
@@ -182,11 +187,16 @@ impl ScrollView {
         // 自己折行(保留 span style)+ slice 显示:折行与显示同逻辑 → 行数精确,scroll 到真底。
         // 不用 ratatui Paragraph::Wrap(其 word-break 与自算行数不一致 → 滚不到真底)。
         let width = inner.width as usize;
-        let display: Vec<ratatui::text::Line<'static>> = if self.wrap {
-            self.lines.iter().flat_map(|l| Self::wrap_line(l, width)).collect()
-        } else {
-            self.lines.clone()
-        };
+        // wrap_cache:width 同 + 内容未变(set_content 失效)→ 复用,避免每帧 flat_map(wrap_line)。
+        if self.wrap_cache.as_ref().map_or(true, |(w, _)| *w != width) {
+            let d: Vec<ratatui::text::Line<'static>> = if self.wrap {
+                self.lines.iter().flat_map(|l| Self::wrap_line(l, width)).collect()
+            } else {
+                self.lines.clone()
+            };
+            self.wrap_cache = Some((width, d));
+        }
+        let display: &[ratatui::text::Line<'static>] = self.wrap_cache.as_ref().unwrap().1.as_slice();
         let total = display.len();
         let max_off = total.saturating_sub(inner.height as usize);
         if self.follow_tail_flag {
@@ -195,9 +205,10 @@ impl ScrollView {
             self.offset = self.offset.min(max_off);  // 用户自由滚不超真底
         }
         let visible: Vec<ratatui::text::Line<'static>> = display
-            .into_iter()
+            .iter()
             .skip(self.offset)
             .take(inner.height.max(1) as usize)
+            .cloned()
             .collect();
         f.render_widget(Paragraph::new(visible), inner);
 

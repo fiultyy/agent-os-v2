@@ -8,6 +8,7 @@
 
 use crate::components;
 use crate::state::{fmt_val, trunc, App, FocusTarget, NewKind, ObserveEvent, Panel, TrackedFlow};
+use crate::theme::DARK;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -17,14 +18,14 @@ use ratatui::{
 };
 
 /// 功能分区:ADR-5 色块 + 顶部描边(去左/右/下全边框省空间)。cyan bold 标题 + 顶线 + bg 色块。
-fn region_block(title: &str) -> Block<'static> {
+fn region_block(title: &'static str) -> Block<'static> {
     Block::default()
         .borders(Borders::TOP)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .style(Style::default().bg(Color::Black))
+        .border_style(Style::default().fg(DARK.border))
+        .style(Style::default().bg(DARK.bg))
         .title(Line::from(Span::styled(
-            title.to_string(),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            title,
+            Style::default().fg(DARK.accent).add_modifier(Modifier::BOLD),
         )))
 }
 
@@ -105,20 +106,20 @@ fn flow_lines(t: &FTurn, depth: usize) -> Vec<Line<'static>> {
 /// 把单个事件渲染成 (符号, 色, 加粗, 正文)。符号用 owned String 避开 event_type 生命周期。
 fn event_glyph(e: &ObserveEvent) -> (String, Color, bool, String) {
     match e.event_type.as_str() {
-        "tick_started" => ("●".to_string(), Color::Green, true, fmt_val(&e.data, "request")),
-        "tool_call" => ("⚒".to_string(), Color::Blue, false, fmt_val(&e.data, "tool_name")),
-        "tool_result" => ("◷".to_string(), Color::Cyan, false, fmt_val(&e.data, "result")),
-        "token_delta" => ("δ".to_string(), Color::DarkGray, false, fmt_val(&e.data, "delta_text")),
+        "tick_started" => ("●".to_string(), DARK.success, true, fmt_val(&e.data, "request")),
+        "tool_call" => ("⚒".to_string(), DARK.accent2, false, fmt_val(&e.data, "tool_name")),
+        "tool_result" => ("◷".to_string(), DARK.accent, false, fmt_val(&e.data, "result")),
+        "token_delta" => ("δ".to_string(), DARK.fg_muted, false, fmt_val(&e.data, "delta_text")),
         "tick_completed" => {
             // flow_* 事件(flow.py wire 成 tick_completed,data.response 空在 flow_event/flow_payload)。
             let flow_ev = fmt_val(&e.data, "flow_event");
             if !flow_ev.is_empty() {
-                ("✓".to_string(), Color::Magenta, true, flow_event_body(&flow_ev, &e.data))
+                ("✓".to_string(), DARK.done, true, flow_event_body(&flow_ev, &e.data))
             } else {
-                ("✓".to_string(), Color::Magenta, true, fmt_val(&e.data, "response"))
+                ("✓".to_string(), DARK.done, true, fmt_val(&e.data, "response"))
             }
         }
-        other => (other.to_string(), Color::DarkGray, false, String::new()),
+        other => (other.to_string(), DARK.fg_muted, false, String::new()),
     }
 }
 
@@ -419,11 +420,11 @@ fn node_span(n: &crate::state::FlowNode, status: Option<&crate::state::FlowStatu
 /// node 状态 → (符号 owned, 色)。pending=idle,running,done,failed,skipped。
 fn node_status_glyph(status: &str) -> (String, Color) {
     match status {
-        "running" => ("⠋".to_string(), Color::Green),
-        "completed" => ("✓".to_string(), Color::Magenta),
-        "failed" => ("✗".to_string(), Color::Red),
-        "skipped" => ("⊘".to_string(), Color::DarkGray),
-        _ => ("○".to_string(), Color::Yellow), // pending / idle
+        "running" => ("⠋".to_string(), DARK.success),
+        "completed" => ("✓".to_string(), DARK.done),
+        "failed" => ("✗".to_string(), DARK.error),
+        "skipped" => ("⊘".to_string(), DARK.fg_muted),
+        _ => ("○".to_string(), DARK.highlight), // pending / idle
     }
 }
 
@@ -591,12 +592,12 @@ pub fn draw_stack(f: &mut Frame, area: Rect, app: &mut App) {
 fn event_log_parts(e: &ObserveEvent) -> (String, Color, String) {
     use crate::state::fmt_val;
     match e.event_type.as_str() {
-        "tick_started" => ("START".to_string(), Color::Green, fmt_val(&e.data, "request")),
-        "tool_call" => ("TOOL▸".to_string(), Color::Blue, fmt_val(&e.data, "tool_name")),
-        "tool_result" => ("TOOL◂".to_string(), Color::Blue, fmt_val(&e.data, "result")),
-        "tick_completed" => ("DONE ".to_string(), Color::Magenta, fmt_val(&e.data, "response")),
-        "token_delta" => ("δ".to_string(), Color::DarkGray, fmt_val(&e.data, "delta_text")),
-        other => (other.to_string(), Color::DarkGray, String::new()),
+        "tick_started" => ("START".to_string(), DARK.success, fmt_val(&e.data, "request")),
+        "tool_call" => ("TOOL▸".to_string(), DARK.accent2, fmt_val(&e.data, "tool_name")),
+        "tool_result" => ("TOOL◂".to_string(), DARK.accent, fmt_val(&e.data, "result")),
+        "tick_completed" => ("DONE ".to_string(), DARK.done, fmt_val(&e.data, "response")),
+        "token_delta" => ("δ".to_string(), DARK.fg_muted, fmt_val(&e.data, "delta_text")),
+        other => (other.to_string(), DARK.fg_muted, String::new()),
     }
 }
 
@@ -786,7 +787,17 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
     match app.control_right_tabs.active {
         0 => {
             let (ev_lines, n_turns) = if let Some(evs) = app.events.get(&key) {
-                control::render_turn_stream(evs)
+                // B1 缓存:cursor session key + 事件数不变 → 复用(消除每帧 render_turn_stream 重建)。
+                let count = evs.len();
+                let need = app.cached_turn_lines.as_ref().map_or(true, |c| c.0 != key || c.1 != count);
+                if need {
+                    let (lines, n) = control::render_turn_stream(evs);
+                    app.cached_turn_lines = Some((key.clone(), count, lines.clone(), n));
+                    (lines, n)
+                } else {
+                    let c = app.cached_turn_lines.as_ref().unwrap();
+                    (c.2.clone(), c.3)
+                }
             } else if key.is_empty() {
                 (vec![Line::from(Span::styled(
                     " (无 cursor session · 左大纲点选 session 或色块)", Style::default().fg(Color::DarkGray),

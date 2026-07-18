@@ -16,6 +16,7 @@ mod events;
 mod kitty;
 mod render;
 mod state;
+mod theme;
 mod widgets_demo;
 mod ws;
 

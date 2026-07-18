@@ -637,6 +637,8 @@ pub struct App {
     pub chat_follow_tail: bool,
     /// Control 对话区 turn 总数(render_turn_stream 分组数,footer N/M 用)。
     pub control_turn_count: usize,
+    /// render_turn_stream 缓存(key=cursor session key + 事件数;事件不变→复用,消除每帧重建)。
+    pub cached_turn_lines: Option<(String, usize, Vec<ratatui::text::Line<'static>>, usize)>,
     /// Control 区域缓存(draw 算 → handle mouse drag hit 用)。
     pub control_area: Rect,
     /// 输入栏 textarea 实际区(render_input_bar 算 + 存,鼠标划选用)。
@@ -785,6 +787,7 @@ impl App {
                 .show_scrollbar(false),
             chat_follow_tail: true,
             control_turn_count: 0,
+            cached_turn_lines: None,
             control_area: Rect::default(),
             input_area: Rect::default(),
             control_h_dragging: false,
