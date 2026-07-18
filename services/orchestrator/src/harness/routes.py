@@ -161,6 +161,49 @@ async def _create_claw(session_id: str, agent_id: Optional[str]) -> OpenClawClie
     return client
 
 
+def _agent_from_key(session_id: str) -> str:
+    """claw session_key `agent:<agent>:<conv>` → <agent>;非标准格式 → session_id 本身。"""
+    parts = session_id.split(":")
+    if len(parts) >= 3 and parts[0] == "agent":
+        return parts[1]
+    return session_id
+
+
+async def _reconnect_claw(session_id: str) -> Optional[OpenClawClient]:
+    """惰性重连/创建:store 有→重建死/stale client;store 无(observe-only,gateway
+    有但或che未记录)→ 推断 agent + _create_claw + 落库。
+
+    手动 reconnect 端点 + trigger_turn 自动恢复共用。OpenClawClient WS 断后
+    running 永久 False(connect() 一次性循环无重连),或 stale(send 死键置)→
+    本 helper 换新 client 重建连接。返 client(running 真/假),None=_create_claw 异常。
+    """
+    row = _store.get("claw", session_id)
+    if row is not None:
+        agent_id = row.get("agent_id")
+        native_sid = row.get("native_sid") or session_id
+    else:
+        # observe-only session:gateway 存在但或che store 无 → 推断 agent 惰性建
+        agent_id = _agent_from_key(session_id)
+        native_sid = session_id
+    _sessions.pop(_key("claw", session_id), None)
+    try:
+        client = await _create_claw(session_id, agent_id)
+    except Exception as e:
+        logger.warning("reconnect _create_claw failed (%s): %s", session_id, e)
+        return None
+    for _ in range(50):
+        if getattr(client, "running", False):
+            break
+        await asyncio.sleep(0.04)
+    if row is None:
+        _store.create(session_id, "claw", native_sid=native_sid, agent_id=agent_id)
+    _sessions[_key("claw", session_id)] = {
+        "client": client, "session_id": session_id, "harness_type": "claw",
+        "agent_id": agent_id, "native_sid": native_sid, "cwd": None,
+    }
+    return client
+
+
 async def _create_claude(
     session_id: str, cwd: Optional[str], native_sid: Optional[str] = None,
 ) -> ClaudeClient:
@@ -364,6 +407,21 @@ async def create_session(
     # 持久层落库(重启不丢)
     if harness_type == "claw":
         _store.create(session_id, "claw", native_sid=session_id, agent_id=req.agent_id)
+        # 等 gateway 连上 + 建 gateway session entry(非 main conv gateway 不自动建,
+        # send 会 session not found → 503;main conv 幂等)。reconnect 路径不调(已有 entry)。
+        for _ in range(50):
+            if getattr(client, "running", False):
+                break
+            await asyncio.sleep(0.04)
+        if getattr(client, "running", False):
+            # 建 gateway session entry(create_session 内部已 try/except + log,这里再兜防
+            # 测试 mock client 非 async;失败不阻塞 create——turn 时若 not found 会惰性重连)。
+            cs = getattr(client, "create_session", None)
+            if cs is not None:
+                try:
+                    await cs()
+                except Exception:
+                    pass
     else:
         _store.create(session_id, "claude-code", native_sid=None, cwd=req.cwd)
     return {"session_id": session_id, "type": harness_type, "status": "created"}
@@ -420,23 +478,25 @@ async def trigger_turn(
         raise HTTPException(status_code=404, detail="session not found")
 
     if harness_type == "claw":
-        if not getattr(client, "running", False):
-            raise HTTPException(status_code=503, detail="claw client not connected yet")
-        # 上次 turn 残留的 stale(send 死 key 置)→ 提示重建,不再发
-        if getattr(client, "stale", False):
-            raise HTTPException(
-                status_code=503,
-                detail="claw session dead/stale (session not found), delete + recreate",
-            )
+        # WS 断(running=False)或 stale 残留 → 惰性重连(不再直接 503 卡死)。
+        # reconnect 后仍 running=False = gateway 真不可达 → 503。
+        if not getattr(client, "running", False) or getattr(client, "stale", False):
+            client = await _reconnect_claw(session_id)
+            if client is None:
+                raise HTTPException(status_code=404, detail="session not found")
+            if not getattr(client, "running", False):
+                raise HTTPException(
+                    status_code=503,
+                    detail="claw reconnect failed; gateway :18789 down?",
+                )
         await client.send_message(req.message, agent_id=req.agent_id, thinking=req.thinking)
         _store.touch(session_id)
-        # 本次 send 检测到死 key → send_message 已 emit error tick(前端停转),这里
-        # 返 503 让调用方知道失败并重建(stale client running 仍 True,create_session
-        # 死 client 检测会短路,需显式 delete + create)。
+        # 本次 send 检测到死 key(reconnect 后仍死)→ 503,让调用方 delete+recreate。
+        # send_message 已 emit error tick(前端停转)。
         if getattr(client, "stale", False):
             raise HTTPException(
                 status_code=503,
-                detail="claw session dead/stale (session not found), delete + recreate",
+                detail="claw session dead (session not found), delete + recreate",
             )
         return {"session_id": session_id, "status": "sent", "message": req.message[:50]}
     else:  # claude-code
@@ -447,6 +507,28 @@ async def trigger_turn(
         _store.touch(session_id)
         return {"session_id": session_id, "status": result["status"],
                 "tick_id": result["tick_id"]}
+
+
+@router.post("/{harness_type}/sessions/{session_id}/reconnect")
+async def reconnect_session(
+    harness_type: str, session_id: str,
+) -> Dict[str, Any]:
+    """claw 手动重连:清死 client 重建,短轮询等 running。
+
+    OpenClawClient WS 断后 running 永久 False(connect() 一次性循环无重连)→
+    trigger_turn 卡 503。本端点让前端一键拉起重连。
+    claude-code 无状态(子进程按 turn spawn),重连无意义 → 400。
+    """
+    _validate_type(harness_type)
+    if harness_type != "claw":
+        raise HTTPException(
+            status_code=400,
+            detail="reconnect only for claw (claude-code is stateless)",
+        )
+    client = await _reconnect_claw(session_id)
+    if client is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    return {"session_id": session_id, "connected": bool(getattr(client, "running", False))}
 
 
 @router.post("/{harness_type}/sessions/{session_id}/spawn")

@@ -16,6 +16,7 @@ mod events;
 mod kitty;
 mod render;
 mod state;
+mod theme;
 mod widgets_demo;
 mod ws;
 
@@ -37,7 +38,7 @@ use std::io;
 /// 弹窗栈 modal 激活时,state.handle 内部已把 key/mouse 先喂栈顶弹窗(rat-event Dialog 语义)。
 /// ADR-1 T4:WS manager 注入 app,Tick drain_ws 收 WS 事件(弃 REST polling)。
 fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> io::Result<()> {
-    let poll = app.term.poll_interval;
+    let base_poll = app.term.poll_interval;
     // ADR-4:cursor 切换 → 重订阅 session WS(关旧开新)。跟踪当前订阅 key。
     let mut sub_key: Option<String> = app.flat.get(app.cursor)
         .map(|s| format!("{}/{}", s.harness_type, s.session_id));
@@ -47,6 +48,12 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> i
     let mut sub_flows: std::collections::HashSet<String> = std::collections::HashSet::new();
     loop {
         terminal.draw(|f| render::draw(f, &mut app))?;
+        // pending(spinner)期间缩 poll 80ms → spinner ~12fps 流畅;idle 用 base_poll 省 CPU。
+        let poll = if app.pending_turn.is_some() {
+            std::time::Duration::from_millis(80)
+        } else {
+            base_poll
+        };
         let ev = poll_once(poll);
         // q / Quit 经 handle 返回 true 退出。
         if app.handle(&ev) {
@@ -218,7 +225,7 @@ fn run_dump() {
     let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
 
     // 1. base panels(4 tab:Home/Flows/Observe/Control,分层 layer 0)。
-    for (idx, panel) in [state::Panel::Home, state::Panel::Flows, state::Panel::Observe, state::Panel::Control].iter().enumerate() {
+    for (idx, panel) in [state::Panel::Flows, state::Panel::Observe, state::Panel::Control].iter().enumerate() {
         app.panel = *panel;
         terminal.draw(|f| render::draw(f, &mut app)).unwrap();
         println!("═══ ratatui · {} 视图(layer 0 base panel)═══", panel.label());

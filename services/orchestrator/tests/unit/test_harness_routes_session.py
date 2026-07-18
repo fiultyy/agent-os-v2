@@ -188,22 +188,115 @@ def test_send_message_ok_true_captures_run_id(monkeypatch):
     assert c._pending_run_id == "run-abc-123"
 
 
-def test_trigger_turn_stale_claw_returns_503(store, monkeypatch):
-    """claw client stale(上次死 key 残留)→ trigger_turn 503,不再 send。"""
+def test_reconnect_claw_revives_dead_client(store, monkeypatch):
+    """claw 死 client(running=False)→ reconnect 清死重建,connected:true + _sessions 更新。"""
+    dead = MagicMock(running=False)   # 模拟 WS 断后 running 永久 False
+    alive = MagicMock(running=True)   # 重连后成功
+    # 先在 store + _sessions 落一个死 client
+    store.create("agent:main:main", "claw", native_sid="agent:main:main", agent_id="main")
+    routes._sessions[routes._key("claw", "agent:main:main")] = {
+        "client": dead, "session_id": "agent:main:main", "harness_type": "claw",
+        "agent_id": "main", "native_sid": "agent:main:main", "cwd": None,
+    }
+    monkeypatch.setattr(routes, "_create_claw", AsyncMock(return_value=alive))
+
+    r = asyncio.run(routes.reconnect_session("claw", "agent:main:main"))
+    assert r["session_id"] == "agent:main:main"
+    assert r["connected"] is True
+    # 死 client 被替换
+    rec = routes._sessions[routes._key("claw", "agent:main:main")]
+    assert rec["client"] is alive
+    assert rec["agent_id"] == "main"
+    assert rec["native_sid"] == "agent:main:main"
+
+
+def test_reconnect_claw_not_connected_returns_false(store, monkeypatch):
+    """重连后仍 running=False(2s 内没起来)→ 200 + connected:false(不抛 500)。"""
+    store.create("agent:main:dead", "claw", native_sid="agent:main:dead", agent_id="main")
+    monkeypatch.setattr(routes, "_create_claw", AsyncMock(return_value=MagicMock(running=False)))
+    # 跳过 2s 等待:sleep 立即返
+    monkeypatch.setattr(routes.asyncio, "sleep", AsyncMock())
+    r = asyncio.run(routes.reconnect_session("claw", "agent:main:dead"))
+    assert r["connected"] is False
+
+
+def test_trigger_turn_stale_client_auto_reconnects(store, monkeypatch):
+    """trigger_turn 检测 stale client → 惰性重连(不直接 503)→ 重连后 send 成功。"""
+    stale = MagicMock(running=True, stale=True)   # running 在但 stale(死键残留)
+    alive = MagicMock(running=True, stale=False)  # 重连后的新 client
+    alive.send_message = AsyncMock()
+    store.create("agent:main:main", "claw", native_sid="agent:main:main", agent_id="main")
+    routes._sessions[routes._key("claw", "agent:main:main")] = {
+        "client": stale, "session_id": "agent:main:main", "harness_type": "claw",
+        "agent_id": "main", "native_sid": "agent:main:main", "cwd": None,
+    }
+    monkeypatch.setattr(routes, "_reconnect_claw", AsyncMock(return_value=alive))
+    req = routes.TurnReq(message="hi")
+    r = asyncio.run(routes.trigger_turn("claw", "agent:main:main", req))
+    assert r["status"] == "sent"
+    alive.send_message.assert_awaited_once()  # 新 client 发了消息(非 stale 503)
+
+
+def test_trigger_turn_reconnect_still_down_returns_503(store, monkeypatch):
+    """重连后仍 running=False(gateway 真挂)→ 503(非 stale 卡死,是真连不上)。"""
+    store.create("agent:main:dead", "claw", native_sid="agent:main:dead", agent_id="main")
+    routes._sessions[routes._key("claw", "agent:main:dead")] = {
+        "client": MagicMock(running=False, stale=True), "session_id": "agent:main:dead",
+        "harness_type": "claw", "agent_id": "main", "native_sid": "agent:main:dead", "cwd": None,
+    }
+    monkeypatch.setattr(routes, "_reconnect_claw", AsyncMock(return_value=MagicMock(running=False)))
     from fastapi import HTTPException
-    fake = MagicMock()
-    fake.running = True
-    fake.stale = True
+    req = routes.TurnReq(message="hi")
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(routes.trigger_turn("claw", "agent:main:dead", req))
+    assert e.value.status_code == 503
+
+
+def test_reconnect_claude_code_returns_400(store, monkeypatch):
+    """cc 无状态,reconnect 无意义 → 400。"""
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(routes.reconnect_session("claude-code", "any"))
+    assert ei.value.status_code == 400
+
+
+def test_reconnect_create_claw_failure_returns_404(store, monkeypatch):
+    """_create_claw 异常(gateway 真不可达)→ _reconnect_claw None → reconnect 404。"""
+    from fastapi import HTTPException
+
+    async def boom(sid, agent):
+        raise RuntimeError("gateway unreachable")
+    monkeypatch.setattr(routes, "_create_claw", boom)
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(routes.reconnect_session("claw", "agent:main:main"))
+    assert ei.value.status_code == 404
+
+
+def test_reconnect_observe_only_session_lazy_creates(store, monkeypatch):
+    """observe-only session(observe 有、或che store 无)→ reconnect 惰性建 + 落库 + connected。"""
+    alive = MagicMock(running=True, stale=False)
+    monkeypatch.setattr(routes, "_create_claw", AsyncMock(return_value=alive))
+    r = asyncio.run(routes.reconnect_session("claw", "agent:english-expert:main"))
+    assert r["connected"] is True
+    row = routes._store.get("claw", "agent:english-expert:main")   # 落库(推断 agent)
+    assert row is not None and row["agent_id"] == "english-expert"
+    assert routes._key("claw", "agent:english-expert:main") in routes._sessions
+
+
+def test_trigger_turn_stale_after_send_returns_503(store, monkeypatch):
+    """重连后本次 send 又置 stale(send 真死 key)→ 503,调用方 delete+recreate。"""
+    from fastapi import HTTPException
+    fake = MagicMock(running=True, stale=True)   # 重连返回的 client,send 后仍 stale
     fake.send_message = AsyncMock()
     monkeypatch.setattr(routes, "_create_claw", AsyncMock(return_value=fake))
     sid = asyncio.run(
         routes.create_session("claw", routes.CreateSessionReq(agent_id="main"))
     )["session_id"]
-    routes._sessions[routes._key("claw", sid)]["client"] = fake
+    monkeypatch.setattr(routes, "_reconnect_claw", AsyncMock(return_value=fake))
     with pytest.raises(HTTPException) as ei:
         asyncio.run(routes.trigger_turn("claw", sid, routes.TurnReq(message="hi")))
     assert ei.value.status_code == 503
-    fake.send_message.assert_not_called()          # stale → 不发
+    fake.send_message.assert_awaited_once()       # 重连后 send 了(send 后才判 stale)
 
 
 # ── P8:agent-os-v2 native routes(create/turn/delete)──────────────────

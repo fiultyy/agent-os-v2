@@ -49,7 +49,10 @@ use ratatui::{
 /// 用 tui-popup 的 `StatefulWidgetRef::render_ref`:自带 Clear 遮罩 + Block 边框 + area 回填。
 pub fn render_popup(f: &mut Frame, screen: Rect, p: &mut Popup) {
     // ADR-3:md_text 优先(markdown 渲染),否则回退 body(Vec<String> 纯文本)。
-    let body_text = if let Some(md) = &p.md_text {
+    // 三路 body:body_lines(styled,按钮色块)→ md_text → body(纯文本)。
+    let body_text = if !p.body_lines.is_empty() {
+        Text::from(p.body_lines.clone())
+    } else if let Some(md) = &p.md_text {
         md.clone()
     } else {
         let lines: Vec<Line> = p
@@ -61,12 +64,10 @@ pub fn render_popup(f: &mut Frame, screen: Rect, p: &mut Popup) {
     };
     let popup = tui_popup::Popup::new(body_text)
         .title(Line::from(format!(" {} ", p.title)).style(
-            Style::default()
-                .fg(Color::LightCyan)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(crate::theme::DARK.bg).bg(crate::theme::DARK.border_accent),
         ))
-        .style(Style::default().bg(Color::DarkGray))
-        .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+        .style(Style::default().bg(crate::theme::DARK.bg_surface))
+        .border_style(Style::default().fg(crate::theme::DARK.border_accent));
 
     // StatefulWidgetRef::render_ref 自带 Clear + Block + area 回填(支持后续 drag)。
     use ratatui::widgets::StatefulWidgetRef;

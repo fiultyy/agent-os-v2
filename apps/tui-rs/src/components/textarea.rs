@@ -11,7 +11,7 @@
 
 #![allow(dead_code)]
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use std::cell::RefCell;
 use std::ops::Range;
@@ -38,6 +38,8 @@ pub struct Textarea {
     cursor_pos: usize,
     wrap_cache: RefCell<Option<WrapCache>>,
     preferred_col: Option<usize>,
+    /// 鼠标划选范围(byte range,无序;selection_range 归一)。None=无选区。
+    selection: Option<(usize, usize)>,
 }
 
 #[derive(Debug, Clone)]
@@ -54,7 +56,7 @@ pub struct TextareaState {
 
 impl Textarea {
     pub fn new() -> Self {
-        Self { text: String::new(), cursor_pos: 0, wrap_cache: RefCell::new(None), preferred_col: None }
+        Self { text: String::new(), cursor_pos: 0, wrap_cache: RefCell::new(None), preferred_col: None, selection: None }
     }
 
     pub fn text(&self) -> &str {
@@ -192,6 +194,33 @@ impl Textarea {
             }
         }
         self.replace_range_raw(self.cursor_pos..target, "");
+    }
+
+    /// Ctrl+Backspace 删词:跳过光标左侧空白 → 删连续非空白(一个词)。
+    pub fn delete_word_backward(&mut self) {
+        if self.cursor_pos == 0 {
+            return;
+        }
+        let mut target = self.cursor_pos;
+        while target > 0 {
+            let prev = self.prev_atomic_boundary(target);
+            if self.text[prev..target].chars().all(|c| c.is_whitespace()) {
+                target = prev;
+            } else {
+                break;
+            }
+        }
+        while target > 0 {
+            let prev = self.prev_atomic_boundary(target);
+            if self.text[prev..target].chars().all(|c| !c.is_whitespace()) {
+                target = prev;
+            } else {
+                break;
+            }
+        }
+        if target < self.cursor_pos {
+            self.replace_range_raw(target..self.cursor_pos, "");
+        }
     }
 
     // ── 逻辑行边界 ──
@@ -382,6 +411,62 @@ impl Textarea {
         Some((area.x + col, area.y + screen_row))
     }
 
+    /// 鼠标 cell → textarea pos(cursor_pos_with_state 的逆,鼠标划选用)。
+    pub fn pos_at_point(&self, point: (u16, u16), area: Rect, state: &TextareaState) -> Option<usize> {
+        use unicode_segmentation::UnicodeSegmentation;
+        let lines = self.wrapped_lines(area.width);
+        if lines.is_empty() {
+            return Some(0);
+        }
+        let scroll = self.effective_scroll(area.height, &lines, state.scroll);
+        let line_idx = point.1.saturating_sub(area.y) as usize + scroll as usize;
+        if line_idx >= lines.len() {
+            return Some(self.text.len());
+        }
+        let r = lines[line_idx].clone();
+        let rel_x = point.0.saturating_sub(area.x) as usize;
+        let seg = &self.text[r.start..r.end.min(self.text.len())];
+        let mut w = 0usize;
+        let mut pos = r.start;
+        for g in seg.graphemes(true) {
+            if w >= rel_x {
+                break;
+            }
+            w += g.width();
+            pos += g.len();
+        }
+        Some(pos.min(self.text.len()))
+    }
+
+    // ── 鼠标划选 ──
+    pub fn start_selection(&mut self, pos: usize) {
+        self.selection = Some((pos, pos));
+    }
+    pub fn extend_selection(&mut self, pos: usize) {
+        if let Some((s, _)) = self.selection {
+            self.selection = Some((s, pos));
+        }
+    }
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+    }
+    /// 归一(小,大)。
+    pub fn selection_range(&self) -> Option<(usize, usize)> {
+        self.selection.map(|(a, b)| if a <= b { (a, b) } else { (b, a) })
+    }
+    /// 删选区(有序)并清。返是否真删(非空选区)。
+    pub fn delete_selection(&mut self) -> bool {
+        if let Some((a, b)) = self.selection_range() {
+            self.selection = None;
+            if a < b {
+                self.replace_range_raw(a..b, "");
+                self.cursor_pos = a;
+                return true;
+            }
+        }
+        false
+    }
+
     fn wrapped_lines(&self, width: u16) -> Vec<Range<usize>> {
         let w = width.max(1); // 宽 0 不 wrap(避死循环),至少 1
         {
@@ -418,26 +503,53 @@ impl Textarea {
     // ── render(0.28 普通 fn,非 WidgetRef trait)──
     /// 画 wrap 文本 + 更新 state.scroll。光标 reverse 由调用方(control.rs)做。
     pub fn render(&self, area: Rect, buf: &mut Buffer, state: &mut TextareaState) {
+        use ratatui::style::Modifier;
+        use unicode_segmentation::UnicodeSegmentation;
         let lines = self.wrapped_lines(area.width);
         let scroll = self.effective_scroll(area.height, &lines, state.scroll);
         state.scroll = scroll;
         let start = scroll as usize;
         let end = (start + area.height as usize).min(lines.len());
+        let sel = self.selection_range();
         for (row, idx) in (start..end).enumerate() {
-            let r = &lines[idx];
+            let r = lines[idx].clone();
             let y = area.y + row as u16;
             if y >= area.bottom() {
                 break;
             }
             let s = &self.text[r.start..r.end.min(self.text.len())];
-            buf.set_string(area.x, y, s, Style::default());
+            let mut x = area.x;
+            let mut byte = r.start;
+            for g in s.graphemes(true) {
+                let gw = g.width() as u16;
+                let in_sel = matches!(sel, Some((a, b)) if byte < b && byte + g.len() > a);
+                let style = if in_sel {
+                    Style::default().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default()
+                };
+                buf.set_string(x, y, g, style);
+                x += gw;
+                byte += g.len();
+            }
         }
     }
 
     /// 兼容 state.rs 的薄包装:转发编辑键。Enter/Newline/Up/Down 不在此(state 层管)。
     pub fn handle_key(&mut self, k: &KeyEvent) -> TextareaOp {
         match k.code {
-            KeyCode::Backspace => { self.delete_backward(1); TextareaOp::Backspace }
+            KeyCode::Backspace if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.delete_word_backward();
+                TextareaOp::Backspace
+            }
+            KeyCode::Backspace => {
+                if self.selection_range().map_or(false, |(a, b)| a < b) {
+                    self.delete_selection();
+                } else {
+                    self.delete_backward(1);
+                }
+                TextareaOp::Backspace
+            }
             KeyCode::Delete => { self.delete_forward(1); TextareaOp::Backspace }
             KeyCode::Left => { self.move_cursor_left(); TextareaOp::Left }
             KeyCode::Right => { self.move_cursor_right(); TextareaOp::Right }

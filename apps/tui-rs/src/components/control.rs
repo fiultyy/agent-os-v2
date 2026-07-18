@@ -19,12 +19,16 @@ use ratatui::{
     Frame,
 };
 
+/// codex 风格 braille spinner(跑马灯):optimistic pending 行前缀动画特效,
+/// orche 真事件确认前显(render.rs 取 SPINNER[spinner_frame % len])。
+pub const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
 /// Control 按钮(label, id, base_color, action_name)。
 /// ADR-1:按钮已从 InputBar 删除(动作走键盘)。本常量保留供 key 路由参考(id→action 映射)。
 pub const CONTROL_BUTTONS: [(&str, usize, Color, &str); 8] = [
     (" [t] trigger ", 0, Color::Green, "trigger"),
     (" [s] spawn   ", 1, Color::Cyan, "spawn"),
-    (" [r] refresh ", 2, Color::Yellow, ""),
+    (" [r] 重连  ", 2, Color::Yellow, "reconnect"),
     (" [e] raw-exec", 3, Color::Magenta, ""),
     (" [f] chain   ", 4, Color::Blue, "create_chain"),
     (" [G] branch  ", 5, Color::Blue, "create_branch"),
@@ -57,31 +61,60 @@ pub fn render_status_bar(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(lines), area);
 }
 
-/// ADR-2 footer 状态 spans:orche●(online/离线) · session(cursor sid) · last(turn_status)。
+/// ADR-2 footer 状态 spans:按 cursor session 的 harness_type 差异化。
+/// - claw:<sid> · ●连/⚠断 · [^R 重连]
+/// - cc(claude-code):<sid> · <cwd 截断 或 (no cwd)>
+/// - 无 cursor:orche● + "(无)" 兜底
 /// 单行 Vec<Span>,供 Footer::render 与按键提示同行(宽度自适应折叠由 Footer 负责)。
-/// 逻辑与 render_status_bar 同源,但输出 spans 而非独立 2 行 widget。
 pub fn status_spans(app: &App) -> Vec<Span<'static>> {
     let orche = if app.orche_online {
         Span::styled(" ●", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
     } else {
         Span::styled(" ⚠offline", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
     };
-    let cur_sid = app
-        .flat
-        .get(app.cursor)
-        .map(|s| trunc(&s.session_id, 16))
-        .unwrap_or_else(|| "(无)".to_string());
-    let status_disp = app
-        .turn_status
-        .clone()
-        .unwrap_or_else(|| "(未触发)".to_string());
-    vec![
-        orche,
-        Span::styled("  session ", Style::default().fg(Color::DarkGray)),
-        Span::styled(cur_sid, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::styled("  last ", Style::default().fg(Color::DarkGray)),
-        Span::styled(trunc(&status_disp, 40), Style::default().fg(Color::White)),
-    ]
+    let Some(s) = app.flat.get(app.cursor) else {
+        return vec![
+            orche,
+            Span::styled("  ", Style::default()),
+            Span::styled("(无)", Style::default().fg(Color::DarkGray)),
+        ];
+    };
+    let sid = trunc(&s.session_id, 16);
+    let sid_span = Span::styled(sid, Style::default().fg(Color::DarkGray));
+    // turn N/M:N=当前(follow_tail→M 最新,否则按 offset 比例近似),M=总 turn 数。
+    let tc = app.control_turn_count;
+    let cur_turn = if tc == 0 {
+        0
+    } else if app.chat_follow_tail {
+        tc
+    } else {
+        let total = app.control_chat_scroll.lines.len().max(1);
+        (((app.control_chat_scroll.offset + 1) * tc) / total).clamp(1, tc)
+    };
+    let turn_span = Span::styled(format!(" · {}/{}", cur_turn, tc), Style::default().fg(Color::DarkGray));
+    let ht = crate::state::norm_ht(&s.harness_type);
+    if ht == "claw" {
+        // 连接状态由最左 orche● 统一示(绿连/红断);claw 重连用 ^R / 右键 Reconnect(不占输入区)。
+        vec![
+            orche,
+            Span::styled("  ", Style::default()),
+            sid_span,
+            turn_span,
+        ]
+    } else {
+        // cc(claude-code):显 cwd(无状态无重连)。
+        let cwd_disp = s.cwd.as_deref()
+            .map(|c| trunc(c, 30))
+            .unwrap_or_else(|| "(no cwd)".to_string());
+        vec![
+            orche,
+            Span::styled("  ", Style::default()),
+            sid_span,
+            Span::styled(" · ", Style::default().fg(Color::DarkGray)),
+            Span::styled(cwd_disp, Style::default().fg(Color::DarkGray)),
+            turn_span,
+        ]
+    }
 }
 
 /// InputBar(IT6-③:整合 StatusBar):底部输入区多行 = [状态行] + [输入行] + [模式提示行]。
@@ -116,6 +149,7 @@ pub fn render_input_bar(f: &mut Frame, area: Rect, app: &mut App) {
         width: ta_area.width.saturating_sub(PREFIX_W),
         height: ta_area.height,
     };
+    app.input_area = ta_inner; // 存给鼠标划选用
     let buf = f.buffer_mut();
     app.textarea.render(ta_inner, buf, &mut app.textarea_state);
     // 精确光标(bug3 根治):cursor_pos_with_state 算屏幕 cell → REVERSED
@@ -193,7 +227,7 @@ fn md_indented_lines(response: &str, prefix_spans: &[Span<'static>]) -> Vec<Line
 /// - turn 间用空行分隔(不用 dash 线)。
 ///
 /// 无 tick_started 事件时按 flat stack 兜底(逐事件 stack_event_line)。
-pub fn render_turn_stream(evs: &[ObserveEvent]) -> Vec<Line<'static>> {
+pub fn render_turn_stream(evs: &[ObserveEvent]) -> (Vec<Line<'static>>, usize) {
     use std::collections::HashMap as Map;
 
     // 1) 按 tick_id 分组(保持首次出现顺序)。无 tick_id 的事件并入 "" 桶兜底。
@@ -210,7 +244,7 @@ pub fn render_turn_stream(evs: &[ObserveEvent]) -> Vec<Line<'static>> {
     // 全无 tick_id 桶:flat 兜底。
     let any_tick = evs.iter().any(|e| !e.tick_id.is_empty());
     if !any_tick {
-        return evs.iter().map(stack_event_line).collect();
+        return (evs.iter().map(stack_event_line).collect(), 0);
     }
 
     let mut out: Vec<Line> = Vec::new();
@@ -233,7 +267,23 @@ pub fn render_turn_stream(evs: &[ObserveEvent]) -> Vec<Line<'static>> {
         let mut assistant_from_response = false;
         for e in group {
             if e.event_type == "tick_completed" {
-                let resp = fmt_val(&e.data, "response");
+                // flow_* 事件 response 空,内容在 flow_event + flow_payload(node_id/response)。
+                // 对话 tab 选 flow session 时据此显示节点输出,不再空。
+                let flow_ev = fmt_val(&e.data, "flow_event");
+                let resp = if !flow_ev.is_empty() {
+                    let p = e.data.get("flow_payload");
+                    let nid = p.and_then(|v| v.get("node_id")).and_then(|v| v.as_str()).unwrap_or("");
+                    let r = p.and_then(|v| v.get("response")).and_then(|v| v.as_str()).unwrap_or("");
+                    if nid.is_empty() {
+                        format!("[{}]", flow_ev)
+                    } else if r.is_empty() {
+                        format!("[{}] {}", flow_ev, nid)
+                    } else {
+                        format!("[{}] {}: {}", flow_ev, nid, r)
+                    }
+                } else {
+                    fmt_val(&e.data, "response")
+                };
                 if !resp.is_empty() {
                     assistant_text = resp;
                     assistant_from_response = true;
@@ -255,11 +305,15 @@ pub fn render_turn_stream(evs: &[ObserveEvent]) -> Vec<Line<'static>> {
             let e = group[j];
             if e.event_type == "tick_started" && !user_rendered {
                 let request = fmt_val(&e.data, "request");
-                out.push(Line::from(vec![
-                    Span::styled("> ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                    Span::styled(trunc(&request, 120), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                ]));
-                user_rendered = true;
+                if !request.is_empty() {
+                    // 双源(或che+observe 都 ingest)致同 tick 两个 tick_started:取非空 request,
+                    // 跳过空 request 的重复(observe 自合成那一份常空)。
+                    out.push(Line::from(vec![
+                        Span::styled("> ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                        Span::styled(trunc(&request, 120), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    ]));
+                    user_rendered = true;
+                }
                 j += 1;
                 continue;
             }
@@ -317,7 +371,7 @@ pub fn render_turn_stream(evs: &[ObserveEvent]) -> Vec<Line<'static>> {
             out.push(stack_event_line(e));
         }
     }
-    out
+    (out, order.len())
 }
 
 #[cfg(test)]
@@ -354,7 +408,7 @@ mod tests {
             ev("token_delta", "t1", &[("delta_text", "lo")]),
             ev("token_delta", "t1", &[("delta_text", " world")]),
         ];
-        let out = render_turn_stream(&evs);
+        let (out, _) = render_turn_stream(&evs);
         let joined = out.iter().map(spans_str).collect::<Vec<_>>().join("\n");
         // 合并后的完整文本出现在某行(可能被 md 包裹,但必须连续)。
         assert!(joined.contains("Hello world"), "token_delta 未合并: {}", joined);
@@ -373,7 +427,7 @@ mod tests {
             ev("token_delta", "t1", &[("delta_text", "PARTIAL")]),
             ev("tick_completed", "t1", &[("response", "FINAL")]),
         ];
-        let out = render_turn_stream(&evs);
+        let (out, _) = render_turn_stream(&evs);
         let joined = out.iter().map(spans_str).collect::<Vec<_>>().join("\n");
         assert!(joined.contains("FINAL"), "缺 response: {}", joined);
         assert!(!joined.contains("PARTIAL"), "response 未优先,delta 残留: {}", joined);
@@ -388,7 +442,7 @@ mod tests {
             ev("tool_result", "t1", &[("result", "ok")]),
             ev("tick_completed", "t1", &[("response", "done")]),
         ];
-        let out = render_turn_stream(&evs);
+        let (out, _) = render_turn_stream(&evs);
         let joined = out.iter().map(spans_str).collect::<Vec<_>>().join("\n");
         // 合并行:tool_name → result。
         assert!(joined.contains("bash") && joined.contains("ok"), "tool 未合并: {}", joined);
@@ -406,7 +460,7 @@ mod tests {
             ev("tick_started", "t2", &[("request", "b")]),
             ev("tick_completed", "t2", &[("response", "B")]),
         ];
-        let out = render_turn_stream(&evs);
+        let (out, _) = render_turn_stream(&evs);
         let joined = out.iter().map(spans_str).collect::<Vec<_>>().join("\n");
         // 两 turn 之间有空行。
         assert!(joined.contains("\n\n"), "turn 间无空行: {}", joined);
@@ -418,7 +472,7 @@ mod tests {
     #[test]
     fn user_prefix_greater_than() {
         let evs = vec![ev("tick_started", "t1", &[("request", "hello")])];
-        let out = render_turn_stream(&evs);
+        let (out, _) = render_turn_stream(&evs);
         let joined = out.iter().map(spans_str).collect::<Vec<_>>().join("\n");
         assert!(joined.contains("> hello"), "user 前缀不符: {}", joined);
     }
@@ -430,9 +484,64 @@ mod tests {
             ev("tick_started", "", &[("request", "x")]),
             ev("tick_completed", "", &[("response", "y")]),
         ];
-        let out = render_turn_stream(&evs);
+        let (out, _) = render_turn_stream(&evs);
         // flat:至少 2 行(每事件一行),且无空行分隔。
         assert!(out.len() >= 2, "flat 兜底行数不足: {}", out.len());
+    }
+
+    // ── status_spans 差异化渲染(IT-followup:^R 重连)──────────────────────
+
+    fn app_with_session(ht: &str, sid: &str, running: bool, cwd: Option<&str>) -> App {
+        let mut app = App::new(crate::kitty::detect());
+        app.flat = vec![crate::state::Session {
+            harness_type: ht.to_string(),
+            session_id: sid.to_string(),
+            harness_id: "h".to_string(),
+            cwd: cwd.map(|s| s.to_string()),
+            running,
+        }];
+        app.cursor = 0;
+        app
+    }
+
+    fn spans_content(spans: &[Span]) -> String {
+        spans.iter().map(|s| s.content.as_ref()).collect::<String>()
+    }
+
+    #[test]
+    fn status_claw_shows_orche_and_sid_no_legacy_hint() {
+        // claw 连接状态由最左 orche● 统一示;claw 重连走 ^R/右键(不占输入区)。
+        // 故 status 不显旧 ●连/⚠断/^R 重连,只 orche● + sid + turn。
+        let app = app_with_session("openclaw", "agent:main:main", true, None);
+        let s = spans_content(&status_spans(&app));
+        assert!(s.contains("●"), "claw 应显 orche●: {}", s);
+        assert!(s.contains("agent:main"), "claw 应显 sid: {}", s);
+        assert!(!s.contains("●连"), "不再显 ●连(由 orche● 统一): {}", s);
+        assert!(!s.contains("^R 重连"), "不再占输入区显 ^R 重连: {}", s);
+    }
+
+    #[test]
+    fn status_cc_shows_cwd_no_reconnect_hint() {
+        let app = app_with_session("claude-code", "cc-1", false, Some("/home/yy/proj"));
+        let s = spans_content(&status_spans(&app));
+        assert!(s.contains("/home/yy/proj"), "cc 应显 cwd: {}", s);
+        assert!(!s.contains("^R 重连"), "cc 不应显重连提示: {}", s);
+        assert!(!s.contains("●连"), "cc 不应显连/断: {}", s);
+    }
+
+    #[test]
+    fn status_cc_no_cwd_shows_placeholder() {
+        let app = app_with_session("claude-code", "cc-2", false, None);
+        let s = spans_content(&status_spans(&app));
+        assert!(s.contains("(no cwd)"), "cc 无 cwd 应显占位: {}", s);
+    }
+
+    #[test]
+    fn status_no_cursor_shows_empty_marker() {
+        let mut app = App::new(crate::kitty::detect());
+        app.flat = vec![];
+        let s = spans_content(&status_spans(&app));
+        assert!(s.contains("(无)"), "无 cursor 应显 (无): {}", s);
     }
 }
 

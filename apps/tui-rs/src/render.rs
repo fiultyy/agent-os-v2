@@ -8,6 +8,7 @@
 
 use crate::components;
 use crate::state::{fmt_val, trunc, App, FocusTarget, NewKind, ObserveEvent, Panel, TrackedFlow};
+use crate::theme::DARK;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -17,15 +18,12 @@ use ratatui::{
 };
 
 /// 功能分区:ADR-5 色块 + 顶部描边(去左/右/下全边框省空间)。cyan bold 标题 + 顶线 + bg 色块。
-fn region_block(title: &str) -> Block<'static> {
+fn region_block(_title: &'static str) -> Block<'static> {
+    // title 去掉(分区标题难堪);保参数避免改 9 处调用。仅留顶线 + bg_surface 卡片层。
     Block::default()
         .borders(Borders::TOP)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .style(Style::default().bg(Color::Black))
-        .title(Line::from(Span::styled(
-            title.to_string(),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        )))
+        .border_style(Style::default().fg(DARK.border_accent))
+        .style(Style::default().bg(DARK.bg_surface))
 }
 
 // ═══ mock flow 演示数据(P1 保留)═══════════════════════════════════
@@ -105,12 +103,37 @@ fn flow_lines(t: &FTurn, depth: usize) -> Vec<Line<'static>> {
 /// 把单个事件渲染成 (符号, 色, 加粗, 正文)。符号用 owned String 避开 event_type 生命周期。
 fn event_glyph(e: &ObserveEvent) -> (String, Color, bool, String) {
     match e.event_type.as_str() {
-        "tick_started" => ("●".to_string(), Color::Green, true, fmt_val(&e.data, "request")),
-        "tool_call" => ("⚒".to_string(), Color::Blue, false, fmt_val(&e.data, "tool_name")),
-        "tool_result" => ("◷".to_string(), Color::Cyan, false, fmt_val(&e.data, "result")),
-        "token_delta" => ("δ".to_string(), Color::DarkGray, false, fmt_val(&e.data, "delta_text")),
-        "tick_completed" => ("✓".to_string(), Color::Magenta, true, fmt_val(&e.data, "response")),
-        other => (other.to_string(), Color::DarkGray, false, String::new()),
+        "tick_started" => ("●".to_string(), DARK.success, true, fmt_val(&e.data, "request")),
+        "tool_call" => ("⚒".to_string(), DARK.accent2, false, fmt_val(&e.data, "tool_name")),
+        "tool_result" => ("◷".to_string(), DARK.accent, false, fmt_val(&e.data, "result")),
+        "token_delta" => ("δ".to_string(), DARK.fg_muted, false, fmt_val(&e.data, "delta_text")),
+        "tick_completed" => {
+            // flow_* 事件(flow.py wire 成 tick_completed,data.response 空在 flow_event/flow_payload)。
+            let flow_ev = fmt_val(&e.data, "flow_event");
+            if !flow_ev.is_empty() {
+                ("✓".to_string(), DARK.done, true, flow_event_body(&flow_ev, &e.data))
+            } else {
+                ("✓".to_string(), DARK.done, true, fmt_val(&e.data, "response"))
+            }
+        }
+        other => (other.to_string(), DARK.fg_muted, false, String::new()),
+    }
+}
+
+/// flow_* 事件 body:从 data.flow_payload 取 node_id/response/状态(节点输出等内容)。
+fn flow_event_body(flow_ev: &str, data: &std::collections::HashMap<String, serde_json::Value>) -> String {
+    let p = data.get("flow_payload");
+    let ps = |k: &str| p.and_then(|v| v.get(k)).and_then(|v| v.as_str()).unwrap_or("");
+    match flow_ev {
+        "node_completed" => {
+            let nid = ps("node_id");
+            let resp = ps("response");
+            if resp.is_empty() { format!("{} ✓", nid) } else { format!("{}: {}", nid, resp) }
+        }
+        "node_started" => format!("→ {}", ps("node_id")),
+        "flow_started" => "flow ▶".to_string(),
+        "flow_completed" => format!("flow {}", ps("status")),
+        _ => flow_ev.to_string(),
     }
 }
 
@@ -226,16 +249,9 @@ pub fn draw_flow(f: &mut Frame, area: Rect, app: &App) {
         )));
         lines.push(Line::raw(""));
         lines.push(Line::from(Span::styled(
-            " ── fallback:observe 真实 turn lane(openclaw 单 session)──".to_string(),
+            " flow tab 显节点 DAG:创建 flow 后显示节点 box + 运行状态/输出明细".to_string(),
             Style::default().fg(Color::DarkGray),
         )));
-        match app.events.get("openclaw/agent:main:main") {
-            Some(evs) => lines.extend(observe_lanes(evs)),
-            None => {
-                let t = demo();
-                lines.extend(flow_lines(&t, 0));
-            }
-        }
         f.render_widget(Paragraph::new(lines), area);
         return;
     }
@@ -401,11 +417,11 @@ fn node_span(n: &crate::state::FlowNode, status: Option<&crate::state::FlowStatu
 /// node 状态 → (符号 owned, 色)。pending=idle,running,done,failed,skipped。
 fn node_status_glyph(status: &str) -> (String, Color) {
     match status {
-        "running" => ("⠋".to_string(), Color::Green),
-        "completed" => ("✓".to_string(), Color::Magenta),
-        "failed" => ("✗".to_string(), Color::Red),
-        "skipped" => ("⊘".to_string(), Color::DarkGray),
-        _ => ("○".to_string(), Color::Yellow), // pending / idle
+        "running" => ("⠋".to_string(), DARK.success),
+        "completed" => ("✓".to_string(), DARK.done),
+        "failed" => ("✗".to_string(), DARK.error),
+        "skipped" => ("⊘".to_string(), DARK.fg_muted),
+        _ => ("○".to_string(), DARK.highlight), // pending / idle
     }
 }
 
@@ -573,12 +589,12 @@ pub fn draw_stack(f: &mut Frame, area: Rect, app: &mut App) {
 fn event_log_parts(e: &ObserveEvent) -> (String, Color, String) {
     use crate::state::fmt_val;
     match e.event_type.as_str() {
-        "tick_started" => ("START".to_string(), Color::Green, fmt_val(&e.data, "request")),
-        "tool_call" => ("TOOL▸".to_string(), Color::Blue, fmt_val(&e.data, "tool_name")),
-        "tool_result" => ("TOOL◂".to_string(), Color::Blue, fmt_val(&e.data, "result")),
-        "tick_completed" => ("DONE ".to_string(), Color::Magenta, fmt_val(&e.data, "response")),
-        "token_delta" => ("δ".to_string(), Color::DarkGray, fmt_val(&e.data, "delta_text")),
-        other => (other.to_string(), Color::DarkGray, String::new()),
+        "tick_started" => ("START".to_string(), DARK.success, fmt_val(&e.data, "request")),
+        "tool_call" => ("TOOL▸".to_string(), DARK.accent2, fmt_val(&e.data, "tool_name")),
+        "tool_result" => ("TOOL◂".to_string(), DARK.accent, fmt_val(&e.data, "result")),
+        "tick_completed" => ("DONE ".to_string(), DARK.done, fmt_val(&e.data, "response")),
+        "token_delta" => ("δ".to_string(), DARK.fg_muted, fmt_val(&e.data, "delta_text")),
+        other => (other.to_string(), DARK.fg_muted, String::new()),
     }
 }
 
@@ -589,6 +605,12 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
     // 窄大纲(色块组标签 + session 列)| 右主区(StatusBar + 右tab + body + 输入栏)。
     app.control_area = area; // 缓存供 mouse drag/hit。
     let [left, bar, right] = app.control_split.rects(area);
+    // HSplit bar:单线分隔(border_accent 竖线,替代空白间隔;可拖拽调大纲宽)。
+    for y in bar.y..bar.bottom() {
+        if let Some(cell) = f.buffer_mut().cell_mut((bar.x, y)) {
+            cell.set_char('│').set_style(Style::default().fg(DARK.border_accent));
+        }
+    }
 
     // ── 左区:region_block 边框内水平切 [色块列(2) | session 列] ──
     let left_block = region_block(" 大纲 ");
@@ -613,6 +635,8 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
         let hovered = app.mouse.in_rect(new_rect);
         let style = if hovered {
             Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)
+        } else if app.action_loading("new_btn") {
+            Style::default().fg(Color::Black).bg(Color::Magenta).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
         };
@@ -678,7 +702,9 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
                     let row_rect = Rect::new(list_area.x, list_area.y + row_idx, list_area.width, 1);
                     let hovered = app.mouse.in_rect(row_rect);
                     let is_cursor = ci == app.cursor;
-                    let (prefix, st) = if is_cursor {
+                    let (prefix, st) = if is_cursor && app.action_loading("session") {
+                        ("  ▸", Style::default().fg(Color::White).bg(Color::Magenta).add_modifier(Modifier::BOLD))
+                    } else if is_cursor {
                         ("  ▸", Style::default().fg(Color::White).bg(Color::Blue).add_modifier(Modifier::BOLD))
                     } else if hovered {
                         ("   ", Style::default().fg(Color::Black).bg(Color::Yellow))
@@ -748,7 +774,7 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
     let input_h = (dh + 4).min(12);
     let right_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(1), Constraint::Length(input_h)])
+        .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(input_h)])
         .split(right);
     let [tabs_area, body_area, input_area] = [right_chunks[0], right_chunks[1], right_chunks[2]];
 
@@ -763,38 +789,55 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
     // body:对话=chat 卷轴(主)、flow=lane+DAG、属性=props。
     match app.control_right_tabs.active {
         0 => {
-            let ev_lines = if let Some(evs) = app.events.get(&key) {
-                control::render_turn_stream(evs)
+            let (mut ev_lines, n_turns) = if let Some(evs) = app.events.get(&key) {
+                // B1 缓存:cursor session key + 事件数不变 → 复用(消除每帧 render_turn_stream 重建)。
+                let count = evs.len();
+                let need = app.cached_turn_lines.as_ref().map_or(true, |c| c.0 != key || c.1 != count);
+                if need {
+                    let (lines, n) = control::render_turn_stream(evs);
+                    app.cached_turn_lines = Some((key.clone(), count, lines.clone(), n));
+                    (lines, n)
+                } else {
+                    let c = app.cached_turn_lines.as_ref().unwrap();
+                    (c.2.clone(), c.3)
+                }
             } else if key.is_empty() {
-                vec![Line::from(Span::styled(
+                (vec![Line::from(Span::styled(
                     " (无 cursor session · 左大纲点选 session 或色块)", Style::default().fg(Color::DarkGray),
-                ))]
+                ))], 0)
             } else {
-                vec![Line::from(Span::styled(
+                (vec![Line::from(Span::styled(
                     " (observe 不可达 · r 刷新)", Style::default().fg(Color::DarkGray),
-                ))]
+                ))], 0)
             };
+            app.control_turn_count = n_turns;
+            // optimistic pending 行(cache 外,每帧 spinner 变):本地立即回显 + 跑马灯特效,
+            // drain_ws 收 orche 事件清 pending_turn 后自动消失(被真实 user message 行替代)。
+            if let Some(msg) = app.pending_turn.as_ref() {
+                use crate::components::control::SPINNER;
+                let sp = SPINNER[app.spinner_frame % SPINNER.len()];
+                ev_lines.push(Line::from(vec![
+                    Span::styled(format!("{} ", sp),
+                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::styled(msg.clone(), Style::default().fg(Color::White)),
+                ]));
+            }
             app.control_chat_scroll.set_content(ev_lines);
             // ScrollView.render 内部按 follow_tail_flag 自动追底(内容超视口→最后一页,不超→从顶)。
             app.control_chat_scroll.follow_tail_flag = app.chat_follow_tail;
             app.control_chat_scroll.render(f, body_area);
         }
         1 => {
+            // flow tab 纯节点 DAG(不混 cursor session 对话 lanes);选 flow 显示节点内容。
             let mut flow_lines_v: Vec<Line> = vec![];
-            if let Some(evs) = app.events.get(&key) {
-                if !evs.is_empty() {
-                    flow_lines_v.extend(observe_lanes(evs));
-                }
-            }
             if let Some(tf) = app.current_flow() {
-                flow_lines_v.push(Line::raw(""));
                 flow_lines_v.extend(flow_dag_lines(tf, app.flow_cursor));
-            } else if flow_lines_v.is_empty() {
+            } else {
                 flow_lines_v.push(Line::from(Span::styled(
-                    " (无 flow · f/G/D 创建预设)", Style::default().fg(Color::DarkGray),
+                    " (无 flow · 右键 Create Chain/Branch/DAG 或 f/G/D)", Style::default().fg(Color::DarkGray),
                 )));
             }
-            f.render_widget(Paragraph::new(flow_lines_v).block(region_block(" flow · lane+DAG ")), body_area);
+            f.render_widget(Paragraph::new(flow_lines_v).block(region_block(" flow · 节点 DAG ")), body_area);
         }
         _ => {
             let prop_lines = render_props_lines(app);
@@ -853,6 +896,8 @@ fn render_props_lines(app: &App) -> Vec<Line<'static>> {
 /// Home dashboard 三张结构化卡片(ADR-5 region_block:TOP 描边 + bg + cyan 标题)。
 /// 布局:[Sessions 50% | Flows 50%](上半) + [Cursor Session 全宽](下半)。
 /// read-only 读 App 业务字段。cursor 所在 harness 组高亮。
+/// Home tab 已移除(默认 Control),保留供 --dump 演示/未来用。
+#[allow(dead_code)]
 pub fn draw_home(f: &mut Frame, area: Rect, app: &App) {
     use crate::components::position;
     use crate::state::harness_tag;
@@ -1004,7 +1049,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // 顶栏 TabBar(3) / 主区(Min)/ 底栏 hint(1)。
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(1), Constraint::Length(1)])
+        .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)])
         .split(area);
 
     // 顶栏:TabBar 渲染(ADR-1:传鼠标位置做悬停高亮)+ 缓存 tab_area 供鼠标 hit。
@@ -1012,15 +1057,31 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     app.tabbar.render_with_hover(f, chunks[0], hover);
     app.tab_area = chunks[0];
 
-    // ADR-2:键盘焦点在 TabBar 时,在 tab 栏底部加 ▶ 聚焦标记。
-    if matches!(app.focus, FocusTarget::TabBar) {
-        let focus_rect = Rect::new(chunks[0].x, chunks[0].y, 1, chunks[0].height);
-        if let Some(cell) = f.buffer_mut().cell_mut((focus_rect.x, focus_rect.y + focus_rect.height.saturating_sub(1))) {
-            let mut s = cell.style();
-            s = s.fg(Color::Yellow).add_modifier(Modifier::BOLD);
-            cell.set_char('▶').set_style(s);
+    // status(tab 右侧,info 按钮左):Flows R/C/F 计数 + cursor sid(opencode 紧凑)。
+    let (mut fr, mut fc, mut ff) = (0u32, 0u32, 0u32);
+    for tf in &app.flows {
+        match tf.status.as_ref().map(|s| s.status.as_str()).unwrap_or("") {
+            "running" => fr += 1,
+            "completed" => fc += 1,
+            "failed" => ff += 1,
+            _ => {}
         }
     }
+    let cur_sid = app.flat.get(app.cursor).map(|s| trunc(&s.session_id, 16)).unwrap_or_default();
+    let st_line = Line::from(vec![
+        Span::styled(" Flows ", Style::default().fg(DARK.fg_muted)),
+        Span::styled(format!("R{} ", fr), Style::default().fg(DARK.success)),
+        Span::styled(format!("C{} ", fc), Style::default().fg(DARK.done)),
+        Span::styled(format!("F{} ", ff), Style::default().fg(DARK.error)),
+        Span::styled(format!("· {}", cur_sid), Style::default().fg(DARK.fg_muted)),
+    ]);
+    let st_w = (st_line.width() as u16).min(chunks[0].width.saturating_sub(16));
+    if st_w > 0 {
+        let st_area = Rect::new(chunks[0].right().saturating_sub(st_w as u16 + 8), chunks[0].y + 1, st_w as u16, 1);
+        f.render_widget(Paragraph::new(st_line).style(Style::default().bg(DARK.bg_surface)), st_area);
+    }
+
+    // ADR-2:键盘焦点 TabBar 标记(▶)已移除(多余,与 DARK 风格不搭)。
 
     // ADR-3:顶栏右端 i(id998→open_props)/×(id999→quit_requested)按钮。
     // IT5 ①:clickmap 区域覆盖顶栏全高(top.height=3:边框行+tab 行+边框行),
@@ -1051,7 +1112,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     // 主区:按 active tab 分发(ADR-1)。
     match app.panel {
-        Panel::Home => draw_home(f, chunks[1], app),
         Panel::Flows => draw_flow(f, chunks[1], app),
         Panel::Observe => draw_stack(f, chunks[1], app),
         Panel::Control => draw_control(f, chunks[1], app),
@@ -1071,11 +1131,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // z-order layer 2:modal popup 栈(栈顶最上)。每个弹窗 Clear 遮罩 + Block + 正文。
     // IT2 节点 C:new/delete 弹窗 body 按 state 实时刷新(picker 选中行/自由输入)。
     update_action_popup_bodies(app);
+    update_context_menu_body(app);
     for p in app.popups.iter_mut() {
         components::render_popup(f, area, p);
     }
     // IT7 ②:new 弹窗渲染后 area 已回填 → 注册可点击区到 popup_clickmap。
     register_new_popup_clickmap(app);
+    register_context_menu_clickmap(app);
+    register_delete_popup_clickmap(app);
 
     // 帧末:鼠标光标(ADR-2:最后渲染,黑底黄字高亮)。
     app.mouse.render(f);
@@ -1086,42 +1149,59 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 /// IT7 ②:统一布局——行 0 = [claw]/[cc] harness 按钮,行末 = [Create]/[Cancel] 按钮,
 /// 中间为 picker 候选行。clickmap id 见 register_new_popup_clickmap。
 fn update_action_popup_bodies(app: &mut App) {
+    use ratatui::style::{Color, Style};
+    use ratatui::text::{Line, Span};
     let is_new_top = app.popups.last().map(|p| p.id == "new").unwrap_or(false);
-    if is_new_top {
-        // 行 0:harness 选择按钮(可点击 700/701)。已选高亮 [x],未选 [ ]。
-        let claw_mark = if matches!(app.new_popup, Some(NewKind::Claw)) { "[x]claw" } else { "[ ]claw" };
-        let cc_mark = if matches!(app.new_popup, Some(NewKind::Cc)) { "[x]cc" } else { "[ ]cc" };
-        let ao_mark = if matches!(app.new_popup, Some(NewKind::AoV2)) { "[x]ao" } else { "[ ]ao" };
-        let mut lines: Vec<String> = vec![format!(" {}  {}  {}   (或键 c/d/o)", claw_mark, cc_mark, ao_mark)];
-        match app.new_popup {
-            None => {
-                lines.push("(选类型后显候选)".to_string());
-            }
-            Some(NewKind::Claw) => {
-                lines.push("claw agents:".to_string());
-                for (i, a) in app.new_candidates.iter().enumerate() {
-                    let mark = if i == app.new_idx { "▸" } else { " " };
-                    lines.push(format!("{} {}", mark, a));
-                }
-            }
-            Some(NewKind::Cc) => {
-                lines.push(format!("cc cwd: [{}]", app.new_cc_input));
-                for (i, c) in app.new_candidates.iter().enumerate() {
-                    let mark = if i == app.new_idx { "▸" } else { " " };
-                    lines.push(format!("{} {}", mark, c));
-                }
-            }
-            Some(NewKind::AoV2) => {
-                lines.push("agent-os-v2:自研 native harness(无需 agent/cwd)".to_string());
-                lines.push("Enter 创建(服务端自动生成 session_id)".to_string());
+    if !is_new_top {
+        return;
+    }
+    let cyan_btn = |s: String| Span::styled(s, Style::default().fg(Color::Black).bg(Color::Cyan));
+    let sep = || Span::styled("│", Style::default().fg(Color::Cyan));
+    let mut lines: Vec<Line<'static>> = vec![];
+    // 行 0:harness 按钮(700/701),色块 + 公用描边分隔。
+    let claw_mark = if matches!(app.new_popup, Some(NewKind::Claw)) { "[x]claw" } else { "[ ]claw" };
+    let cc_mark = if matches!(app.new_popup, Some(NewKind::Cc)) { "[x]cc" } else { "[ ]cc" };
+    let ao_mark = if matches!(app.new_popup, Some(NewKind::AoV2)) { "[x]ao" } else { "[ ]ao" };
+    lines.push(Line::from(vec![
+        cyan_btn(format!(" {} ", claw_mark)),
+        sep(),
+        cyan_btn(format!(" {} ", cc_mark)),
+        sep(),
+        cyan_btn(format!(" {} ", ao_mark)),
+        Span::raw("  (c/d/o)"),
+    ]));
+    match app.new_popup {
+        None => lines.push(Line::from("(选类型后显候选)")),
+        Some(NewKind::Claw) => {
+            lines.push(Line::from("claw agents:"));
+            for (i, a) in app.new_candidates.iter().enumerate() {
+                let mark = if i == app.new_idx { "▸" } else { " " };
+                lines.push(Line::from(format!("{} {}", mark, a)));
             }
         }
-        // 行末:Create / Cancel 按钮(可点击 790/791)。
-        lines.push(" [Create]  [Cancel]".to_string());
-        if let Some(p) = app.popups.last_mut() {
-            p.height = (lines.len() as u16 + 4).clamp(8, 22);
-            p.body = std::mem::take(&mut lines);
+        Some(NewKind::Cc) => {
+            lines.push(Line::from(format!("cc cwd: [{}]", app.new_cc_input)));
+            for (i, c) in app.new_candidates.iter().enumerate() {
+                let mark = if i == app.new_idx { "▸" } else { " " };
+                lines.push(Line::from(format!("{} {}", mark, c)));
+            }
         }
+        Some(NewKind::AoV2) => {
+            lines.push(Line::from("agent-os-v2:自研 native harness(无需 agent/cwd)"));
+            lines.push(Line::from("Enter 创建(服务端自动生成 session_id)"));
+        }
+    }
+    // 末行:Create/Cancel(790/791),色块 + 公用描边。
+    lines.push(Line::from(vec![
+        Span::raw(" "),
+        cyan_btn(" Create ".into()),
+        sep(),
+        cyan_btn(" Cancel ".into()),
+    ]));
+    if let Some(p) = app.popups.last_mut() {
+        p.height = (lines.len() as u16 + 4).clamp(8, 22);
+        p.body_lines = lines;
+        p.body = vec![];
     }
 }
 
@@ -1140,8 +1220,8 @@ fn register_new_popup_clickmap(app: &mut App) {
     let inner_x = area.x + 1; // 跳左竖边框
     let inner_w = area.width.saturating_sub(2);
     // body 行索引(相对弹窗):row 0 = harness 按钮,1 = header,2.. = 候选,末行 = Create/Cancel。
-    let body = app.popups.last().map(|p| p.body.clone()).unwrap_or_default();
-    let body_len = body.len();
+    let body_lines = app.popups.last().map(|p| p.body_lines.clone()).unwrap_or_default();
+    let body_len = body_lines.len();
     let row_y = |i: usize| -> u16 { area.y + 1 + i as u16 }; // title 占顶边框,首行 = area.y+1
     // 行 0:[x]claw  [x]cc —— 按文本长度切两段(claw 段前半,cc 段后半)。
     if body_len >= 1 {
@@ -1151,7 +1231,7 @@ fn register_new_popup_clickmap(app: &mut App) {
     }
     // 候选行:header 在 row 1,候选从 row 2 起。claw→710+i,cc→720+i。
     let cand_start = 2usize;
-    for (i, _line) in body.iter().enumerate().skip(cand_start) {
+    for (i, _line) in body_lines.iter().enumerate().skip(cand_start) {
         if i + 1 >= body_len {
             break; // 末行是 Create/Cancel
         }
@@ -1168,6 +1248,57 @@ fn register_new_popup_clickmap(app: &mut App) {
     if body_len >= 1 {
         let last_y = row_y(body_len - 1);
         app.popup_clickmap.register(Rect::new(inner_x + 1, last_y, 8, 1), 790); // [Create]
-        app.popup_clickmap.register(Rect::new(inner_x + 11, last_y, 8, 1), 791); // [Cancel]
+        app.popup_clickmap.register(Rect::new(inner_x + 10, last_y, 8, 1), 791); // [Cancel]
     }
+}
+
+/// 栈顶 id="ctx" 时:菜单项 ▸ 标记 selected + 末行 [x] close。
+fn update_context_menu_body(app: &mut App) {
+    let is_ctx_top = app.popups.last().map(|p| p.id == "ctx").unwrap_or(false);
+    if !is_ctx_top {
+        return;
+    }
+    let Some(cm) = app.context_menu.as_ref() else { return; };
+    let mut lines: Vec<String> = cm.items.iter().enumerate().map(|(i, (label, _))| {
+        let mark = if i == cm.selected { "▸" } else { " " };
+        format!("{} {}", mark, label)
+    }).collect();
+    lines.push(" [x] close".into());
+    if let Some(p) = app.popups.last_mut() {
+        p.height = (lines.len() as u16 + 4).clamp(7, 22);
+        p.body = lines;
+    }
+}
+
+/// 栈顶 id="ctx" 时:注册菜单项(900+i)+ close(800)到 popup_clickmap。
+/// 不 clear:register_new_popup_clickmap 每帧已 clear;ctx 栈顶时 new 不注册,clean。
+fn register_context_menu_clickmap(app: &mut App) {
+    let is_ctx_top = app.popups.last().map(|p| p.id == "ctx").unwrap_or(false);
+    if !is_ctx_top {
+        return;
+    }
+    let Some(area) = app.popups.last().and_then(|p| p.state.area().as_ref().copied()) else { return; };
+    let Some(cm) = app.context_menu.as_ref() else { return; };
+    let inner_x = area.x + 1;
+    let inner_w = area.width.saturating_sub(2);
+    for i in 0..cm.items.len() {
+        let y = area.y + 1 + i as u16;
+        app.popup_clickmap.register(Rect::new(inner_x, y, inner_w, 1), 900 + i);
+    }
+    let close_y = area.y + 1 + cm.items.len() as u16;
+    app.popup_clickmap.register(Rect::new(inner_x, close_y, 10, 1), 800);
+}
+
+/// 栈顶 delete 弹窗:注册 [y]确认(600)/ [N]取消(601),对齐 delete_popup_body 行 1。
+fn register_delete_popup_clickmap(app: &mut App) {
+    let is_del_top = app.popups.last().map(|p| p.id == "delete").unwrap_or(false);
+    if !is_del_top {
+        return;
+    }
+    let Some(area) = app.popups.last().and_then(|p| p.state.area().as_ref().copied()) else { return; };
+    let inner_x = area.x + 1;
+    let btn_y = area.y + 2; // 跳 title 边框(行 0)+ "删除?"(行 1),按钮在行 2
+    // [y]确认 10 列(含中文宽)│ [N]取消 10 列,对齐 delete_popup_body Line 1 的 span 位置。
+    app.popup_clickmap.register(Rect::new(inner_x, btn_y, 10, 1), 600);
+    app.popup_clickmap.register(Rect::new(inner_x + 11, btn_y, 10, 1), 601);
 }

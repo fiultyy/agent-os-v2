@@ -56,29 +56,30 @@ impl TabBar {
         self
     }
 
-    /// tab 内容区(Rect)+ 可用列宽(cap)。全边框=内缩 1 列两侧,顶线=只下移 1 行不缩列。
+    /// tab 内容区(Rect)+ 可用列宽(cap)。顶线=下移 1 行不缩列;无框(默认)=全 area 不缩列
+    /// (与 render_block 无框一致:Tabs 从 area.x 渲染,hit 不偏移)。
     fn inner_and_cap(&self, area: Rect) -> (Rect, usize) {
         if self.top_border {
             (Rect::new(area.x, area.y + 1, area.width, area.height.saturating_sub(1)), area.width as usize)
         } else {
-            let inner = Block::bordered().inner(area);
-            (inner, inner.width as usize)
+            // 无框:全宽(render_block else 无 border,Tabs 在全 area),旧版用 bordered.inner 减 2
+            // → cap 比 Tabr 实际渲染窄 2 + hit 偏移 1 列(已修)。
+            (area, area.width as usize)
         }
     }
 
     /// IT6-②:全边框(顶栏 Home/Flows,带 i/×)或顶线描边(右区 对话/flow,region_block 同款)。
-    fn render_block(&self, title: String) -> Block<'static> {
+    fn render_block(&self, _title: String) -> Block<'static> {
+        // title 去掉(分区标题难堪);保参数避免改调用。仅顶线/边框 + bg_surface 卡片层。
         if self.top_border {
             Block::default()
                 .borders(ratatui::widgets::Borders::TOP)
-                .border_style(Style::default().fg(Color::DarkGray))
-                .style(Style::default().bg(Color::Black))
-                .title(ratatui::text::Line::from(Span::styled(
-                    title,
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                )))
+                .border_style(Style::default().fg(crate::theme::DARK.border_accent))
+                .style(Style::default().bg(crate::theme::DARK.bg_surface))
         } else {
-            Block::bordered().title(title)
+            // 无 border 无 bg(tabs_area 透明,显底层终端 bg):tab 紧凑无四周留白,
+            // 符合"不留额外BG四周空间"。Tabs 只画 tab+padding cell,右侧空白不涂。
+            Block::default()
         }
     }
 
@@ -189,12 +190,12 @@ impl TabBar {
             .block(self.render_block(title))
             .highlight_style(
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Yellow)
+                    .fg(crate::theme::DARK.bg)
+                    .bg(crate::theme::DARK.highlight)
                     .add_modifier(Modifier::BOLD),
             )
             .select(local_active)
-            .divider("│")
+            .divider("")
             .render(area, f.buffer_mut());
 
         // ADR-1:鼠标悬停 tab 高亮(在原生 Tabs 渲染后覆写悬停 tab 的 cell 样式)。
@@ -209,11 +210,11 @@ impl TabBar {
                         let cw = Self::cell_width(t) as u16;
                         let w = if i == last_visible { cw } else { cw + 1 };
                         if i == idx {
-                            // 覆写悬停区域(仅 inner 行)加下划线高亮。
+                            // 覆写悬停区域(仅 inner 行)加 BOLD 高亮(去下划线,与 DARK 风格一致)。
                             for dx in 0..w {
                                 if let Some(cell) = f.buffer_mut().cell_mut((x + dx, row.max(inner.y))) {
                                     let mut s = cell.style();
-                                    s = s.add_modifier(Modifier::UNDERLINED | Modifier::BOLD);
+                                    s = s.add_modifier(Modifier::BOLD);
                                     cell.set_style(s);
                                 }
                             }
@@ -278,15 +279,17 @@ mod tests {
     }
 
     #[test]
-    fn hit_respects_window_offset_and_border() {
+    fn hit_respects_window_offset_no_border() {
         let mut b = TabBar::new(vec!["alpha".into(), "beta".into(), "gamma".into()]);
         b.active = 2; // gamma
         b.first_visible = 1; // 窗口在 beta,gamma(windowed_start 保持:active=2 在 [1,3))
         let area = Rect::new(0, 0, 50, 3);
-        assert_eq!(b.hit(area, 5, 0), None, "border row miss");
-        let h = b.hit(area, 3, 1);
-        assert!(h.is_some() && h.unwrap() >= 1, "inner click hits a visible tab (idx>=1): {:?}", h);
-        assert_eq!(b.hit(area, 60, 1), None, "outside area miss");
+        // 无框:row 0 是 tab 内容行(非边框),col 3 命中窗口内 tab(idx>=1)。
+        let h = b.hit(area, 3, 0);
+        assert!(h.is_some() && h.unwrap() >= 1, "row0 hits a visible tab (idx>=1): {:?}", h);
+        // row/col 越界 miss。
+        assert_eq!(b.hit(area, 5, 3), None, "row outside area miss");
+        assert_eq!(b.hit(area, 60, 0), None, "col outside area miss");
     }
 
     #[test]
@@ -348,17 +351,18 @@ mod tests {
         assert_eq!(b.visible_count_at(0, area), 2, "top_border: full width cap fits both");
     }
 
-    /// IT6-②:top_border 内宽 = area.width(无边框列);全边框内宽 = width-2。
-    /// 同一 area,top_border 容纳更多字符宽 tab。
+    /// 无框(默认)与顶线模式 cap 都 = area.width(全宽,不缩列);区别仅在 y 偏移(顶线下移 1 行)。
     #[test]
-    fn top_border_inner_wider_than_full_border() {
+    fn inner_and_cap_both_full_width() {
         let area = Rect::new(0, 0, 10, 3);
         let full = TabBar::new(vec!["a".into()]);
         let topb = TabBar::new(vec!["a".into()]).top_border();
-        let (_, cap_full) = full.inner_and_cap(area);
-        let (_, cap_top) = topb.inner_and_cap(area);
-        assert_eq!(cap_full, 8, "full border inner width = 10-2");
-        assert_eq!(cap_top, 10, "top border inner width = full 10");
+        let (inner_full, cap_full) = full.inner_and_cap(area);
+        let (inner_top, cap_top) = topb.inner_and_cap(area);
+        assert_eq!(cap_full, 10, "无框 cap = 全宽 10");
+        assert_eq!(cap_top, 10, "顶线 cap = 全宽 10");
+        assert_eq!(inner_full.y, 0, "无框 y 不偏移");
+        assert_eq!(inner_top.y, 1, "顶线 y 下移 1(顶线行)");
     }
 
     /// IT6-④:colors builder 设置 tab_colors;active tab 不受影响(仍 Yellow)。

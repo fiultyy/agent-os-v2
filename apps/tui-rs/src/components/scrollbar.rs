@@ -14,7 +14,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::Span,
-    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
     Frame,
 };
 
@@ -41,11 +41,15 @@ pub struct ScrollView {
     pub title: Option<String>,
     /// follow_tail:render 时自动追底(显最后一页);false=用户自由滚。
     pub follow_tail_flag: bool,
+    /// 是否画右侧 Scrollbar 柱状指示器。false=不画(用 footer N/M 代位置)。
+    pub show_scrollbar: bool,
+    /// wrap 后 display 行缓存(key=width);set_content 内容变时失效。避免每帧 wrap_line。
+    wrap_cache: Option<(usize, Vec<ratatui::text::Line<'static>>)>,
 }
 
 impl ScrollView {
     pub fn new(lines: Vec<ratatui::text::Line<'static>>) -> Self {
-        Self { lines, offset: 0, wrap: true, trim: false, bordered: true, border_mode: None, title: None, follow_tail_flag: true }
+        Self { lines, offset: 0, wrap: true, trim: false, bordered: true, border_mode: None, title: None, follow_tail_flag: true, show_scrollbar: true, wrap_cache: None }
     }
     pub fn wrap(mut self, w: bool) -> Self {
         self.wrap = w;
@@ -70,19 +74,57 @@ impl ScrollView {
         self
     }
     pub fn set_content(&mut self, lines: Vec<ratatui::text::Line<'static>>) {
-        self.lines = lines;
-        // 不重置 offset:set_content 每帧由 draw_* 调用,重置会让滚轮刚改的偏移立刻归零(=滚不动)。
-        // clamp 到新 total,内容缩短时不越界。
-        let max = self.total().saturating_sub(1);
-        self.offset = self.offset.min(max);
+        // 内容同(每帧 render_turn_stream 缓存 clone 同内容)→ 不更新 lines + 保 wrap_cache;
+        // 内容变 → 更新 + 失效 wrap_cache(render 重建)。避免每帧 wrap_line。
+        if self.lines != lines {
+            self.lines = lines;
+            self.wrap_cache = None;
+        }
     }
-    /// content_length(未 wrap 行数近似)。
+    /// content_length(未 wrap 行数近似;scroll 按键/scroll_to_bottom 用)。
     fn total(&self) -> usize {
         self.lines.len()
     }
+    /// 按 width 字符流折行(unicode-width,保留 span style)。render 用同逻辑 slice 显示 →
+    /// 行数精确,scroll 能到真底。ponytail: 不 word-break(英文词可拆);CJK 每字可断精确。
+    /// 旧版用 ratatui Paragraph::Wrap 显示但自算行数,word-break 不一致 → 滚不到真底。
+    fn wrap_line(line: &ratatui::text::Line<'static>, width: usize) -> Vec<ratatui::text::Line<'static>> {
+        if width == 0 {
+            return vec![line.clone()];
+        }
+        let mut out: Vec<ratatui::text::Line<'static>> = Vec::new();
+        let mut cur_spans: Vec<ratatui::text::Span<'static>> = Vec::new();
+        let mut cur_w: usize = 0;
+        for span in &line.spans {
+            let style = span.style;
+            let mut chunk = String::new();
+            for ch in span.content.chars() {
+                let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+                if cur_w + cw > width && (!chunk.is_empty() || !cur_spans.is_empty()) {
+                    if !chunk.is_empty() {
+                        cur_spans.push(ratatui::text::Span::styled(std::mem::take(&mut chunk), style));
+                    }
+                    out.push(ratatui::text::Line::from(std::mem::take(&mut cur_spans)));
+                    cur_w = 0;
+                }
+                chunk.push(ch);
+                cur_w += cw;
+            }
+            if !chunk.is_empty() {
+                cur_spans.push(ratatui::text::Span::styled(chunk, style));
+            }
+        }
+        out.push(ratatui::text::Line::from(cur_spans));
+        if out.is_empty() {
+            vec![ratatui::text::Line::from("")]
+        } else {
+            out
+        }
+    }
     pub fn scroll_down(&mut self, n: usize) {
-        let max = self.total().saturating_sub(1);
-        self.offset = (self.offset + n).min(max);
+        // 不 clamp:total() 是未 wrap 行数,clamp 会卡在 wrap 真底之上(向下滚不动)。
+        // render 时按 wrap_total + 视口高 clamp(每帧)。saturating_add 防 overflow。
+        self.offset = self.offset.saturating_add(n);
     }
     pub fn scroll_up(&mut self, n: usize) {
         self.offset = self.offset.saturating_sub(n);
@@ -103,6 +145,11 @@ impl ScrollView {
     pub fn follow_tail(&mut self, follow: bool) {
         self.follow_tail_flag = follow;
     }
+    /// 是否画右侧 Scrollbar(默认 true;control 对话区设 false 用 footer N/M 代位置)。
+    pub fn show_scrollbar(mut self, s: bool) -> Self {
+        self.show_scrollbar = s;
+        self
+    }
 
     /// 渲染:按 border_mode(None 回退 bordered)画 Block(Top=顶线+bg+标题 / Full=全边框 /
     /// None=无边框直铺)+ Paragraph(scroll+wrap) + 右侧 Scrollbar。
@@ -113,16 +160,10 @@ impl ScrollView {
             || (self.border_mode.is_none() && self.bordered);
         let inner = if use_top {
             // 与 render::region_block 同款:DarkGray 顶线 + Black bg + Cyan bold 标题。
-            let mut block = Block::default()
+            let block = Block::default()
                 .borders(Borders::TOP)
-                .border_style(Style::default().fg(Color::DarkGray))
-                .style(Style::default().bg(Color::Black));
-            if let Some(t) = &self.title {
-                block = block.title(ratatui::text::Line::from(Span::styled(
-                    t.clone(),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                )));
-            }
+                .border_style(Style::default().fg(crate::theme::DARK.border_accent))
+                .style(Style::default().bg(crate::theme::DARK.bg_surface));
             let inner = block.inner(area);
             f.render_widget(block, area);
             inner
@@ -137,25 +178,45 @@ impl ScrollView {
 
         // follow_tail:内容超视口 → 显最后一页(offset=total-viewport_height,新内容可见)。
         // 内容不超视口 → offset=0(从顶向下增长,不跳底)。用户 ScrollUp/PgUp → follow=false(自由滚)。
+        // 自己折行(保留 span style)+ slice 显示:折行与显示同逻辑 → 行数精确,scroll 到真底。
+        // 不用 ratatui Paragraph::Wrap(其 word-break 与自算行数不一致 → 滚不到真底)。
+        let width = inner.width as usize;
+        // wrap_cache:width 同 + 内容未变(set_content 失效)→ 复用,避免每帧 flat_map(wrap_line)。
+        if self.wrap_cache.as_ref().map_or(true, |(w, _)| *w != width) {
+            let d: Vec<ratatui::text::Line<'static>> = if self.wrap {
+                self.lines.iter().flat_map(|l| Self::wrap_line(l, width)).collect()
+            } else {
+                self.lines.clone()
+            };
+            self.wrap_cache = Some((width, d));
+        }
+        let display: &[ratatui::text::Line<'static>] = self.wrap_cache.as_ref().unwrap().1.as_slice();
+        let total = display.len();
+        let max_off = total.saturating_sub(inner.height as usize);
         if self.follow_tail_flag {
-            self.offset = self.total().saturating_sub(inner.height as usize);
+            self.offset = max_off;
+        } else {
+            self.offset = self.offset.min(max_off);  // 用户自由滚不超真底
         }
+        let visible: Vec<ratatui::text::Line<'static>> = display
+            .iter()
+            .skip(self.offset)
+            .take(inner.height.max(1) as usize)
+            .cloned()
+            .collect();
+        f.render_widget(Paragraph::new(visible), inner);
 
-        // >65535 行时 offset as u16 截断(65537→1)→ clamp u16::MAX(ScrollbarState 仍保留 usize position)。
-        let scroll_y = self.offset.min(u16::MAX as usize) as u16;
-        let mut para = Paragraph::new(self.lines.clone()).scroll((scroll_y, 0));
-        if self.wrap {
-            para = para.wrap(Wrap { trim: self.trim });
+        // Scrollbar(纯指示器):position 镜像 offset,content_length = 折行后精确总数。
+        // show_scrollbar=false 时跳过(control 对话区改用 footer N/M 代位置)。
+        if self.show_scrollbar {
+            let mut st = ScrollbarState::new(total)
+                .position(self.offset)
+                .viewport_content_length(inner.height as usize);
+            let sb = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("↑"))
+                .end_symbol(Some("↓"));
+            f.render_stateful_widget(sb, inner, &mut st);
         }
-        f.render_widget(para, inner);
-
-        // Scrollbar(纯指示器):position 镜像 offset,content_length 近似。
-        // viewport_content_length 省略:ratatui fallback 用 track 高度(= inner.height),与显式传等价。
-        let mut st = ScrollbarState::new(self.total()).position(self.offset);
-        let sb = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("↑"))
-            .end_symbol(Some("↓"));
-        f.render_stateful_widget(sb, inner, &mut st);
     }
 }
 
@@ -165,12 +226,15 @@ mod tests {
     use ratatui::text::Line;
 
     #[test]
-    fn scroll_clamps_to_total() {
+    fn scroll_down_unclamped_up_saturates() {
         let mut v = ScrollView::new(vec![Line::from("a"); 5]);
         v.scroll_down(100);
-        assert_eq!(v.offset, 4, "clamps to total-1");
+        // scroll_down 不 clamp(未 wrap total 会卡 wrap 真底);render 按 wrap_total+视口 clamp
+        assert_eq!(v.offset, 100, "scroll_down 自由增,render 时 clamp");
         v.scroll_up(10);
-        assert_eq!(v.offset, 0, "clamps to 0");
+        assert_eq!(v.offset, 90, "scroll_up 减");
+        v.scroll_up(1000);
+        assert_eq!(v.offset, 0, "scroll_up saturating 到 0");
     }
 
     #[test]
@@ -191,6 +255,14 @@ mod tests {
         assert_eq!(v.offset, 2);
     }
 
+    /// wrap_line:按 width 字符流折行(长行/CJK/空行),保留 span。render slice 显示同逻辑。
+    #[test]
+    fn wrap_line_long_cjk_empty() {
+        assert_eq!(ScrollView::wrap_line(&Line::from("a".repeat(100)), 20).len(), 5);
+        assert_eq!(ScrollView::wrap_line(&Line::from("中".repeat(10)), 10).len(), 2);
+        assert_eq!(ScrollView::wrap_line(&Line::from(""), 10).len(), 1);
+    }
+
     /// set_content 不再重置 offset(draw_* 每帧调,重置会让滚轮失效)。仅 clamp 到新 total。
     #[test]
     fn set_content_preserves_offset() {
@@ -201,7 +273,8 @@ mod tests {
         assert_eq!(v.offset, 5, "offset must survive per-frame set_content");
         // 内容缩短时 clamp,不越界。
         v.set_content(vec![Line::from("a"); 3]);
-        assert_eq!(v.offset, 2, "offset clamps to new total-1");
+        // set_content 不 clamp(render 才按 wrap_total + 视口 clamp);offset 跨 set_content 保留
+        assert_eq!(v.offset, 5, "offset preserved across set_content (render clamps)");
     }
 
     /// IT4:scroll_to_bottom 锁到 total-1(do_turn 发送后 + tail 跟随调用)。
