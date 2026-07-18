@@ -32,9 +32,9 @@ import httpx
 import pytest
 
 from src import main as main_mod
-from src.routes import agents, chat, debug, execute, kg, memories, messages
+from src.routes import agents, chat, debug, kg, memories, messages
 
-_ROUTE_MODULES = (agents, chat, debug, execute, kg, memories, messages)
+_ROUTE_MODULES = (agents, chat, debug, kg, memories, messages)
 
 
 @pytest.fixture(autouse=True)

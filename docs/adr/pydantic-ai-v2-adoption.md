@@ -93,6 +93,29 @@ defer(文档注明,非移植阻塞):
 - web 前端弃用:`/v1/execute` 给 web 的 SSE 通道隔离退役(TUI/observe 路径不受影响;graph loop 本体保留作 native 编排内核)
 - 多 agent 入口(`_build_parallel_graph` / `_build_multi_agent_graph`)每分支 handler 换 `agent_turn_node`(并行 + capability)
 
+### 多节点 workflow 对抗验证(2026-07-18,7 agent:survey×4 + design + verify×2)
+
+针对「graph loop 聚焦编排器」后续阶段跑多节点 workflow 勘察→设计→对抗验证。两 verify agent 一致裁决 **safe-with-gaps**:方向正确,但发现真实语义鸿沟,**主路径退役不可盲目做**。
+
+**本轮已安全落地**:
+- ✅ **web 弃用**:`apps/web/DEPRECATED.md`(前端标记)+ 删 gateway SSE 代理 `services/gateway/src/routes/execute.py`(web 专用,web 弃用后零消费者;`main.py` + `conftest.py` 同步清理;gateway test_routes 6 passed 零回归)
+- ✅ orchestrator `/execute` 端点保留(graph 执行引擎,native turn 复用,非「web 前端」范围)
+- ✅ gateway `orchestrate`/`chat` 代理暂留(待 gateway 整体弃用决策)
+
+**must_defer(语义鸿沟,workflow 对抗验证发现)**:
+| 阶段 | 阻塞原因(语义鸿沟) |
+|------|---------------------|
+| P3 退役 `_node_start` | 与 `_node_llm`/`_node_tool` 退役(P8)+ `test_multi_turn_tool_loop` 重写(P9)耦合,留同 PR;`on_node_complete` 有 start 分支(output 有 `or "started"` 兜底) |
+| **P5 MemoryWriterCapability** | pydantic-ai `after_run` 在 Agent.run 结束**一次性**触发 → 丢老 `_node_tool` 每轮 tool_result 逐条 TURN_END 沉淀(中间轮记忆,静默丢功能)。须改 `wrap_run_event_stream` 在 `FunctionToolResultEvent` **per-result** emit |
+| P6 CanvasCapability | `_node_tool` canvas 双发(ToolCall/ToolResult)无 capability 承接;ObserveCapability 只推 observe-service(8002)不推 canvas(两条独立通道) |
+| **P7 PitFailCapability** | `tool_executor.execute` 返 `{status:'error'}` 是**返回值非 raise**;pydantic-ai `on_tool_execute_error` 只在 raise 触发。tool wrapper 须显式翻译,非 hook 自动接管 |
+| **P8 `/execute` 主路径退役** | 依赖 P5/P6/P7 全绿;必破 `test_multi_turn_tool_loop`(6)+ `test_function_calling::TestNodeToolWithNativeToolUse`;`agent_turn_node` 已存在但 handler 当前零副作用承接(P5/P6/P7 是真前置) |
+| **R2 cache_control** | `agent_turn_node → build_native_agent` 用裸 AnthropicModel,ContextCompiler/static_count/apply_cache_control 完全旁路。AnthropicModelSettings 原生支持 cache_control 三层粒度(已核实)但默认粒度 ≠ 自研 static_count 精确控制,智谱 /api/anthropic 命中率可能变。P8 前须实测迁移前后 cache hit/token;需精确控制则写 `wrap_model_request` capability 插 CachePoint |
+
+**执行序(verify agent 建议)**:web 弃用(✅)→ 修 P5 memory 时序 + P7 tool-error 语义后建 P5/P6/P7(各独立单测)+ 实测 R2 → P8 主路径退役 + P9/P10 测试重写同 PR → P11 synthesizer 换 agent_turn_node(可选;若分支不需 tool/observe 则不换,ponytail)。
+
+**关键已核实**:pydantic_ai 2.12.0 `AbstractCapability` 暴露 `after_run`/`before_run`/`wrap_run`/`wrap_run_event_stream`/`wrap_tool_execute`/`on_tool_execute_error`/`wrap_model_request` 全套钩子(P5/P6/P7 技术可行,阻塞在语义非 API)。
+
 ## 后续可选(非本 ADR 范围)
 
 - flow.py 拓扑层未来若评估用 pydantic-graph,需先解 data-driven DSL → type-driven graph 编译器问题(本 ADR 不做)
