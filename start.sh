@@ -2,8 +2,6 @@
 set -euo pipefail
 
 # ── Fix miniconda sqlite3 compatibility ─────────────────────
-# miniconda ships sqlite3 3.40 which lacks sqlite3_deserialize;
-# prefer the system library when available.
 if [ -f /lib/x86_64-linux-gnu/libsqlite3.so.0 ]; then
   export LD_PRELOAD="/lib/x86_64-linux-gnu/libsqlite3.so.0${LD_PRELOAD:+:$LD_PRELOAD}"
 fi
@@ -25,9 +23,8 @@ set -a; source .env; set +a
 export LLM_BASE_URL="${LLM_BASE_URL:-https://open.bigmodel.cn/api/coding/paas/v4}"
 export LLM_MODEL="${LLM_MODEL:-glm-4-flash}"
 export LLM_API_KEY="${LLM_API_KEY:-}"
-export GATEWAY_PORT="${GATEWAY_PORT:-8000}"
 export ORCHESTRATOR_PORT="${ORCHESTRATOR_PORT:-8001}"
-export OBSERVE_PORT="${OBSERVE_PORT:-8002}"   # TUI 观测层(web 弃用后 TUI 接力)
+export OBSERVE_PORT="${OBSERVE_PORT:-8002}"   # TUI 观测层
 export ORCHESTRATOR_URL="http://localhost:${ORCHESTRATOR_PORT}"
 # orchestrator → observe:容器部署注入 OBSERVE_URL=http://observe:8002(localhost 在容器内解析自身)
 export OBSERVE_URL="${OBSERVE_URL:-http://localhost:${OBSERVE_PORT}}"
@@ -37,7 +34,6 @@ if [ -z "$LLM_API_KEY" ] || [ "$LLM_API_KEY" = "your-api-key-here" ]; then
   exit 1
 fi
 
-# ── Helper: kill background jobs on exit ────────────────────
 PIDS=()
 cleanup() {
   echo ""
@@ -59,7 +55,6 @@ python -m uvicorn src.engine:app \
   &
 PIDS+=($!)
 
-# Wait for orchestrator to be ready
 for i in $(seq 1 20); do
   if curl -sf "http://localhost:${ORCHESTRATOR_PORT}/health" >/dev/null 2>&1; then
     break
@@ -76,7 +71,6 @@ python -m uvicorn src.app:app \
   &
 PIDS+=($!)
 
-# Wait for observe-service
 for i in $(seq 1 20); do
   if curl -sf "http://localhost:${OBSERVE_PORT}/health" >/dev/null 2>&1; then
     break
@@ -84,31 +78,11 @@ for i in $(seq 1 20); do
   sleep 0.5
 done
 
-# ── Start gateway(保留,待整体退役决策)────────────────────
-# web 弃用后其 SSE 代理(execute.py 已删)零消费者,但 auth.py(JWT web 登录)
-# 去留待决策;TUI/native 不经 gateway(走 /h + observe)。
-echo "→ Starting gateway on :${GATEWAY_PORT} …"
-python -m uvicorn src.main:app \
-  --host 0.0.0.0 \
-  --port "$GATEWAY_PORT" \
-  --app-dir services/gateway \
-  &
-PIDS+=($!)
-
-# Wait for gateway
-for i in $(seq 1 20); do
-  if curl -sf "http://localhost:${GATEWAY_PORT}/health" >/dev/null 2>&1; then
-    break
-  fi
-  sleep 0.5
-done
-
 echo ""
-echo "✅  Backend services running (web deprecated → TUI handoff)!"
+echo "✅  Backend services running (web/gateway deprecated → TUI handoff)!"
 echo ""
 echo "   Orchestrator →  http://localhost:${ORCHESTRATOR_PORT}"
 echo "   Observe      →  http://localhost:${OBSERVE_PORT}  (TUI 观测层)"
-echo "   Gateway      →  http://localhost:${GATEWAY_PORT}  (保留,待整体退役)"
 echo ""
 echo "→ TUI 接力前端(另开终端):"
 echo "   cargo run --release --manifest-path apps/tui-rs/Cargo.toml"

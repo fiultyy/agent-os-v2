@@ -1,9 +1,0 @@
-# Virtual envs (uv)
-.venv/
-
-# Python cache
-__pycache__/
-*.py[cod]
-
-# Runtime data (auth.db / JWT revocation list etc.)
-data/

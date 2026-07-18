@@ -1,28 +1,4 @@
 services:
-  gateway:
-    # web 弃用后 gateway SSE 代理(execute.py 已删)零消费者;保留待整体退役决策
-    # (auth.py JWT web 登录去留)。TUI/native 不经 gateway(走 /h + observe)。
-    build:
-      context: ./services/gateway
-      dockerfile: Dockerfile
-    ports:
-      - "8000:8000"
-    environment:
-      - ORCHESTRATOR_URL=http://orchestrator:8001
-      # login intent 闭环:仅设 AUTH_API_KEYS 即可(/auth/token 独立于 AUTH_ENABLED 校验)
-      - AUTH_API_KEYS=qa-test-key-1
-      - PROMPT_MANAGER_URL=http://prompt-manager:8002
-      - RESOURCE_MANAGER_URL=http://resource-manager:8004
-    depends_on:
-      orchestrator:
-        condition: service_healthy
-    healthcheck:
-      # CMD-SHELL:docker-compose v1 把 CMD 数组按空格分割致 -c 脚本截断;改单字符串 sh -c
-      test: ["CMD-SHELL", "python -c 'import urllib.request;urllib.request.urlopen(\"http://localhost:8000/health\")' || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   orchestrator:
     build:
       context: ./services/orchestrator
@@ -33,7 +9,6 @@ services:
       # sqlite 持久化:sqlitestore.py db_path="data/memories.db" + engine.py PITFALLS_DB=data/pitfalls.db
       - ./services/orchestrator/data:/app/data
     environment:
-      - GATEWAY_URL=http://gateway:8000
       # orchestrator→observe(TUI 观测层;容器内用服务名,localhost 解析自身致 ingest 断)
       - OBSERVE_URL=http://observe:8002
       # 私人系统:智谱 anthropic 协议 + glm-4.7(coding plan 额度在 /api/anthropic 通道)

@@ -1,4 +1,4 @@
-.PHONY: dev dev-gateway dev-orch dev-observe dev-tui install build clean lint proto
+.PHONY: dev dev-orch dev-observe dev-tui install build clean lint
 
 # Install all dependencies
 install:
@@ -8,15 +8,11 @@ install:
 dev:
 	docker compose up
 
-# Start API Gateway (保留,待整体退役决策;web 弃用后零 SSE 消费者)
-dev-gateway:
-	cd services/gateway && uvicorn src.main:app --reload --port 8000
-
 # Start Orchestrator (native /h 路径 + 多 agent + memory)
 dev-orch:
 	cd services/orchestrator && uvicorn src.engine:app --reload --port 8001
 
-# Start observe-service (TUI 观测层,web 弃用后 TUI 接力)
+# Start observe-service (TUI 观测层)
 dev-observe:
 	cd services/observe && uvicorn src.app:app --reload --port 8002
 
@@ -38,7 +34,3 @@ clean:
 # Lint
 lint:
 	pnpm lint
-
-# Generate proto stubs
-proto:
-	python -m grpc_tools.protoc -I packages/proto --python_out=services/gateway/src/generated --grpc_python_out=services/gateway/src/generated packages/proto/*.proto
