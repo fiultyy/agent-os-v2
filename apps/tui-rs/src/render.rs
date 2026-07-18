@@ -1091,7 +1091,8 @@ fn update_action_popup_bodies(app: &mut App) {
         // 行 0:harness 选择按钮(可点击 700/701)。已选高亮 [x],未选 [ ]。
         let claw_mark = if matches!(app.new_popup, Some(NewKind::Claw)) { "[x]claw" } else { "[ ]claw" };
         let cc_mark = if matches!(app.new_popup, Some(NewKind::Cc)) { "[x]cc" } else { "[ ]cc" };
-        let mut lines: Vec<String> = vec![format!(" {}  {}   (或键 c/d)", claw_mark, cc_mark)];
+        let ao_mark = if matches!(app.new_popup, Some(NewKind::AoV2)) { "[x]ao" } else { "[ ]ao" };
+        let mut lines: Vec<String> = vec![format!(" {}  {}  {}   (或键 c/d/o)", claw_mark, cc_mark, ao_mark)];
         match app.new_popup {
             None => {
                 lines.push("(选类型后显候选)".to_string());
@@ -1109,6 +1110,10 @@ fn update_action_popup_bodies(app: &mut App) {
                     let mark = if i == app.new_idx { "▸" } else { " " };
                     lines.push(format!("{} {}", mark, c));
                 }
+            }
+            Some(NewKind::AoV2) => {
+                lines.push("agent-os-v2:自研 native harness(无需 agent/cwd)".to_string());
+                lines.push("Enter 创建(服务端自动生成 session_id)".to_string());
             }
         }
         // 行末:Create / Cancel 按钮(可点击 790/791)。
@@ -1154,6 +1159,7 @@ fn register_new_popup_clickmap(app: &mut App) {
         let id = match app.new_popup {
             Some(NewKind::Claw) => 710 + (i - cand_start),
             Some(NewKind::Cc) => 720 + (i - cand_start),
+            Some(NewKind::AoV2) => continue, // ao 无候选行
             None => continue,
         };
         app.popup_clickmap.register(Rect::new(inner_x, y, inner_w, 1), id);
