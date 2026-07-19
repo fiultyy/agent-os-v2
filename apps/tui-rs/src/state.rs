@@ -911,6 +911,7 @@ impl App {
         let norm_ht_v = norm_ht(&raw_ht);
         let msg = self.turn_msg.clone();
         self.turn_msg.clear();
+        self.textarea.clear(); // 清输入区(Enter 发送后),否则残留致下次 turn msg 累加
         if !msg.trim().is_empty() {
             let key = format!("{}/{}", raw_ht, sid);
             self.pending_turn = Some((key.clone(), msg.clone()));
