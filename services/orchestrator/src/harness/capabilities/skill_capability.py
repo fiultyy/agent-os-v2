@@ -1,8 +1,9 @@
 """P6 SkillCapability / make_skill_capabilities — SKILL.md → defer-able Capability.
 
 ADR: docs/adr/pydantic-ai-v2-adoption.md。把 v2 SkillLoader 扫出的 SkillEntry 包成
-2.0 Capability(defer_loading=True):模型看 catalog(name+description),按需 load_skill
-才注入 SKILL.md 正文指令(defer 披露,对齐 2.0 官方 load_skill 语义)。
+2.0 Capability(defer_loading=False, eager):SKILL.md 正文常驻 system prompt。
+原 defer 设计(模型按需 load_skill 注入正文)在 glm-5.2 实测失效(glm 不调 load meta-tool),
+eager 让正文直接可见。当前 skill 数少(1 个 ~222 tokens),R2 cache 缓解;skill 增多时重评 defer。
 
 替代 skill_executor 的 Stage1(catalog)/Stage2(按需读全文)自管逻辑:2.0 框架的
 load_capability 即 Stage2(载入 body + 激活),catalog 即 Stage1。
@@ -43,7 +44,7 @@ class SkillCapability(AbstractCapability[None]):
 
     id: str = "skill"
     description: str = ""
-    defer_loading: bool = True
+    defer_loading: bool = False  # eager(glm-5.2 不调 load_skill meta-tool)
     skill: Any = None  # SkillEntry
 
     def get_instructions(self) -> str:
@@ -69,7 +70,7 @@ def make_skill_capabilities(loader: SkillLoader) -> list[SkillCapability]:
         caps.append(SkillCapability(
             id=entry.name,
             description=entry.description or f"skill {entry.name}",
-            defer_loading=True,
+            defer_loading=False,
             skill=entry,
         ))
     return caps

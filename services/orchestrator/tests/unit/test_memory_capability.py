@@ -1,4 +1,4 @@
-"""P3 MemoryCapability 单测:defer_loading + instructions + toolset 注册 dispatch tool。
+"""P3 MemoryCapability 单测:eager(defer_loading=False)+ instructions + toolset 注册 dispatch tool。
 
 ponytail:stub ExperienceTool/KGMemoryTool(避免真 memory DB),验 capability 属性 +
 get_toolset 返带 tool 的 FunctionToolset + call_tool 端到端 dispatch 到 stub。
@@ -26,7 +26,7 @@ class _StubKG:
 def test_memory_capability_defer_and_instructions() -> None:
     cap = MemoryCapability()
     assert cap.id == "memory"
-    assert cap.defer_loading is True
+    assert cap.defer_loading is False  # eager:glm-5.2 不调 load_capability,tool 常驻 wire
     instr = cap.get_instructions()
     assert "experience_memory" in instr
     assert "kg_memory" in instr

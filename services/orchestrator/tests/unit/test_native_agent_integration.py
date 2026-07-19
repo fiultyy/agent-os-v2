@@ -31,8 +31,9 @@ class _StubEmitter:
 def test_native_agent_assembles_profile_guardrail_observe() -> None:
     """多 capability 叠加同一 Agent:profile 注入 + guardrail 护 + observe 闭环。
 
-    (memory/skill 是 defer_loading=True,TestModel 哑模型不模拟"模型主动 load_capability"
-    决策,defer 链路在 P3/P6 单测用 ts.tools introspect 验证,不进 TestModel 集成。)
+    (memory/skill 是 defer_loading=False(eager),tool 常驻 wire。原 defer 设计在 glm-5.2
+    实测失效(glm 不调 load_capability/search_tools meta-tool)→ 改 eager。toolset 注册在
+    P3/P6 单测用 ts.tools introspect 验证,不进 TestModel 集成。)
     """
     profile = AgentBaseProfile(agent_id="native")
     profile.add_layer(LayerProfile(layer=0, source="soul", content="INTEGRATION-MARKER", priority=100))
