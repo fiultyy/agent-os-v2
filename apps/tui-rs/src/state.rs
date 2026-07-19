@@ -666,6 +666,8 @@ pub struct App {
     /// optimistic 回显:do_turn 立即存用户消息(本地显 spinner 跑马灯),
     /// drain_ws 收 orche 该 cursor session 事件 → 确认 → None(去特效)。根治输入回显延迟。
     pub pending_turn: Option<(String, String)>, // (session_key, msg) per-session:切 session 不串显 spinner
+    /// #8 pending 进入时刻;Tick 检 age>60s 兜底清(trigger 失败/WS 丢 tick_started → stale spinner 永驻)。
+    pub pending_since: Option<std::time::Instant>,
     /// spinner 动画帧(Tick 递增,render 取 SPINNER[frame % len]);pending 时 poll 缩 80ms 流畅。
     pub spinner_frame: usize,
     /// 后台 fetch 全量回传:do_turn spawn trigger_turn+fetch_events → tx 发 (key, Option<events>),
@@ -813,6 +815,7 @@ impl App {
             last_action: None,
             pending_spawn: None,
             pending_turn: None,
+            pending_since: None,
             spinner_frame: 0,
             fetch_tx, fetch_rx,
             insert_mode: true,
@@ -912,6 +915,12 @@ impl App {
             self.set_cursor_session(self.cursor - 1);
         }
     }
+
+    /// 清 pending spinner + 时刻(#8 配套:所有 pending_turn=None 点走此,防漏清 pending_since)。
+    fn clear_pending(&mut self) {
+        self.pending_turn = None;
+        self.pending_since = None;
+    }
     pub fn fetch_claw_events(&mut self) {
         if let Some(evs) = fetch_events("openclaw", CLAW_SESSION) {
             self.events
@@ -932,6 +941,7 @@ impl App {
         if !msg.trim().is_empty() {
             let key = format!("{}/{}", raw_ht, sid);
             self.pending_turn = Some((key.clone(), msg.clone()));
+            self.pending_since = Some(std::time::Instant::now()); // #8 记时刻,Tick 超 60s 兜底清
             let tx = self.fetch_tx.clone();
             std::thread::spawn(move || {
                 let _ = trigger_turn(&norm_ht_v, &sid, &msg);
@@ -1332,10 +1342,17 @@ impl App {
                             // 只在 has_tick 时 replace:observe 是 WS 源(broadcast=ingest 后),全量 ⊇ WS 已推,
                             // 故含 tick_started 的 fetch 全量可信、不丢 WS 增量。治 replace 覆盖 bug。
                             self.events.insert(key, evs);
-                            self.pending_turn = None;
+                            self.clear_pending();
                         }
                         Some(_) => { /* has_tick=false:observe 未 ingest tick_started,不动,等 WS drain_ws 清 pending */ }
-                        None => { self.pending_turn = None; /* fetch 失败(evs=None):对齐注释,#7 */ }
+                        None => { self.clear_pending(); /* fetch 失败(evs=None):对齐注释,#7 */ }
+                    }
+                }
+                // #8 超时兜底:trigger 失败/WS 丢 tick_started → pending 永驻 spinner 永转。
+                // pending age >= 60s 视为 stale(正常 native turn <10s;60s 保守不误清慢 turn)→ 清。
+                if let Some(since) = self.pending_since {
+                    if since.elapsed().as_secs() >= 60 {
+                        self.clear_pending();
                     }
                 }
                 // spinner 跑马灯帧推进(pending 时 main.rs poll 缩 80ms → ~12fps 流畅)。
@@ -2610,7 +2627,7 @@ impl App {
                         // tick_started 仍能清其 pending)+ msg 匹配(避免历史/空 request 误清)。
                         if let Some((pk, pm)) = &self.pending_turn {
                             if pk == &key && !req.is_empty() && pm.starts_with(req) {
-                                self.pending_turn = None;
+                                self.clear_pending();
                             }
                         }
                     }
@@ -3776,6 +3793,23 @@ mod tests {
         tx.send(WsMsg::Event { key: key.clone(), ev }).unwrap();
         app.drain_ws();
         assert!(app.pending_turn.is_none(), "#5 starts_with 匹配截断 req 清 pending(治 >500 字 spinner 永转)");
+    }
+
+    /// #8:pending age >= 60s → Tick 兜底清(trigger 失败/WS 丢 tick_started 致 stale spinner 不永驻)。
+    #[test]
+    fn pending_timeout_clears_stale_spinner() {
+        let mut app = App::new(crate::kitty::detect());
+        app.pending_turn = Some(("agent-os-v2/s1".into(), "ping".into()));
+        // 模拟 61s 前进入 pending(trigger 失败/WS 丢 → 永不自然清)。
+        app.pending_since = Some(std::time::Instant::now().checked_sub(std::time::Duration::from_secs(61)).unwrap());
+        app.handle(&crate::events::AppEvent::Tick);
+        assert!(app.pending_turn.is_none(), "#8 age>=60s 兜底清 stale pending");
+        assert!(app.pending_since.is_none(), "since 同步清");
+        // 未超时(刚设)不清 —— 正常 turn 不被误清。
+        app.pending_turn = Some(("agent-os-v2/s1".into(), "ping".into()));
+        app.pending_since = Some(std::time::Instant::now());
+        app.handle(&crate::events::AppEvent::Tick);
+        assert!(app.pending_turn.is_some(), "未超时(刚设)不清,保护正常 turn");
     }
 
     /// IT4 ③:PgUp 脱离跟尾(tail=false),PgDn 近底重新跟尾(tail=true)。normal 模式。
