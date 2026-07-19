@@ -12,7 +12,7 @@ import pytest
 
 from src.services import _state
 from src.services.agent_manager import create_agent_data, restore_agents_from_pg
-from src.api.routes.agents import list_agents, get_agent
+from src.services.agent_manager import list_agents_data, get_agent_data
 
 
 class FakePG:
@@ -83,7 +83,7 @@ async def test_restart_restore_consistency(clean_state) -> None:
     assert {a["name"] for a in _state.agents.values()} == {"A1", "A2"}
 
     # list_agents reads PG → same set as the restored memory.
-    listed = await list_agents()
+    listed = await list_agents_data()
     assert {a["name"] for a in listed} == {"A1", "A2"}
 
 
@@ -100,7 +100,7 @@ async def test_get_agent_reads_pg_when_available(clean_state) -> None:
     a = await create_agent_data(name="FromPG")
     _state.agents.clear()              # force the PG read path in get_agent
 
-    got = await get_agent(a["id"])
+    got = await get_agent_data(a["id"])
     assert isinstance(got, dict)
     assert got["name"] == "FromPG"
 
@@ -110,7 +110,7 @@ async def test_list_agents_falls_back_to_memory_when_pg_none(clean_state) -> Non
     _state.pg_store = None
     _state.agents["x"] = {"id": "x", "name": "MemOnly"}
 
-    listed = await list_agents()
+    listed = await list_agents_data()
     assert any(a["id"] == "x" for a in listed)
 
 

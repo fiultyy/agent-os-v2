@@ -2630,6 +2630,12 @@ impl App {
                 crate::ws::WsMsg::FlowEvent { flow_id, ev } => {
                     self.apply_flow_event(&flow_id, &ev);
                 }
+                crate::ws::WsMsg::MemoryEvent { ev } => {
+                    self.apply_memory_event(&ev);
+                }
+                crate::ws::WsMsg::OrchEvent { session_id, ev } => {
+                    self.apply_orch_event(&session_id, &ev);
+                }
                 crate::ws::WsMsg::Error { key, .. } => {
                     // 连接断;不重连(WS manager idempotent,主 loop 下次 subscribe 重建)。
                     // ponytail: 自动重连 defer。保留 key 在 subs(已 detach)。
@@ -2696,6 +2702,31 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// memory WS 事件 → app.events["memory/memory"](observe tab 事件流渲染)。
+    /// ponytail: 最小——只 push 事件流,不建 panel/状态结构;DAG 聚合等 orchestrate 成主力再加。
+    fn apply_memory_event(&mut self, ev: &ObserveEvent) {
+        self.push_event("memory/memory".to_string(), ev.clone());
+    }
+
+    /// orchestrate WS 事件 → app.events["orchestrate/{session_id}"](observe tab 事件流渲染)。
+    /// ponytail: 同 apply_memory_event——只 push 事件流,聚合 defer。
+    fn apply_orch_event(&mut self, session_id: &str, ev: &ObserveEvent) {
+        let key = format!("orchestrate/{}", session_id);
+        self.push_event(key, ev.clone());
+    }
+
+    /// 共用:push ev 到 app.events[key](event_id 去重 + cap 200,同 drain_ws Event 分支)。
+    fn push_event(&mut self, key: String, ev: ObserveEvent) {
+        let evs = self.events.entry(key.clone()).or_default();
+        if !ev.event_id.is_empty() && evs.iter().any(|e| e.event_id == ev.event_id) {
+            return;
+        }
+        if evs.len() >= 200 {
+            evs.remove(0);
+        }
+        evs.push(ev);
     }
 }
 

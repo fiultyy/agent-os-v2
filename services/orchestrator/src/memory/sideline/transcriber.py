@@ -1,3 +1,4 @@
+# ARCHIVED — side-agent parallel mechanism (pre-AO2),不挂入系统,待用 AO2 capability 重接。
 """SidelineTranscriber — 将 transcript 异步转化为 KG entities/relations.
 
 设计原则（来自 SidelineMemoryAgent）：

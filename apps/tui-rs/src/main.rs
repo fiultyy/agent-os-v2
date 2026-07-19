@@ -134,6 +134,8 @@ fn main() -> io::Result<()> {
     if let Some(s) = app.flat.get(app.cursor) {
         app.ws.as_ref().unwrap().subscribe(&s.harness_type, &s.session_id);
     }
+    // Part4:memory 全局常驻订阅(observe memory lifecycle 广播,session 固定 "memory")。
+    app.ws.as_ref().unwrap().subscribe("memory", "memory");
 
     let res = run(&mut terminal, app);
 

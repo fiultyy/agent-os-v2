@@ -342,21 +342,7 @@ async def execute(req: ExecuteRequest) -> StreamingResponse:
                     )
                 except Exception:
                     logger.warning("conversation record_turn failed", exc_info=True)
-            # task_consolidator: ModelMessage → list[dict] adapter(consolidate_task 签名要 list[dict])。
-            if _state.task_consolidator is not None:
-                try:
-                    msgs = [
-                        {"role": getattr(m, "role", ""), "content": getattr(m, "content", "")}
-                        for m in result.all_messages()
-                    ]
-                    _fire_write(
-                        req.agent_id,
-                        lambda: _state.task_consolidator.consolidate_task(
-                            agent_id=req.agent_id, session_id=session_id, messages=msgs,
-                        ),
-                    )
-                except Exception:
-                    logger.warning("task_consolidator failed", exc_info=True)
+            # Part5: side-agent task-experience consolidation removed (archived).
         except Exception as exc:
             agent["status"] = "idle"
             yield _sse("error", {"message": str(exc)})

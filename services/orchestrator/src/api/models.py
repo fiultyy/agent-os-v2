@@ -5,14 +5,6 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 
-class CreateAgentRequest(BaseModel):
-    name: str = "New Agent"
-    description: str = ""
-    model: str = "glm-4-flash"
-    system_prompt: str = ""
-    tools: list[str] = []
-
-
 class ExecuteRequest(BaseModel):
     agent_id: str
     input: str

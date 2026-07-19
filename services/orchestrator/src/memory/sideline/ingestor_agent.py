@@ -1,3 +1,4 @@
+# ARCHIVED — side-agent parallel mechanism (pre-AO2),不挂入系统,待用 AO2 capability 重接。
 """IngestorAgent — ① memory pipeline side agent [Part 1 Step 1].
 
 LLM semantic ingestion: raw memory text → KG entities/relations + five

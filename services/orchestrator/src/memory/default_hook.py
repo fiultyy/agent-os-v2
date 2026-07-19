@@ -4,8 +4,9 @@ Moved verbatim in behaviour from ``chat.py`` (L122–206 / L233 / L370–388 /
 L410): migrate working→session, context compression (sync/async), session→
 episodic migration, and session creation. ``chat.py`` now emits events;
 this hook performs the actual ``memory_service`` / ``memory_migrator``
-calls. SSE notifications (``emit_memory_event``) originate here, which
-decouples the internal event bus from the SSE push layer.
+calls. Observe forwarding is handled by ``MemoryObserveHook`` (Part2),
+which runs after this hook at OBSERVER priority — this hook no longer
+touches the push layer.
 
 Construction-injected dependencies make the hook unit-testable without
 ``_state``: tests pass a real or fake ``MemoryService`` /
@@ -82,11 +83,6 @@ class DefaultMemoryHook(MemoryHook):
 
     # Lazy import keeps the hook importable / testable without the global
     # _state holder being initialised first.
-    @staticmethod
-    def _emit_sse(event: str, details: dict[str, Any]) -> None:
-        from src.services import _state
-
-        _state.emit_memory_event(event, details)
 
     async def _submit(
         self, agent_id: str, coro_fn: Callable[[], Awaitable[Any]],
@@ -197,19 +193,9 @@ class DefaultMemoryHook(MemoryHook):
                             ),
                         )
         except asyncio.TimeoutError:
-            # Sync compression timed out — nothing landed, no SSE.
+            # Sync compression timed out — nothing landed.
             return CompressResult(level="sync")
 
-        self._emit_sse(
-            "compress",
-            {
-                "agent_id": ctx.agent_id,
-                "level": "sync",
-                "original_count": result.original_count,
-                "retained_count": result.compressed_count,
-                "summary_count": len(result.summaries),
-            },
-        )
         return CompressResult(
             triggered=True,
             level="sync",
@@ -250,16 +236,6 @@ class DefaultMemoryHook(MemoryHook):
                             it.id, accessor_id=ctx.accessor_id, archived=True,
                         ),
                     )
-            self._emit_sse(
-                "compress",
-                {
-                    "agent_id": ctx.agent_id,
-                    "level": "async",
-                    "original_count": len(items),
-                    "retained_count": len(retained),
-                    "summary_count": len(summaries),
-                },
-            )
 
         await self._async_compressor.trigger(items, on_compressed=_on_compressed)
         # ASYNC fires in the background; summary ids land via the callback
@@ -279,13 +255,3 @@ class DefaultMemoryHook(MemoryHook):
                 ctx.session_id, ctx.agent_id,
             ),
         )
-        if ids:
-            self._emit_sse(
-                "migrate",
-                {
-                    "agent_id": ctx.agent_id,
-                    "path": "session_to_episodic",
-                    "count": len(ids),
-                    "ids": ids[:10],
-                },
-            )

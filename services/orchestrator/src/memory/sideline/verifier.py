@@ -1,3 +1,4 @@
+# ARCHIVED — side-agent parallel mechanism (pre-AO2),不挂入系统,待用 AO2 capability 重接。
 """
 RecallVerifier - recall 质量验证器
 

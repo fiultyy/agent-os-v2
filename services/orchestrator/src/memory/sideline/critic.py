@@ -1,3 +1,4 @@
+# ARCHIVED — side-agent parallel mechanism (pre-AO2),不挂入系统,待用 AO2 capability 重接。
 """CriticAgent — 事实纠正 agent.
 
 当 recall 结果置信度低于阈值时注入纠正。

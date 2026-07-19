@@ -2,20 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
 import os
 import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
-
-
-# ── SSE helper ─────────────────────────────────────────────────────
-
-def sse(event: str, data: dict) -> str:
-    """Format an SSE message string."""
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
 # ── Agent state ────────────────────────────────────────────────────
@@ -93,9 +84,9 @@ profile_registry: Any = None
 
 # ── Memory event bus ──────────────────────────────────────────────
 
-# P1: internal lifecycle event bus (structured events + hooks). Decoupled
-# from the SSE push below — DefaultMemoryHook calls emit_memory_event as
-# a side-effect of handling an event.
+# P1: internal lifecycle event bus (structured events + hooks). DefaultMemoryHook
+# (SYSTEM) owns memory side-effects; MemoryObserveHook (OBSERVER) forwards
+# lifecycle events to observe-service (Part2).
 memory_event_bus: Any = None
 
 # W3: bounded-concurrency memory write pool (multi-agent + per-agent
@@ -124,56 +115,10 @@ neural_store: Any = None
 neural_engine: Any = None
 neural_hook: Any = None
 
-memory_event_subscribers: list[asyncio.Queue[str]] = []
-
-
-def _push_sse(sse_msg: str) -> None:
-    """Push a formatted SSE string to every subscriber queue (pruning full ones)."""
-    dead: list[asyncio.Queue[str]] = []
-    for q in memory_event_subscribers:
-        try:
-            q.put_nowait(sse_msg)
-        except asyncio.QueueFull:
-            dead.append(q)
-    for q in dead:
-        memory_event_subscribers.remove(q)
-
-
-def emit_memory_event(event: str, details: dict[str, Any]) -> None:
-    """Broadcast a memory lifecycle event to all SSE subscribers."""
-    _push_sse(sse("memory_event", {"event": event, **details}))
-
-
-def emit_agent_message(message: Any, recipient_id: str) -> None:
-    """Bridge an inter-agent AgentMessage onto the SSE stream.
-
-    Registered as a CommunicationBus delivery callback by engine.py so direct
-    agent-to-agent deliveries surface as ``agent_message`` SSE events over the
-    same subscriber stream as memory events. The front-end dispatch of these
-    (rendering an agent_message in the UI) is L4; this is the back-end bridge.
-    """
-    _push_sse(sse("agent_message", {
-        "message_id": getattr(message, "id", ""),
-        "sender_id": getattr(message, "sender_id", ""),
-        "recipient_id": recipient_id,
-        "session_id": getattr(message, "session_id", ""),
-        "workspace_id": getattr(message, "workspace_id", ""),
-        "content": getattr(message, "content", ""),
-        "message_type": str(getattr(message, "message_type", "")),
-    }))
-
-
-def subscribe_memory_events() -> asyncio.Queue[str]:
-    """Register a queue to receive memory lifecycle SSE events."""
-    q: asyncio.Queue[str] = asyncio.Queue(maxsize=200)
-    memory_event_subscribers.append(q)
-    return q
-
-
-def unsubscribe_memory_events(q: asyncio.Queue[str]) -> None:
-    """Remove a previously subscribed event queue."""
-    if q in memory_event_subscribers:
-        memory_event_subscribers.remove(q)
+# Part2: memory lifecycle → observe. ObserveEmitter wired by engine.py;
+# engine.py + memory/db_watcher.py ship prune/forget/migrate events (not bus
+# EventTypes) directly through it. None until engine.py wires it.
+memory_observe_emitter: Any = None
 
 
 # ── Degradation accounting (#3) ────────────────────────────────────
@@ -214,39 +159,22 @@ def log_execution_step(node_name: str, state: Any, status: str = "done") -> None
 # In-memory ring buffer of runtime observations (anomaly / error-spike /
 # stalled). PURE MEMORY — never persisted to memory_service / memories.db /
 # the recall path (memory red-line R1-R8). Surfaced via /debug/status
-# (recent_observations) and pushed live as ``runtime_observation`` SSE events
-# (consumed by the front-end DebugPanel). Distinct from degraded_stats, which
-# counts side-agent LLM-channel degrade, not agent execution anomalies.
+# (recent_observations). The Part2 observe migration removed the legacy
+# ``runtime_observation`` SSE push (it shared the now-deleted memory SSE
+# stream); runtime observations now live only in this ring buffer.
 
 runtime_observations: list[dict[str, Any]] = []
 MAX_RUNTIME_OBSERVATIONS: int = 200
 
 
-def emit_runtime_observation(
-    kind: str, agent_id: str, detail: dict[str, Any] | None = None,
-) -> None:
-    """Broadcast a runtime observation as an SSE event (mirrors emit_agent_message)."""
-    payload: dict[str, Any] = {
-        "kind": kind,
-        "agent_id": agent_id,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-    if detail:
-        payload.update(detail)
-    _push_sse(sse("runtime_observation", payload))
-
-
 def record_observation(
     kind: str, agent_id: str, detail: dict[str, Any] | None = None,
 ) -> None:
-    """Append a runtime observation to the in-memory ring buffer and push it live.
+    """Append a runtime observation to the in-memory ring buffer.
 
-    The buffer feeds ``GET /debug/status``; the live push feeds the front-end
-    DebugPanel. Pure in-memory — must never write to memory_service / memories.
+    The buffer feeds ``GET /debug/status``. Pure in-memory — must never write
+    to memory_service / memories.
     """
-    # Flatten detail to the top level — mirrors emit_runtime_observation's
-    # payload shape so /debug/status (recent_observations) and the live SSE
-    # stream stay structurally identical for any consumer.
     entry: dict[str, Any] = {
         "kind": kind,
         "agent_id": agent_id,
@@ -257,7 +185,6 @@ def record_observation(
     runtime_observations.append(entry)
     if len(runtime_observations) > MAX_RUNTIME_OBSERVATIONS:
         del runtime_observations[: len(runtime_observations) - MAX_RUNTIME_OBSERVATIONS]
-    emit_runtime_observation(kind, agent_id, detail)
 
 
 def recent_observations(limit: int = 50) -> list[dict[str, Any]]:

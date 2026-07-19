@@ -286,12 +286,13 @@ class MemoryDBWatcher:
                         "stale": pr.to_stale,
                         "archived": pr.to_archived,
                     }
-                    if emit:
-                        _state.emit_memory_event("prune", {
+                    if emit and _state.memory_observe_emitter is not None:
+                        from src.memory.observe_hook import memory_event
+                        await _state.memory_observe_emitter.emit(memory_event("prune", {
                             "agent_id": agent_id, "trigger": trigger,
                             "scanned": pr.scanned, "stale": pr.to_stale,
                             "archived": pr.to_archived,
-                        })
+                        }))
                 except Exception as exc:
                     logger.exception("watcher prune failed for %s", agent_id)
                     self.last_error = f"prune: {exc}"
@@ -303,12 +304,13 @@ class MemoryDBWatcher:
                         "scanned": fr.scanned,
                         "archived": fr.archived,
                     }
-                    if emit:
-                        _state.emit_memory_event("forget", {
+                    if emit and _state.memory_observe_emitter is not None:
+                        from src.memory.observe_hook import memory_event
+                        await _state.memory_observe_emitter.emit(memory_event("forget", {
                             "agent_id": agent_id, "trigger": trigger,
                             "scanned": fr.scanned, "archived": fr.archived,
                             "archived_ids": fr.archived_ids[:10],
-                        })
+                        }))
                 except Exception as exc:
                     logger.exception("watcher forget failed for %s", agent_id)
                     self.last_error = f"forget: {exc}"
@@ -317,13 +319,14 @@ class MemoryDBWatcher:
                 try:
                     migrate_ids = await _state.memory_migrator.migrate_episodic_to_semantic(agent_id)
                     result["migrated"] = len(migrate_ids)
-                    if emit:
-                        _state.emit_memory_event("migrate", {
+                    if emit and _state.memory_observe_emitter is not None:
+                        from src.memory.observe_hook import memory_event
+                        await _state.memory_observe_emitter.emit(memory_event("migrate", {
                             "agent_id": agent_id, "trigger": trigger,
                             "path": "episodic_to_semantic",
                             "count": len(migrate_ids),
                             "ids": migrate_ids[:10],
-                        })
+                        }))
                 except Exception as exc:
                     logger.exception("watcher migrate failed for %s", agent_id)
                     self.last_error = f"migrate: {exc}"
