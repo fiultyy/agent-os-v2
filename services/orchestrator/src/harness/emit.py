@@ -79,7 +79,17 @@ class ObserveEmitter:
             return False
 
     async def emit(self, event: Dict[str, Any]) -> None:
-        """Ship one ObserveEvent dict. Fire-and-forget."""
+        """Ship one ObserveEvent dict. Fire-and-forget.
+
+        Lazy (re)connect: the startup ``connect()`` may fail when observe isn't
+        up yet (start.sh brings orchestrator up before observe), leaving
+        ``_ws=None``. On a None ws we retry connect here before giving up; a send
+        failure resets ``_ws`` so the next emit reconnects. Without this the
+        memory lifecycle emitter (connected once at startup) silently drops
+        every event when observe was late to start.
+        """
+        if self._ws is None:
+            await self.connect()
         if self._ws is None:
             return
         try:
@@ -92,6 +102,7 @@ class ObserveEmitter:
                 "observe ingest emit failed (%s): %s",
                 event.get("event_type", "?"), e,
             )
+            self._ws = None  # 断线:下次 emit 惰性重连
 
     async def close(self) -> None:
         try:
