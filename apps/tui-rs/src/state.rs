@@ -634,7 +634,7 @@ pub struct App {
     /// Control 对话区 turn 总数(render_turn_stream 分组数,footer N/M 用)。
     pub control_turn_count: usize,
     /// render_turn_stream 缓存(key=cursor session key + 事件数;事件不变→复用,消除每帧重建)。
-    pub cached_turn_lines: Option<(String, usize, Vec<ratatui::text::Line<'static>>, usize)>,
+    pub cached_turn_lines: Option<(String, Option<(String, String)>, Vec<ratatui::text::Line<'static>>, usize)>,
     /// Control 区域缓存(draw 算 → handle mouse drag hit 用)。
     pub control_area: Rect,
     /// 输入栏 textarea 实际区(render_input_bar 算 + 存,鼠标划选用)。
@@ -883,16 +883,33 @@ impl App {
     pub fn instance_count(&self, h: &str, sid: &str) -> usize {
         self.instances.get(&format!("{}/{}", h, sid)).copied().unwrap_or(0)
     }
+    /// 统一所有 cursor 变更入口(idx 越界或 == 当前 cursor → 不动,返回 false)。
+    /// cursor 真正变化时重置对话视图状态,治三个跨 session 串线 bug:
+    /// - #2 chat_follow_tail 串(A 不追尾状态带进 B,新 turn 不滚到底)
+    /// - #3 textarea/turn_msg 草稿串(A 半截输入发到 B)
+    /// - #6 control_chat_scroll.offset clamp 改写(A 滚位置切 B 再切回归零)
+    /// ponytail: 一个函数守卫所有 caller(cursor_down/up/focus_new/click/jump_to/ctx),而非每处 patch。
+    fn set_cursor_session(&mut self, idx: usize) -> bool {
+        if idx >= self.flat.len() || idx == self.cursor {
+            return false;
+        }
+        self.cursor = idx;
+        self.fetch_current();
+        self.chat_follow_tail = true;
+        self.control_chat_scroll.scroll_to_bottom();
+        self.cached_turn_lines = None;
+        self.textarea.clear();
+        self.turn_msg.clear();
+        true
+    }
     pub fn cursor_down(&mut self) {
         if self.cursor + 1 < self.flat.len() {
-            self.cursor += 1;
-            self.fetch_current();
+            self.set_cursor_session(self.cursor + 1);
         }
     }
     pub fn cursor_up(&mut self) {
         if self.cursor > 0 {
-            self.cursor -= 1;
-            self.fetch_current();
+            self.set_cursor_session(self.cursor - 1);
         }
     }
     pub fn fetch_claw_events(&mut self) {
@@ -1308,16 +1325,17 @@ impl App {
                     let has_tick = evs.as_ref().map_or(false, |e| e.iter().any(|ev| {
                         if ev.event_type != "tick_started" { return false; }
                         let req = ev.data.get("request").and_then(|v| v.as_str()).unwrap_or("");
-                        pending.as_ref().map_or(false, |(pk, pm)| pk == &key && !req.is_empty() && pm == req)
+                        pending.as_ref().map_or(false, |(pk, pm)| pk == &key && !req.is_empty() && pm.starts_with(req))
                     }));
-                    if let Some(evs) = evs {
-                        // 只在 has_tick 时 replace:observe 是 WS 源(broadcast=ingest 后),全量 ⊇ WS 已推,
-                        // 故含 tick_started 的 fetch 全量可信、不丢 WS 增量;不含 = observe 未就绪,
-                        // 不动(保留 WS 增量,等 drain_ws tick_started 清 pending)。治 replace 覆盖 bug。
-                        if has_tick {
+                    match evs {
+                        Some(evs) if has_tick => {
+                            // 只在 has_tick 时 replace:observe 是 WS 源(broadcast=ingest 后),全量 ⊇ WS 已推,
+                            // 故含 tick_started 的 fetch 全量可信、不丢 WS 增量。治 replace 覆盖 bug。
                             self.events.insert(key, evs);
                             self.pending_turn = None;
                         }
+                        Some(_) => { /* has_tick=false:observe 未 ingest tick_started,不动,等 WS drain_ws 清 pending */ }
+                        None => { self.pending_turn = None; /* fetch 失败(evs=None):对齐注释,#7 */ }
                     }
                 }
                 // spinner 跑马灯帧推进(pending 时 main.rs poll 缩 80ms → ~12fps 流畅)。
@@ -1556,9 +1574,8 @@ impl App {
     /// new/fork 成功后把 cursor 切到新 session(刷新后按 sid 找 flat 索引)。
     pub fn focus_new_session(&mut self, sid: &str) {
         if let Some(idx) = self.flat.iter().position(|s| s.session_id == sid) {
-            self.cursor = idx;
+            self.set_cursor_session(idx);
             self.focus = FocusTarget::ControlSession(idx);
-            self.fetch_current();
             // 主动订阅新 session WS(不等 main loop 检测 sub_key 变;idempotent,确保即时收事件)。
             if let Some(mgr) = self.ws.as_ref() {
                 if let Some(s) = self.flat.get(idx) {
@@ -1775,11 +1792,10 @@ impl App {
                                 self.toggle_group(&group);
                             }
                         } else if *id >= 100 {
-                            // session 项:id-100 = flat index → 切 cursor + fetch_current。
+                            // session 项:id-100 = flat index → 切 cursor(set_cursor_session 重置视图状态)。
                             let idx = *id - 100;
                             if idx < self.flat.len() {
-                                self.cursor = idx;
-                                self.fetch_current();
+                                self.set_cursor_session(idx);
                                 self.mark_action("session");
                             }
                         } else {
@@ -1872,10 +1888,7 @@ impl App {
     /// 切 Control cursor session 后 WS manager 重订阅(observe 实时事件流入 cursor session)。
     /// 业务方法不改:仅组合现有 set panel/cursor/fetch/subscribe(UI 状态操作)。
     pub fn jump_to_control(&mut self, idx: usize) {
-        if idx < self.flat.len() {
-            self.cursor = idx;
-            self.fetch_current();
-        }
+        self.set_cursor_session(idx);
         self.panel = Panel::Control;
         self.sync_tab_from_panel();
         self.orche_online = fetch_orche_health();
@@ -1891,8 +1904,7 @@ impl App {
     /// 色块组标签点击:跳到该 harness 组的首个 session(切 cursor + fetch)。
     pub fn jump_to_group(&mut self, group: &str) {
         if let Some(idx) = self.flat.iter().position(|s| s.harness_type == group) {
-            self.cursor = idx;
-            self.fetch_current();
+            self.set_cursor_session(idx);
         }
     }
 
@@ -1979,10 +1991,7 @@ impl App {
     pub fn open_context_menu(&mut self, anchor: (u16, u16), target: RightClickTarget) {
         let items: Vec<(String, CtxAction)> = match target {
             RightClickTarget::OutlineSession(idx) => {
-                if idx < self.flat.len() {
-                    self.cursor = idx;
-                    self.fetch_current();
-                }
+                self.set_cursor_session(idx);
                 let ht = self.flat.get(self.cursor)
                     .map(|s| norm_ht(&s.harness_type)).unwrap_or_else(|| "claw".to_string());
                 let mut v = vec![
@@ -2020,10 +2029,7 @@ impl App {
                 ("Copy selection".into(), CtxAction::CopySelection),
             ],
             RightClickTarget::ObserveSession(idx) => {
-                if idx < self.flat.len() {
-                    self.cursor = idx;
-                    self.fetch_current();
-                }
+                self.set_cursor_session(idx);
                 vec![
                     ("Jump to Control".into(), CtxAction::JumpToControl(idx)),
                     ("Copy sid".into(), CtxAction::CopySid),
@@ -2603,7 +2609,7 @@ impl App {
                         // 按 pending session_key 匹配事件 key(不依赖 cursor:切 session 后原 session
                         // tick_started 仍能清其 pending)+ msg 匹配(避免历史/空 request 误清)。
                         if let Some((pk, pm)) = &self.pending_turn {
-                            if pk == &key && !req.is_empty() && pm == req {
+                            if pk == &key && !req.is_empty() && pm.starts_with(req) {
                                 self.pending_turn = None;
                             }
                         }
@@ -3714,6 +3720,62 @@ mod tests {
         app.do_turn();
         assert!(app.chat_follow_tail, "do_turn sets tail=true");
         assert_eq!(app.control_chat_scroll.offset, 39, "scroll_to_bottom locks to total-1");
+    }
+
+    /// #2/#3/#6:cursor 切换(set_cursor_session 统一入口)重置对话视图状态。
+    /// 切 session 时 follow_tail=true + scroll_to_bottom + textarea/turn_msg clear + cached_turn_lines None。
+    /// 治:A 不追尾串到 B(#2)/ A 草稿发到 B(#3)/ A 滚位置切 B 再切回归零(#6)/ 旧缓存串显(#1)。
+    #[test]
+    fn cursor_switch_resets_view_state() {
+        let mut app = App::new(crate::kitty::detect());
+        app.panel = Panel::Control;
+        app.flat = vec![
+            Session { harness_type: "claude-code".into(), session_id: "s1".into(), harness_id: "h".into(), cwd: None, running: true },
+            Session { harness_type: "claude-code".into(), session_id: "s2".into(), harness_id: "h".into(), cwd: None, running: true },
+        ];
+        app.cursor = 0;
+        app.control_chat_scroll.set_content(vec![ratatui::text::Line::from("a"); 40]);
+        app.control_chat_scroll.offset = 20;      // 旧 session 滚位置(#6)
+        app.chat_follow_tail = false;             // 用户 PgUp 过(#2)
+        app.textarea.insert_text("draft s1");     // 草稿(#3)
+        app.turn_msg = "draft s1".to_string();
+        app.cached_turn_lines = Some(("claude-code/s1".into(), None, vec![], 0));  // 旧缓存(#1)
+        app.cursor_down();  // → set_cursor_session(1)
+        assert_eq!(app.cursor, 1, "cursor moved to s2");
+        assert!(app.chat_follow_tail, "#2 follow_tail reset on switch");
+        assert_ne!(app.control_chat_scroll.offset, 20, "#6 offset not stale from prev session");
+        assert_eq!(app.control_chat_scroll.offset, 39, "scroll_to_bottom locks current content tail");
+        assert!(app.textarea.text().is_empty(), "#3 textarea cleared on switch");
+        assert!(app.turn_msg.is_empty(), "#3 turn_msg cleared on switch");
+        assert!(app.cached_turn_lines.is_none(), "#1 cache invalidated on switch");
+    }
+
+    /// #5:服务端 tick_started request[:500] 截断 → TUI 用 starts_with 匹配清 pending。
+    /// pm(完整 600 字)starts_with req(前 500 字)= true → 清 pending。
+    /// 旧 pm==req 精确匹配会失败 → spinner 永转(治 >500 字 prompt 场景)。
+    #[test]
+    fn drain_ws_long_msg_clears_pending_via_starts_with() {
+        use crate::ws::{WsManager, WsMsg};
+        use std::sync::mpsc;
+        let (tx, rx) = mpsc::channel::<WsMsg>();
+        let mut app = App::new(crate::kitty::detect());
+        app.ws = Some(WsManager::mock(rx));
+        let key = "claude-code/s1".to_string();
+        let long_msg = "x".repeat(600);
+        app.pending_turn = Some((key.clone(), long_msg.clone()));
+        // observe 截断:request = msg[:500](services/orchestrator events.py:47 / observe events.py:87)。
+        let mut data = HashMap::new();
+        data.insert("request".to_string(), serde_json::Value::String(long_msg[..500].to_string()));
+        let ev = ObserveEvent {
+            event_type: "tick_started".to_string(),
+            tick_id: "t1".to_string(),
+            harness_id: "h".to_string(),
+            data,
+            event_id: "e1".to_string(),
+        };
+        tx.send(WsMsg::Event { key: key.clone(), ev }).unwrap();
+        app.drain_ws();
+        assert!(app.pending_turn.is_none(), "#5 starts_with 匹配截断 req 清 pending(治 >500 字 spinner 永转)");
     }
 
     /// IT4 ③:PgUp 脱离跟尾(tail=false),PgDn 近底重新跟尾(tail=true)。normal 模式。

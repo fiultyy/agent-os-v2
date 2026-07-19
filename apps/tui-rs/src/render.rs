@@ -796,12 +796,15 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
     match app.control_right_tabs.active {
         0 => {
             let (mut ev_lines, n_turns) = if let Some(evs) = app.events.get(&key) {
-                // B1 缓存:cursor session key + 事件数不变 → 复用(消除每帧 render_turn_stream 重建)。
-                let count = evs.len();
-                let need = app.cached_turn_lines.as_ref().map_or(true, |c| c.0 != key || c.1 != count);
+                // B1 缓存:cursor session key + last event 签名不变 → 复用(消除每帧 render_turn_stream 重建)。
+                // 签名用 last event (event_type, event_id) 替代 count(evs.len()):drain_ws cap=200 后
+                // remove(0)+push 使 len 恒 200 → count 不变但内容推进 → 旧 lines 永复用致对话冻结(#1)。
+                // last event 在 cap 推进/新事件到达时必变 → 强制重建;REST 全量 replace 同样失效。
+                let sig = evs.last().map(|e| (e.event_type.clone(), e.event_id.clone()));
+                let need = app.cached_turn_lines.as_ref().map_or(true, |c| c.0 != key || c.1 != sig);
                 if need {
                     let (lines, n) = control::render_turn_stream(evs);
-                    app.cached_turn_lines = Some((key.clone(), count, lines.clone(), n));
+                    app.cached_turn_lines = Some((key.clone(), sig, lines.clone(), n));
                     (lines, n)
                 } else {
                     let c = app.cached_turn_lines.as_ref().unwrap();
