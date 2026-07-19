@@ -12,12 +12,14 @@ from .guardrail_capability import GuardrailCapability
 from .memory_capability import MemoryCapability
 from .memory_writer_capability import MemoryWriterCapability
 from .observe_capability import ObserveCapability
-from .profile_capability import ProfileCapability
+from .profile_capability import LayerCapability, ProfileCapability, make_profile_capabilities
 from .skill_capability import SkillCapability, make_skill_capabilities
 from .tool_bridge_capability import ToolBridgeCapability
 
 __all__ = [
     "ProfileCapability",
+    "LayerCapability",
+    "make_profile_capabilities",
     "MemoryCapability",
     "MemoryWriterCapability",
     "GuardrailCapability",

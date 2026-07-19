@@ -303,6 +303,7 @@ async def _build_native_session(
         MemoryWriterCapability,
         ObserveCapability,
         ToolBridgeCapability,
+        make_profile_capabilities,
         make_skill_capabilities,
     )
     from .emit import ObserveEmitter
@@ -344,6 +345,11 @@ async def _build_native_session(
     mt = _get_memory_tools()
     if mt is not None:
         caps.append(MemoryCapability(experience_tool=mt[0], kg_tool=mt[1]))
+    # ADR-1: native profile 分层 capa 化(AGENTS.md L1+L2 → system prompt)。
+    # _state.profile_registry None(env/启动失败降级)→ make_profile_capabilities 返 []。
+    caps.extend(make_profile_capabilities(
+        _state.profile_registry.get("native") if _state.profile_registry else None
+    ))
     agent = build_native_agent(capabilities=caps)
     return {
         "agent": agent, "emitter": emitter, "messages": messages or [],

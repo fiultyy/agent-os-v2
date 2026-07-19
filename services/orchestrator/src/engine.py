@@ -125,6 +125,20 @@ _state.active_forgetting = ActiveForgetting(_state.memory_service)
 _state.context_manager = ContextManager(_state.memory_service)
 _state.context_compiler = ContextCompiler(_state.context_manager)
 
+# ADR-1: Profile 分层 Capability 化 — ProfileRegistry 装 _state,启动 load AGENTS.md
+# (L1 identity + L2 guidelines;L0 SOUL.md 缺静默跳过)。routes._build_native_session
+# 经 make_profile_capabilities 注入 native Agent。失败降级 None(不阻塞启动)。
+try:
+    from src.agent.profile_registry import ProfileRegistry
+    _state.profile_registry = ProfileRegistry()
+    _state.profile_registry.load_from_files(
+        agent_id="native", workspace_path="/home/yy/projects/agent-os-v2",
+    )
+    logger.info("ProfileRegistry wired (native profile loaded)")
+except Exception:
+    logger.warning("ProfileRegistry init failed — degrading to None", exc_info=True)
+    _state.profile_registry = None
+
 # ── Tool register (L2 通电):清单制注册已实现的 primitive+skill 工具 ─────
 # composite(browser_flow_execute / code_review_run)显式跳过 —— 它们重依赖
 # browser / playwright / code 编排链,在最小 wiring 下会拖累启动。import 容错:

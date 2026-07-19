@@ -80,6 +80,12 @@ tool_executor: Any = None
 communication_bus: Any = None
 concurrency_controller: Any = None
 
+# ── Profile (ADR-1) ────────────────────────────────────────────────
+# ProfileRegistry:engine.py 启动装配(load_from_files 加载 AGENTS.md L1+L2)。
+# routes._build_native_session 经 make_profile_capabilities 注入 native Agent。
+# None = 未装配(启动失败降级),make_profile_capabilities(None) 返 [](None-safe)。
+profile_registry: Any = None
+
 # NOT-WIRED (deferred): ConditionalSpawner 实例装配块已从 engine.py 移除 ——
 # 生产 /v1/orchestrate 经 _agent_manager_shim 绕过 spawner,spawn() 零生产调用。
 # ConditionalSpawner 类本身保留(见 src/agent/meta/conditional_spawner.py,

@@ -1,10 +1,11 @@
-"""P2 ProfileCapability — AgentBaseProfile → pydantic-ai 2.0 AbstractCapability.
+"""P2 ProfileCapability — AgentBaseProfile → pydantic-ai 2.0 AbstractCapability。
 
-ADR: docs/adr/pydantic-ai-v2-adoption.md。把 v2 的分层 profile(L0-L4 → system prompt)
-包成 2.0 的 get_instructions,挂 native Agent 自动注入 system prompt。
+ADR-1(docs/adr/native-v2-wiring.md):分层 Capability 化 — 每 LayerProfile → 独立
+LayerCapability(get_instructions 返单层 content 带 `=== source (Lx) ===` 标记)。
+make_profile_capabilities 按 L0→L4 序生成,routes.py caps extend 后 pydantic-ai 按 caps
+序拼 system prompt → L0→L4 叠加。常驻(defer_loading=False),保 L0-L5 确定性叠加。
 
-profile 是常驻指令(defer_loading=False):每次 run 都生效,不靠模型 load_capability。
-(按层 defer 会破坏 L0-L5 确定性叠加,ADR 不推荐。)
+老 ProfileCapability(整体 compile)保留作单 capa 兼容;新代码用 LayerCapability。
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from dataclasses import dataclass
 
 from pydantic_ai.capabilities import AbstractCapability
 
-from src.agent.profile import AgentBaseProfile
+from src.agent.profile import AgentBaseProfile, LayerProfile
 
 
 @dataclass
@@ -28,3 +29,40 @@ class ProfileCapability(AbstractCapability[None]):
     def get_instructions(self) -> str:
         """L0-L4 → system prompt;profile 未注入返空串(no-op capability)。"""
         return self.profile.compile() if self.profile is not None else ""
+
+
+@dataclass
+class LayerCapability(AbstractCapability[None]):
+    """单层 profile → 独立 capability(ADR-1 分层 capa 化)。
+
+    每层一个实例,pydantic-ai 按 caps 序拼 system prompt → L0→L4 叠加。
+    defer_loading=False 常驻(保 L0-L5 确定性叠加;ADR-1 红线)。
+    id 须 per-instance 唯一(pydantic-ai 校验),格式 `layer_{L}_{source}`。
+    """
+
+    layer: int = 0
+    source: str = ""
+    content: str = ""
+    id: str = "layer"
+    defer_loading: bool = False
+
+    def get_instructions(self) -> str:
+        return f"=== {self.source} (L{self.layer}) ===\n{self.content}"
+
+
+def make_profile_capabilities(profile: AgentBaseProfile | None) -> list[LayerCapability]:
+    """AgentBaseProfile → list[LayerCapability](每 LayerProfile 一条,L0→L4 序)。
+
+    profile None → 返 [](routes None-safe)。L0→L4 序匹配 AgentBaseProfile.compile,
+    pydantic-ai 按 caps 序拼 system prompt。id per-instance 唯一(`layer_{L}_{source}`)。
+    """
+    if profile is None:
+        return []
+    caps: list[LayerCapability] = []
+    for layer in range(5):
+        for lp in profile.layers.get(layer, []):
+            caps.append(LayerCapability(
+                layer=layer, source=lp.source, content=lp.content,
+                id=f"layer_{layer}_{lp.source}",
+            ))
+    return caps
