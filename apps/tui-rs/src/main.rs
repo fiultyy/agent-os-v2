@@ -194,7 +194,29 @@ fn run_dump() {
     // 让 --dump 能渲染真实 DAG 视图(不依赖 orche 在线)。orche 在线时按 f/g/D 创建真 flow。
     app.flows.push(demo_tracked_flow());
 
-    if let Some(evs) = fetch_events("openclaw", state::CLAW_SESSION) {
+    // --replay <path>:从 e2e dump JSON 加载真实事件(离线确定性,跳过网络拉取)。
+    // 用法:v2-tui-rs --dump --replay /tmp/e2e_observe_events.json
+    let replay_path: Option<String> = std::env::args().position(|a| a == "--replay")
+        .and_then(|i| std::env::args().nth(i + 1));
+    if let Some(p) = &replay_path {
+        println!("═══ --replay · {} ═══", p);
+        match std::fs::read_to_string(p) {
+            Ok(txt) => match serde_json::from_str::<
+                std::collections::HashMap<String, Vec<state::ObserveEvent>>,
+            >(&txt) {
+                Ok(map) => {
+                    for (k, evs) in &map {
+                        println!("  {} : {} 事件", k, evs.len());
+                    }
+                    for (k, evs) in map {
+                        app.events.insert(k, evs);
+                    }
+                }
+                Err(e) => println!("  解析失败: {}", e),
+            },
+            Err(e) => println!("  读取失败: {}", e),
+        }
+    } else if let Some(evs) = fetch_events("openclaw", state::CLAW_SESSION) {
         // 数实例 + 存事件(openclaw/agent:main:main 是多实例 demo session)。
         let n = evs.iter().filter(|e| !e.harness_id.is_empty())
             .map(|e| e.harness_id.as_str()).collect::<std::collections::HashSet<_>>().len();
@@ -234,6 +256,22 @@ fn run_dump() {
         print_buffer(&terminal);
         if idx < 3 {
             println!();
+        }
+    }
+
+    // 1b. memory/orch 事件流(e2e --replay 验证 TUI 消费侧:apply_memory/orch_event +
+    // render event_glyph 的 memory_event/orch_event 分支)。observe_lanes 直接打印,
+    // 不依赖 cursor/draw_stack(Observe tab 走 cursor session,这里渲染指定 key 更确定)。
+    for (k, evs) in &app.events {
+        if k == "memory/memory" || k.starts_with("orchestrate/") {
+            println!("\n═══ Observe · {} ═══", k);
+            for line in render::observe_lanes(evs) {
+                let s: String = line.spans.iter().fold(String::new(), |mut acc, sp| {
+                    acc.push_str(sp.content.as_ref());
+                    acc
+                });
+                println!("{}", s);
+            }
         }
     }
 
