@@ -25,6 +25,25 @@ from src.services import _state
 from src.memory.types import MemoryItem, MemoryOrigin, MemoryScope, MemoryState
 
 
+def _run_sync(coro):
+    """Run an async coroutine synchronously — robust to a poisoned main thread.
+
+    py3.12 + pytest-asyncio: after an async test, ``set_event_loop(None)`` leaves
+    the main thread without a loop and the deprecated ``get_event_loop()`` raises.
+    Recreate the loop when missing/closed. See feedback-pytest-asyncio-loop-pollution.
+    """
+    import asyncio
+
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            raise RuntimeError("closed")
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(coro)
+
+
 # ── Fakes ──────────────────────────────────────────────────────────
 
 
@@ -285,9 +304,8 @@ def test_retrieve_detail_default_false_preserves_legacy_contract():
         async def recall(self, **kw):
             return [MemoryItem(id="m1", content="alpha beta", agent_id="a")]
 
-    import asyncio
     agent = RetrieverAgent(_Svc())
-    ranked = asyncio.get_event_loop().run_until_complete(
+    ranked = _run_sync(
         agent.retrieve(query="alpha", agent_id="a", top_k=3)
     )
     assert len(ranked) == 1
@@ -303,9 +321,8 @@ def test_retrieve_detail_true_emits_extra_fields():
         async def recall(self, **kw):
             return [MemoryItem(id="m1", content="alpha beta", agent_id="a")]
 
-    import asyncio
     agent = RetrieverAgent(_Svc())
-    ranked = asyncio.get_event_loop().run_until_complete(
+    ranked = _run_sync(
         agent.retrieve(query="alpha", agent_id="a", top_k=3, detail=True)
     )
     assert len(ranked) == 1

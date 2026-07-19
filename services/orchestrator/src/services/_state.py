@@ -16,11 +16,8 @@ agents: dict[str, dict[str, Any]] = {}
 # ── LLM ────────────────────────────────────────────────────────────
 
 llm_client: Any = None
-# #4: side-agent 专用 LLM 实例(OpenAI 通道 / glm-4-flash)。None = 未启用,
-# side agent fallback 到 llm_client(灰度安全)。engine.py 按 SIDE_LLM_ENABLED 装配。
-side_llm_client: Any = None
-# #1: side agent LLM 应用层 timeout(秒),统一一个值避免 env 爆炸。
-# asyncio.wait_for 包裹 LLM 提炼,超时优雅降级;httpx HTTP 层 60s 兜底。
+# side-agent LLM 应用层 timeout(秒)— 仅 memory/sideline/ 归档模块引用
+# (side-agent 并行机制已从系统装配移除,见 ARCHIVED;待 AO2 capability 重接)。
 SIDELLM_TIMEOUT: float = float(os.getenv("MEMORY_SIDELLM_TIMEOUT", "40"))
 
 # ── Memory ─────────────────────────────────────────────────────────
