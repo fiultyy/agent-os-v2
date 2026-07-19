@@ -256,6 +256,28 @@ def _persist_native_messages(session_id: str, messages: list) -> None:
         logger.warning("native messages persist failed (%s)", session_id)
 
 
+async def _emit_native_usage(emitter, session_id: str, usage) -> None:
+    """usage + model → observe(TUI 状态栏 token/模型显示)。best-effort(ADR-7)。"""
+    if emitter is None:
+        return
+    try:
+        await emitter.emit({
+            "event_type": "usage",
+            "harness_type": "agent-os-v2",
+            "harness_id": f"native_{session_id[:8]}",
+            "session_id": session_id,
+            "tick_id": "",
+            "data": {
+                "input": getattr(usage, "input_tokens", 0) or 0,
+                "output": getattr(usage, "output_tokens", 0) or 0,
+                "cache_read": getattr(usage, "cache_read_tokens", 0) or 0,
+                "model": os.getenv("ANTHROPIC_MODEL", "glm-4.7"),
+            },
+        })
+    except Exception:
+        logger.warning("native usage emit failed (%s)", session_id)
+
+
 _memory_tools: tuple | None = None  # 惰性单例 (ExperienceTool, KGMemoryTool)
 
 
@@ -477,6 +499,7 @@ async def trigger_turn(
         rec["messages"] = result.all_messages()
         _store.touch(session_id)
         _persist_native_messages(session_id, rec["messages"])  # 续聊持久化(重启不丢)
+        await _emit_native_usage(rec.get("emitter"), session_id, result.usage)
         return {"session_id": session_id, "status": "completed",
                 "response": result.output}
     client = await _ensure_client(harness_type, session_id)

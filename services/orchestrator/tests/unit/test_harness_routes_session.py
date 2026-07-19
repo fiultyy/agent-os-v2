@@ -445,3 +445,40 @@ def test_get_memory_tools_constructs_and_caches(monkeypatch):
     assert mt1 == (exp_fake, kg_fake)
     assert routes._get_memory_tools() is mt1   # 缓存:二次调同对象
 
+
+# ── native usage → observe(TUI 状态栏 token/模型)─────────────────────
+
+def test_emit_native_usage_emits_usage_event():
+    """_emit_native_usage 把 result.usage + model 包成 usage event → observe。"""
+    import asyncio
+    from src.harness.routes import _emit_native_usage
+
+    emitted = []
+    class FakeEmitter:
+        async def emit(self, event):
+            emitted.append(event)
+
+    class FakeUsage:
+        input_tokens = 100
+        output_tokens = 50
+        cache_read_tokens = 200
+
+    asyncio.run(_emit_native_usage(FakeEmitter(), "abc123def456", FakeUsage()))
+    assert len(emitted) == 1
+    ev = emitted[0]
+    assert ev["event_type"] == "usage"
+    assert ev["harness_type"] == "agent-os-v2"
+    assert ev["harness_id"] == "native_abc123de"  # session_id[:8]
+    assert ev["data"]["input"] == 100
+    assert ev["data"]["output"] == 50
+    assert ev["data"]["cache_read"] == 200
+    assert ev["data"]["model"]  # 模型名非空
+
+
+def test_emit_native_usage_none_emitter_noop():
+    """emitter=None → 不 emit(best-effort,无 session 场景安全)。"""
+    import asyncio
+    from src.harness.routes import _emit_native_usage
+    # usage=None + emitter=None:getattr 兜底 + 早返,不崩
+    asyncio.run(_emit_native_usage(None, "s1", None))
+
