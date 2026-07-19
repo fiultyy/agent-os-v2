@@ -813,14 +813,19 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
             app.control_turn_count = n_turns;
             // optimistic pending 行(cache 外,每帧 spinner 变):本地立即回显 + 跑马灯特效,
             // drain_ws 收 orche 事件清 pending_turn 后自动消失(被真实 user message 行替代)。
-            if let Some(msg) = app.pending_turn.as_ref() {
-                use crate::components::control::SPINNER;
-                let sp = SPINNER[app.spinner_frame % SPINNER.len()];
-                ev_lines.push(Line::from(vec![
-                    Span::styled(format!("{} ", sp),
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                    Span::styled(msg.clone(), Style::default().fg(Color::White)),
-                ]));
+            // per-session:只显 cursor session 的 pending(切到别的 session 不串显 spinner)。
+            let cur_key = app.flat.get(app.cursor)
+                .map(|s| format!("{}/{}", s.harness_type, s.session_id));
+            if let Some((pk, msg)) = app.pending_turn.as_ref() {
+                if cur_key.as_deref() == Some(pk.as_str()) {
+                    use crate::components::control::SPINNER;
+                    let sp = SPINNER[app.spinner_frame % SPINNER.len()];
+                    ev_lines.push(Line::from(vec![
+                        Span::styled(format!("{} ", sp),
+                            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                        Span::styled(msg.clone(), Style::default().fg(Color::White)),
+                    ]));
+                }
             }
             app.control_chat_scroll.set_content(ev_lines);
             // ScrollView.render 内部按 follow_tail_flag 自动追底(内容超视口→最后一页,不超→从顶)。

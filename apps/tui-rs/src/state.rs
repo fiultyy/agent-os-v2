@@ -665,7 +665,7 @@ pub struct App {
     pub pending_spawn: Option<(crate::components::raw_exec::Harness, Option<String>)>,
     /// optimistic 回显:do_turn 立即存用户消息(本地显 spinner 跑马灯),
     /// drain_ws 收 orche 该 cursor session 事件 → 确认 → None(去特效)。根治输入回显延迟。
-    pub pending_turn: Option<String>,
+    pub pending_turn: Option<(String, String)>, // (session_key, msg) per-session:切 session 不串显 spinner
     /// spinner 动画帧(Tick 递增,render 取 SPINNER[frame % len]);pending 时 poll 缩 80ms 流畅。
     pub spinner_frame: usize,
     /// 后台 fetch 全量回传:do_turn spawn trigger_turn+fetch_events → tx 发 (key, Option<events>),
@@ -912,8 +912,8 @@ impl App {
         let msg = self.turn_msg.clone();
         self.turn_msg.clear();
         if !msg.trim().is_empty() {
-            self.pending_turn = Some(msg.clone());
             let key = format!("{}/{}", raw_ht, sid);
+            self.pending_turn = Some((key.clone(), msg.clone()));
             let tx = self.fetch_tx.clone();
             std::thread::spawn(move || {
                 let _ = trigger_turn(&norm_ht_v, &sid, &msg);
@@ -1302,11 +1302,12 @@ impl App {
                     // has_tick = fetch 含 tick_started request == pending msg(本次 user msg 确认)。
                     // 历史非空 tick_started request ≠ 本次 msg,不算 — 避免 fetch 全量含历史时误清
                     // pending 致 spinner 提前停(本次 tick_started 还没 ingest,LLM 首 token 慢)。
-                    let pending_msg = self.pending_turn.clone();
+                    // fetch key 必须匹配 pending session_key(本次 do_turn session)+ request == pending msg。
+                    let pending = self.pending_turn.clone();
                     let has_tick = evs.as_ref().map_or(false, |e| e.iter().any(|ev| {
                         if ev.event_type != "tick_started" { return false; }
                         let req = ev.data.get("request").and_then(|v| v.as_str()).unwrap_or("");
-                        !req.is_empty() && pending_msg.as_deref() == Some(req)
+                        pending.as_ref().map_or(false, |(pk, pm)| pk == &key && !req.is_empty() && pm == req)
                     }));
                     if let Some(evs) = evs {
                         // 只在 has_tick 时 replace:observe 是 WS 源(broadcast=ingest 后),全量 ⊇ WS 已推,
@@ -2575,9 +2576,8 @@ impl App {
     /// 非阻塞收 WS 事件,累积进 app.events[key](turn 事件)。
     /// 主 loop 每帧调(Tick 或 poll 间隙)。WS manager 未注入时 no-op。
     pub fn drain_ws(&mut self) {
-        // tick_started(cursor session)= turn 确认(user msg 由 tick_started.request 接管)。
-        let cursor_key = self.flat.get(self.cursor)
-            .map(|s| format!("{}/{}", s.harness_type, s.session_id));
+        // tick_started = turn 确认(user msg 由 tick_started.request 接管)。清 pending 按
+        // pending session_key 匹配事件 key(不依赖 cursor,见下),无需 cursor_key。
         // ponytail: 先抽干 channel 到本地 Vec(不可变借 self.ws),再应用(可变借 self)。
         // 避免 try_recv 借 self.ws 期间可变借 self.events/instances 的 borrow 冲突。
         let msgs: Vec<crate::ws::WsMsg> = {
@@ -2597,10 +2597,14 @@ impl App {
                     // tick_started(cursor session)且 request == pending msg = 本次 user msg 确认 → 清 pending。
                     // 必须匹配 pending msg:observe 双源(空+非空)+ 历史 tick_started request 非空但不本次,
                     // 只匹配本次 msg 才清(避免历史/空 request 误清致 spinner 提前停)。
-                    if ev.event_type == "tick_started" && cursor_key.as_deref() == Some(key.as_str()) {
+                    if ev.event_type == "tick_started" {
                         let req = ev.data.get("request").and_then(|v| v.as_str()).unwrap_or("");
-                        if !req.is_empty() && self.pending_turn.as_deref() == Some(req) {
-                            self.pending_turn = None;
+                        // 按 pending session_key 匹配事件 key(不依赖 cursor:切 session 后原 session
+                        // tick_started 仍能清其 pending)+ msg 匹配(避免历史/空 request 误清)。
+                        if let Some((pk, pm)) = &self.pending_turn {
+                            if pk == &key && !req.is_empty() && pm == req {
+                                self.pending_turn = None;
+                            }
                         }
                     }
                     // 累积 turn 事件(同 fetch_events 效果:events[key].push + 实例去重计数)。
