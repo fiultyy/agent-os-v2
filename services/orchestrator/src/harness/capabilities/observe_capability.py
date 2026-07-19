@@ -60,15 +60,25 @@ class ObserveCapability(AbstractCapability[Any]):
 
         tick_id = str(uuid.uuid4())
         tool_count = 0
+        started = False  # 延迟到首个有内容 event 才 emit tick_started(见 async for)
         # 用户消息优先(ctx.prompt);占位 [native run] 仅在 prompt 不可得时(避免 TUI 把
         # 占位当用户消息渲染 → 内容跟 cc/oc harness 不一致)。
         prompt = getattr(ctx, "prompt", None)
         user_msg = prompt if isinstance(prompt, str) and prompt.strip() else "[native run]"
-        await self._emit(
-            tick_started(HARNESS_TYPE, self.harness_id, self.session_id, tick_id, user_msg)
-        )
         try:
             async for event in stream:
+                # 延迟 tick_started 到首个有内容 event(token/tool):pydantic-ai graph
+                # 某 wrap 产生空/非内容 stream,emit 空 tick 会让 TUI 重复显示同一条
+                # 用户消息(两个 tick_id 各一 user cell)。
+                if not started:
+                    has_content = isinstance(event, (FunctionToolCallEvent, FunctionToolResultEvent)) or (
+                        isinstance(event, PartDeltaEvent) and isinstance(event.delta, TextPartDelta)
+                    )
+                    if has_content:
+                        await self._emit(
+                            tick_started(HARNESS_TYPE, self.harness_id, self.session_id, tick_id, user_msg)
+                        )
+                        started = True
                 yield event  # forward 到主路径(always)
                 if isinstance(event, FunctionToolCallEvent):
                     tool_count += 1
@@ -100,17 +110,19 @@ class ObserveCapability(AbstractCapability[Any]):
                         HARNESS_TYPE, self.harness_id, self.session_id, tick_id,
                         delta_text=event.delta.content_delta,
                     ))
-            # stream 正常耗尽 = success 闭环
-            await self._emit(tick_completed(
-                HARNESS_TYPE, self.harness_id, self.session_id, tick_id,
-                status="success", tool_count=tool_count,
-            ))
+            # stream 正常耗尽 = success 闭环(仅当 started:空/非内容 wrap 不 emit tick)
+            if started:
+                await self._emit(tick_completed(
+                    HARNESS_TYPE, self.harness_id, self.session_id, tick_id,
+                    status="success", tool_count=tool_count,
+                ))
         except Exception:
-            # 主路径异常:补 error tick 闭环(observe 不悬),再传播(不吞主异常)
-            await self._emit(tick_completed(
-                HARNESS_TYPE, self.harness_id, self.session_id, tick_id,
-                status="error", response="native run failed",
-            ))
+            # 主路径异常:补 error tick 闭环(仅当 started),再传播(不吞主异常)
+            if started:
+                await self._emit(tick_completed(
+                    HARNESS_TYPE, self.harness_id, self.session_id, tick_id,
+                    status="error", response="native run failed",
+                ))
             raise
 
     async def _emit(self, event: dict) -> None:
