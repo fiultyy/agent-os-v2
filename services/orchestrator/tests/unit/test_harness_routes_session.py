@@ -445,3 +445,40 @@ def test_get_memory_tools_constructs_and_caches(monkeypatch):
     assert mt1 == (exp_fake, kg_fake)
     assert routes._get_memory_tools() is mt1   # 缓存:二次调同对象
 
+
+# ── ADR-1/ADR-2: native session build 注入 profile caps + R2 cache model_settings ──
+
+def test_build_native_session_model_settings_has_cache_fields(monkeypatch):
+    """ADR-2:_build_native_session 真跑 → agent.model_settings 含两 cache 字段="5m"
+    + profile caps 注入可见(ADR-1)。mock emitter/skill/gateway 避免真连。"""
+    import src.services._state as _st
+    from src.agent.profile import AgentBaseProfile, LayerProfile
+    from src.harness.capabilities import LayerCapability
+
+    # mock profile_registry 注入测试 profile(L1 + L2)
+    fake_profile = AgentBaseProfile(agent_id="native")
+    fake_profile.add_layer(LayerProfile(layer=1, source="id_test", content="ID-L1-MARKER"))
+    fake_profile.add_layer(LayerProfile(layer=2, source="rules_test", content="RULES-L2-MARKER"))
+    fake_registry = MagicMock()
+    fake_registry.get.return_value = fake_profile
+    monkeypatch.setattr(_st, "profile_registry", fake_registry)
+
+    # mock emitter 连接(避免真连 observe)
+    async def _noop(*a, **kw):
+        return None
+    from src.harness import routes as r
+    monkeypatch.setattr(r, "_get_memory_tools", lambda: None)  # 跳过 MemoryCapability(免 KG)
+    monkeypatch.setattr("src.harness.emit.ObserveEmitter.connect", _noop)
+
+    # 真 _build_native_session(不 mock 它本身),拿回 agent
+    rec = asyncio.run(r._build_native_session("sid-test", messages=[]))
+    agent = rec["agent"]
+    # ADR-2: model_settings 透传两 cache 字段
+    ms = agent.model_settings
+    assert ms.get("anthropic_cache_instructions") == "5m", f"instructions cache 缺: {ms}"
+    assert ms.get("anthropic_cache_tool_definitions") == "5m", f"tool cache 缺: {ms}"
+    # ADR-1: profile caps 注入可见(LayerCapability 经 get_instructions 进 system prompt)
+    blob = "\n".join(agent._cap_instructions)
+    assert "ID-L1-MARKER" in blob
+    assert "RULES-L2-MARKER" in blob
+

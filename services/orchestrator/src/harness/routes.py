@@ -350,7 +350,15 @@ async def _build_native_session(
     caps.extend(make_profile_capabilities(
         _state.profile_registry.get("native") if _state.profile_registry else None
     ))
-    agent = build_native_agent(capabilities=caps)
+    # ADR-2: R2 cache_control 透传(照搬 check_r2_cache 已验证字段;智谱 /api/anthropic
+    # instructions + tool defs 5m TTL 命中)。
+    agent = build_native_agent(
+        capabilities=caps,
+        model_settings={
+            "anthropic_cache_instructions": "5m",
+            "anthropic_cache_tool_definitions": "5m",
+        },
+    )
     return {
         "agent": agent, "emitter": emitter, "messages": messages or [],
         "session_id": session_id, "harness_type": "agent-os-v2",
