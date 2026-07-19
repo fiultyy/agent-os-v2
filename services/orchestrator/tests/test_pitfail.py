@@ -5,13 +5,12 @@
 2. 同 file_path+error_type 再失败 → match 命中 increment_recurrence(count=2)
 3. search(query) 命中
 4. pitfail_registry None 降级(不 record,不崩)
-5. API(search/match/get/list_all)经 TestClient
+(CRUD routes 已弃用,原 API TestClient 测随 routes/pitfail.py 一并删除。)
 
 红线:不动 memory 五维/召回/蝴蝶翼。pysqlite3 由 conftest 全局注入,无需本文件
 再 patch sqlite3。
 """
 
-import asyncio
 import os
 import sys
 
@@ -19,25 +18,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-
-from src.api.routes import pitfail as pitfail_route
 from src.services import _state
 from src.pitfail import PitfailRegistry, PitfallRecord
-
-
-def _reset_event_loop() -> None:
-    """TestClient(starlette/httpx)会在 MainThread 上创建并关闭一个 event loop,
-    其残留会让后续 ``asyncio.get_event_loop()``(如 test_memory_graph_endpoint 的
-    ``run_until_complete``)在 pytest-asyncio strict 模式下抛 'no current event
-    loop'。此处 teardown 后显式重建一个干净 loop,避免跨文件污染(红线:不破坏
-    memory 测试)。"""
-    try:
-        asyncio.set_event_loop(asyncio.new_event_loop())
-    except Exception:
-        pass
-
 
 # ── Registry 直测(record / match-increment / search / None 降级) ───────
 
@@ -164,75 +146,3 @@ def test_classify_tool_error_branches():
     assert _classify_tool_error("Permission denied") == "permission_denied"
     assert _classify_tool_error("connection reset by peer") == "tool_error"
     assert _classify_tool_error("") == "tool_error"
-
-
-# ── API(TestClient on isolated sub-app,不 import engine) ───────────
-
-
-@pytest.fixture
-def api_client(tmp_path, monkeypatch):
-    """挂 pitfail_router 到隔离 FastAPI app,registry 指向 tmp db。
-
-    用 ``with TestClient(...)`` 上下文,确保 starlette 的 portal/loop 在 teardown
-    时关闭;yield 后再 _reset_event_loop 重建干净 loop,避免污染后续 asyncio 测试。
-    """
-    reg = _fresh_registry(tmp_path)
-    monkeypatch.setattr(_state, "pitfail_registry", reg)
-    app = FastAPI()
-    app.include_router(pitfail_route.router)
-    with TestClient(app) as client:
-        yield client, reg
-    _reset_event_loop()
-
-
-def test_api_search_match_get_list(api_client):
-    client, reg = api_client
-    reg.record(PitfallRecord(
-        id="", file_path="file_read", error_type="file_not_found",
-        symptom="missing file abc", root_cause="path wrong", fix="create it",
-        tags=["file_read"],
-    ))
-
-    # search
-    r = client.get("/pitfall/search", params={"query": "missing"})
-    assert r.status_code == 200
-    body = r.json()
-    assert len(body) == 1
-    assert body[0]["file_path"] == "file_read"
-
-    # match
-    r = client.get("/pitfall/match", params={"file_path": "file_read", "error_type": "file_not_found"})
-    assert r.status_code == 200
-    matched = r.json()
-    assert len(matched) == 1
-    pid = matched[0]["id"]
-
-    # get by id
-    r = client.get(f"/pitfall/{pid}")
-    assert r.status_code == 200
-    got = r.json()
-    assert got["id"] == pid
-    assert got["symptom"] == "missing file abc"
-
-    # get missing id
-    r = client.get("/pitfall/no-such-id")
-    assert r.status_code == 200
-    assert r.json()["error"] == "not found"
-
-    # list all
-    r = client.get("/pitfall/")
-    assert r.status_code == 200
-    assert len(r.json()) == 1
-
-
-def test_api_disabled_when_registry_none(tmp_path, monkeypatch):
-    """registry None 时 API 返回安全空载(disabled: true)。"""
-    monkeypatch.setattr(_state, "pitfail_registry", None)
-    app = FastAPI()
-    app.include_router(pitfail_route.router)
-    with TestClient(app) as client:
-        assert client.get("/pitfall/").json() == {"disabled": True, "items": []}
-        assert client.get("/pitfall/search", params={"query": "x"}).json() == {"disabled": True, "items": []}
-        assert client.get("/pitfall/match", params={"file_path": "f", "error_type": "t"}).json() == {"disabled": True, "items": []}
-        assert client.get("/pitfall/abc").json() == {"disabled": True}
-    _reset_event_loop()

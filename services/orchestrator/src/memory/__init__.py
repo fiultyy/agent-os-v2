@@ -35,8 +35,6 @@ from src.memory.hooks import (
 )
 from src.memory.default_hook import DefaultMemoryHook
 from src.memory.kg_query_interface import KGQueryInterface
-from src.memory.sideline.task_consolidator import ConsolidateResult as SideAgentResult
-from src.memory.sideline.transcriber import SidelineTranscriber
 from src.memory.experience_kg import ExperienceKG
 from src.memory.tools.kg_memory_tool import KGMemoryTool
 from src.memory.tools.experience_tool import ExperienceTool
@@ -72,10 +70,8 @@ __all__ = [
     "ConsolidateContext",
     "RecallContext",
     "CurateContext",
-    "SideAgentResult",
     "DefaultMemoryHook",
     "KGQueryInterface",
-    "SidelineTranscriber",
     "KGMemoryTool",
     "ExperienceKG",
     "ExperienceTool",

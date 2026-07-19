@@ -63,12 +63,48 @@ def _service_factory() -> MemoryService:
     return MemoryService(store=InMemoryStore())
 
 
+class _DeterministicEmbedding:
+    """Test-only embedding: token hashing trick — no torch / HF / network.
+
+    Same text ⇒ same unit vector; cosine ∝ token overlap. The VectorStore
+    tests assert FAISS mechanics (index / search / delete / size), not
+    embedding quality, so a deterministic bag-of-tokens vector is sufficient
+    and keeps the suite hermetic + fast (<1s vs a 137s huggingface fetch that
+    fails offline anyway). ponytail: swap for a real provider via
+    EMBEDDING_PROVIDER when semantic-quality coverage is added.
+    """
+
+    DIM = 128
+
+    @property
+    def dimension(self) -> int:
+        return self.DIM
+
+    def embed(self, text: str):
+        import hashlib
+        import re
+
+        import numpy as np
+
+        v = np.zeros(self.DIM, dtype=np.float32)
+        for tok in re.findall(r"[a-z0-9]+", text.lower()):
+            v[int(hashlib.md5(tok.encode()).hexdigest(), 16) % self.DIM] += 1.0
+        n = float(np.linalg.norm(v))
+        return v / n if n > 0 else v
+
+    def embed_batch(self, texts):
+        return [self.embed(t) for t in texts]
+
+
 @pytest.fixture
 def vector_store(tmp_path):
     """Isolated FAISSVectorStore backed by a temporary directory."""
     from src.memory.vector import FAISSVectorStore
 
-    store = FAISSVectorStore(persist_path=str(tmp_path / "test.faiss"))
+    store = FAISSVectorStore(
+        provider=_DeterministicEmbedding(),
+        persist_path=str(tmp_path / "test.faiss"),
+    )
     yield store
     # Force sync save before cleanup
     store.save()

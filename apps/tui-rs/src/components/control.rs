@@ -93,14 +93,9 @@ pub fn status_spans(app: &App) -> Vec<Span<'static>> {
     };
     let turn_span = Span::styled(format!(" · {}/{}", cur_turn, tc), Style::default().fg(Color::DarkGray));
     let ht = crate::state::norm_ht(&s.harness_type);
-    if ht == "claw" {
+    let mut spans = if ht == "claw" {
         // 连接状态由最左 orche● 统一示(绿连/红断);claw 重连用 ^R / 右键 Reconnect(不占输入区)。
-        vec![
-            orche,
-            Span::styled("  ", Style::default()),
-            sid_span,
-            turn_span,
-        ]
+        vec![orche, Span::styled("  ", Style::default()), sid_span, turn_span]
     } else {
         // cc(claude-code):显 cwd(无状态无重连)。
         let cwd_disp = s.cwd.as_deref()
@@ -114,7 +109,24 @@ pub fn status_spans(app: &App) -> Vec<Span<'static>> {
             Span::styled(cwd_disp, Style::default().fg(Color::DarkGray)),
             turn_span,
         ]
+    };
+    // token 用量 + 模型(native agent-os-v2 turn 的 usage event;claw/cc 无 → 不显)
+    let key = format!("{}/{}", s.harness_type, s.session_id);
+    if let Some(evs) = app.events.get(&key) {
+        if let Some(u) = evs.iter().rev().find(|e| e.event_type == "usage") {
+            spans.push(Span::styled(
+                format!(
+                    "  tok {}↑ {}↓ {}⚡ [{}]",
+                    fmt_val(&u.data, "input"),
+                    fmt_val(&u.data, "output"),
+                    fmt_val(&u.data, "cache_read"),
+                    trunc(&fmt_val(&u.data, "model"), 12),
+                ),
+                Style::default().fg(Color::Cyan),
+            ));
+        }
     }
+    spans
 }
 
 /// InputBar(IT6-③:整合 StatusBar):底部输入区多行 = [状态行] + [输入行] + [模式提示行]。

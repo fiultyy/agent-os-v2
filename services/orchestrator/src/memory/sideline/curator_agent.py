@@ -1,3 +1,4 @@
+# ARCHIVED — side-agent parallel mechanism (pre-AO2),不挂入系统,待用 AO2 capability 重接。
 """CuratorAgent — offline LLM quality-assurance pass [④].
 
 Background (offline-batch) curator: scans ``origin=AGENT`` memories in

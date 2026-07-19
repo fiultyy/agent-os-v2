@@ -1,3 +1,4 @@
+# ARCHIVED — side-agent parallel mechanism (pre-AO2),不挂入系统,待用 AO2 capability 重接
 """DreamerAgent — 记忆巩固 agent.
 
 定时将 session 记忆提炼为 episodic memories，触发 L2→L3 迁移。

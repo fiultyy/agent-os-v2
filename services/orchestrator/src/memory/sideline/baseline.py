@@ -1,3 +1,4 @@
+# ARCHIVED — side-agent parallel mechanism (pre-AO2),不挂入系统,待用 AO2 capability 重接。
 """
 HermesWikiBaseline - Baseline 明文 wiki 搜索
 

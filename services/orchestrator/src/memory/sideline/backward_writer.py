@@ -1,3 +1,4 @@
+# ARCHIVED — side-agent parallel mechanism (pre-AO2),不挂入系统,待用 AO2 capability 重接。
 """BackwardWriter — 将判断结果写回 Main Agent。
 
 三通道：

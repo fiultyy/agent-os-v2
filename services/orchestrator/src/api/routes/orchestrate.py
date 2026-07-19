@@ -37,6 +37,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from src.api.models import OrchestrateRequest
 from src.graph import GraphState
+from src.harness.emit import ObserveEmitter
+from src.harness.events import _now
 from src.orchestration.multi_agent_graph import _build_multi_agent_graph
 from src.services import _state
 from src.services.agent_manager import (
@@ -48,12 +50,43 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# 模块级固定 harness_id(与 flow.py OBSERVE_FLOW_HARNESS_ID 同模式)。
+# harness_type="orchestrate"(新,非复用 "flow"):flow 语义(flow_id 生命周期)≠
+# orchestrate(session 生命周期),复用会混(见 plan Part 3.2)。
+_ORCH_HARNESS_ID = f"orchestrate_{uuid.uuid4().hex[:8]}"
+
 
 # ── SSE helper(与 chat.py _sse 同模式,本 router 自带一份,物理隔离)────
 
 
 def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+def _orch_event(
+    orch_event: str, session_id: str, payload: dict,
+) -> dict:
+    """orchestrate graph 事件偷渡 tick_completed(与 flow.py:96 同模式)。
+
+    observe EventType enum 封闭(红线),orchestrate 真实语义塞进
+    ``data.orch_event`` + ``data.orch_payload``,TUI 消费者按 ``orch_event``
+    分类(plan Part 4)。
+    """
+    return {
+        "event_id": str(uuid.uuid4()),
+        "harness_type": "orchestrate",
+        "harness_id": _ORCH_HARNESS_ID,
+        "session_id": session_id,
+        "tick_id": session_id,
+        "event_type": "tick_completed",
+        "data": {
+            "status": "success",
+            "response": "",
+            "orch_event": orch_event,
+            "orch_payload": payload,
+        },
+        "timestamp": _now(),
+    }
 
 
 def _agent_manager_shim() -> Any:
@@ -119,6 +152,15 @@ async def orchestrate(req: OrchestrateRequest) -> StreamingResponse:
 
     event_queue: asyncio.Queue[str | None] = asyncio.Queue()
 
+    # observe emitter:plan Part 3.2。best-effort connect(observe 不可达不阻塞)。
+    orch_emitter = ObserveEmitter(
+        "orchestrate", harness_id=_ORCH_HARNESS_ID, session_id=session_id,
+    )
+    try:
+        await orch_emitter.connect()
+    except Exception as e:  # best-effort:emitter.emit 在 ws 未连时 no-op
+        logger.warning("orchestrate observe connect failed: %s", e)
+
     async def on_node_complete(node_name: str, state: GraphState) -> None:
         # multi_agent(ParallelNode)/ fan_in / synthesizer —— 顶层图节点。
         # 分支(AgentWorkerNode)跑在 ParallelNode 克隆 state 内,不作为顶层图
@@ -145,38 +187,56 @@ async def orchestrate(req: OrchestrateRequest) -> StreamingResponse:
                 "node": "multi_agent", "status": "running",
                 "roles": [_role_of(b) for b in branch_results],
             }))
+            branches_view = [
+                {
+                    "branch": b.get("branch"),
+                    "role": _role_of(b),
+                    "output": b.get("output", ""),
+                    "status": b.get("status", ""),
+                }
+                for b in branch_results
+            ]
             await event_queue.put(_sse("node_complete", {
                 "node": "multi_agent", "status": "done",
                 "branch_count": len(branch_results),
-                "branches": [
-                    {
-                        "branch": b.get("branch"),
-                        "role": _role_of(b),
-                        "output": b.get("output", ""),
-                        "status": b.get("status", ""),
-                    }
-                    for b in branch_results
-                ],
+                "branches": branches_view,
             }))
+            await orch_emitter.emit(_orch_event(
+                "node_complete", session_id,
+                {"node": "multi_agent", "status": "done",
+                 "branch_count": len(branch_results), "branches": branches_view},
+            ))
         elif node_name == "fan_in":
             await event_queue.put(_sse("node_start", {"node": "fan_in", "status": "running"}))
             await event_queue.put(_sse("node_complete", {
                 "node": "fan_in", "status": "done", "output": state.output,
             }))
+            await orch_emitter.emit(_orch_event(
+                "node_complete", session_id,
+                {"node": "fan_in", "status": "done", "output": state.output},
+            ))
         elif node_name == "synthesizer":
             await event_queue.put(_sse("node_start", {"node": "synthesizer", "status": "running"}))
             await event_queue.put(_sse("node_complete", {
                 "node": "synthesizer", "status": "done", "output": state.output,
             }))
+            await orch_emitter.emit(_orch_event(
+                "node_complete", session_id,
+                {"node": "synthesizer", "status": "done", "output": state.output},
+            ))
 
     async def event_stream() -> AsyncGenerator[str, None]:
         # R8: 复用 ConcurrencyController(为 orchestrator 取槽)。
         await _state.concurrency_controller.acquire_agent_slot(req.orchestrator_agent_id)
         orchestrator["status"] = "running"
-        yield _sse("agent_status", {
+        running_payload = {
             "agent_id": req.orchestrator_agent_id, "status": "running",
             "orchestrate": True, "roles": [s.get("role") for s in req.sub_agents],
-        })
+        }
+        yield _sse("agent_status", running_payload)
+        await orch_emitter.emit(_orch_event(
+            "agent_status", session_id, running_payload,
+        ))
 
         async def run_graph() -> None:
             try:
@@ -187,16 +247,28 @@ async def orchestrate(req: OrchestrateRequest) -> StreamingResponse:
                 await event_queue.put(_sse("agent_status", {
                     "agent_id": req.orchestrator_agent_id, "status": "idle",
                 }))
-                await event_queue.put(_sse("execution_complete", {
+                await orch_emitter.emit(_orch_event(
+                    "agent_status", session_id,
+                    {"agent_id": req.orchestrator_agent_id, "status": "idle"},
+                ))
+                completion_payload = {
                     "output": final_state.output,
                     "session_id": final_state.session_id,
                     "orchestrator_agent_id": req.orchestrator_agent_id,
                     "roles": [s.get("role") for s in req.sub_agents],
                     "parallel_results": final_state.parallel_results.get("multi_agent", []),
-                }))
+                }
+                await event_queue.put(_sse("execution_complete", completion_payload))
+                await orch_emitter.emit(_orch_event(
+                    "execution_complete", session_id, completion_payload,
+                ))
             except Exception as exc:
                 orchestrator["status"] = "idle"
                 await event_queue.put(_sse("error", {"message": str(exc)}))
+                await orch_emitter.emit(_orch_event(
+                    "error", session_id,
+                    {"status": "error", "message": str(exc)},
+                ))
             finally:
                 await _state.concurrency_controller.release_agent_slot(
                     req.orchestrator_agent_id,
@@ -205,14 +277,17 @@ async def orchestrate(req: OrchestrateRequest) -> StreamingResponse:
 
         task = asyncio.create_task(run_graph())
 
-        while True:
-            item = await event_queue.get()
-            if item is None:
-                break
-            yield item
+        try:
+            while True:
+                item = await event_queue.get()
+                if item is None:
+                    break
+                yield item
 
-        yield "data: [DONE]\n\n"
-        await task
+            yield "data: [DONE]\n\n"
+            await task
+        finally:
+            await orch_emitter.close()
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 

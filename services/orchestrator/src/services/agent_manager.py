@@ -50,6 +50,36 @@ async def delete_agent_data(agent_id: str) -> bool:
     return True
 
 
+async def list_agents_data() -> list[dict[str, Any]]:
+    """List all agents: PG (source of truth) when wired, else in-memory dict.
+
+    Any PG read error degrades silently to the in-memory dict so callers never
+    see a 500. (Moved verbatim from the deleted ``api/routes/agents.py``.)
+    """
+    if _state.pg_store is not None:
+        try:
+            return await _state.pg_store.list_agents()
+        except Exception:
+            pass
+    return list(_state.agents.values())
+
+
+async def get_agent_data(agent_id: str) -> dict[str, Any] | None:
+    """Get one agent by id: PG first, then in-memory. Returns None if missing.
+
+    (Moved verbatim from the deleted ``api/routes/agents.py`` — callers handle
+    the None / not-found case themselves instead of receiving a JSONResponse.)
+    """
+    if _state.pg_store is not None:
+        try:
+            agent = await _state.pg_store.get_agent(agent_id)
+            if agent is not None:
+                return agent
+        except Exception:
+            pass
+    return _state.agents.get(agent_id)
+
+
 async def init_default_agent() -> dict[str, Any] | None:
     """Auto-create a default agent if none exist."""
     if _state.agents:

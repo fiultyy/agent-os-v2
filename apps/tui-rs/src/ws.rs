@@ -54,6 +54,10 @@ pub enum WsMsg {
     Event { key: String, ev: ObserveEvent },
     /// flow 事件(key=("flow",flow_id))。主 loop 按 data.flow_event 分类更新 app.flows。
     FlowEvent { flow_id: String, ev: ObserveEvent },
+    /// memory 事件(key=("memory","memory")全局常驻)→ app.events["memory/memory"]。
+    MemoryEvent { ev: ObserveEvent },
+    /// orchestrate 事件(key=("orchestrate",session_id))→ app.events["orchestrate/{sid}"]。
+    OrchEvent { session_id: String, ev: ObserveEvent },
     /// WS 连接错误(主 loop 可忽略,manager 会保留 key 不重连避免风暴;
     /// ponytail: 自动重连 defer,简单 backoff 由子线程退出后 key 移除体现)。
     Error { key: String, #[allow(dead_code)] msg: String },
@@ -193,7 +197,10 @@ fn ws_loop(harness_type: &str, session_id: &str, key: &str, tx: &Sender<WsMsg>, 
             return;
         }
     };
+    // ponytail: 分流按 harness_type 字符串匹配(observe 广播同 ht 订阅;第 4 类再抽枚举)。
     let is_flow = harness_type == "flow";
+    let is_memory = harness_type == "memory";
+    let is_orch = harness_type == "orchestrate";
     let flow_id = session_id.to_string();
     let mut last_ping = Instant::now();
 
@@ -209,6 +216,10 @@ fn ws_loop(harness_type: &str, session_id: &str, key: &str, tx: &Sender<WsMsg>, 
                         let ev: ObserveEvent = p.into();
                         let m = if is_flow {
                             WsMsg::FlowEvent { flow_id: flow_id.clone(), ev }
+                        } else if is_memory {
+                            WsMsg::MemoryEvent { ev }
+                        } else if is_orch {
+                            WsMsg::OrchEvent { session_id: session_id.to_string(), ev }
                         } else {
                             WsMsg::Event { key: key.to_string(), ev }
                         };

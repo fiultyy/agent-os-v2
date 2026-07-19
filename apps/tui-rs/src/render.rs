@@ -110,8 +110,14 @@ fn event_glyph(e: &ObserveEvent) -> (String, Color, bool, String) {
         "tick_completed" => {
             // flow_* 事件(flow.py wire 成 tick_completed,data.response 空在 flow_event/flow_payload)。
             let flow_ev = fmt_val(&e.data, "flow_event");
+            // Part4:memory/orchestrate 事件(Part2/3 wire 成 tick_completed,字符串 payload)。
+            // ponytail: 内联分支,第 3 类型化事件再抽通用 typed_event_body。
             if !flow_ev.is_empty() {
                 ("✓".to_string(), DARK.done, true, flow_event_body(&flow_ev, &e.data))
+            } else if !fmt_val(&e.data, "memory_event").is_empty() {
+                ("✓".to_string(), DARK.done, true, fmt_val(&e.data, "memory_event"))
+            } else if !fmt_val(&e.data, "orch_event").is_empty() {
+                ("✓".to_string(), DARK.done, true, fmt_val(&e.data, "orch_event"))
             } else {
                 ("✓".to_string(), DARK.done, true, fmt_val(&e.data, "response"))
             }

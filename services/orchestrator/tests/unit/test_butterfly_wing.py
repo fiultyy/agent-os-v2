@@ -636,7 +636,17 @@ class TestButterflyRecallStrategy:
     def _run_sync(self, coro, *args, **kwargs):
         """Run an async coroutine synchronously for testing."""
         import asyncio
-        return asyncio.get_event_loop().run_until_complete(coro(*args, **kwargs))
+        # ponytail: robust to a poisoned main thread — an earlier test's
+        # asyncio.run() leaves set_event_loop(None), after which the deprecated
+        # get_event_loop() raises RuntimeError in py3.12. Recreate the loop.
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                raise RuntimeError("closed")
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        return loop.run_until_complete(coro(*args, **kwargs))
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -832,7 +842,17 @@ class TestButterflyRecallWeighted:
 
     def _run_sync(self, coro, *args, **kwargs):
         import asyncio
-        return asyncio.get_event_loop().run_until_complete(coro(*args, **kwargs))
+        # ponytail: robust to a poisoned main thread — an earlier test's
+        # asyncio.run() leaves set_event_loop(None), after which the deprecated
+        # get_event_loop() raises RuntimeError in py3.12. Recreate the loop.
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                raise RuntimeError("closed")
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        return loop.run_until_complete(coro(*args, **kwargs))
 
     def _memitem(self, mid: str, content: str):
         from memory.types import MemoryItem

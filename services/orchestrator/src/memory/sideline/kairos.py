@@ -1,3 +1,4 @@
+# ARCHIVED — side-agent parallel mechanism (pre-AO2),不挂入系统,待用 AO2 capability 重接
 """KairosAgent — 时机感知 agent.
 
 LIF (Leakage-Integration-Fire) 电位触发时机注入。

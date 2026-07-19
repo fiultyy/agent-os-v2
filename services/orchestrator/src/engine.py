@@ -41,8 +41,6 @@ from src.memory.compressor import AsyncCompressor, SyncCompressor, ContextMonito
 from src.memory.migrator import MemoryMigrator
 from src.memory.forgetting import ActiveForgetting
 from src.memory.state_pruner import TimeBasedStatePruner
-from src.memory.sideline.task_consolidator import TaskConsolidationAgent
-from src.memory.sideline.backward_writer import BackwardWriter
 from src.memory.db_watcher import MemoryDBWatcher
 from src.memory.write_queue import MemoryWriteQueue
 from src.communication.bus import CommunicationBus
@@ -63,46 +61,8 @@ app = FastAPI(title="Agent OS — Orchestrator", version="0.2.0", redirect_slash
 
 _state.llm_client = LLMClient()
 
-# #4: side-agent 专用 LLM 实例(记忆提炼/整合/curator 等)。SIDE_LLM_ENABLED=1
-# 时装配;未启用 → None,side agent fallback 到主 llm_client,灰度安全。
-# format-aware:paas/v4(openai 兼容)或 anthropic 通道二选一。
-# 注意:智谱 paas/v4 通道(glm-4-flash 等)需单独资源包,余额不足时 429;
-# glm-4.7 走 anthropic 通道(/api/anthropic,套餐内可用),所以 memory 端
-# 默认切 anthropic + glm-4.7(与主对话 glm-5-turbo 同通道、不同 model)。
-# _chat_anthropic 用 self.anthropic_model(忽略 OpenAI default_model),
-# 故 anthropic 分支必须配 anthropic_* 字段。
-if os.getenv("SIDE_LLM_ENABLED", "0") == "1":
-    _side_fmt = os.getenv("SIDE_LLM_API_FORMAT", "anthropic").lower()
-    if _side_fmt == "anthropic":
-        _state.side_llm_client = LLMClient(
-            format="anthropic",
-            anthropic_model=os.getenv("SIDE_LLM_MODEL", "glm-4.7"),
-            anthropic_base_url=os.getenv(
-                "SIDE_LLM_ANTHROPIC_BASE_URL",
-                os.environ.get("ANTHROPIC_BASE_URL", "https://open.bigmodel.cn/api/anthropic"),
-            ),
-            anthropic_api_key=os.getenv(
-                "SIDE_LLM_ANTHROPIC_API_KEY",
-                os.environ.get("ANTHROPIC_AUTH_TOKEN", ""),
-            ),
-        )
-    else:
-        _state.side_llm_client = LLMClient(
-            format="openai",
-            base_url=os.getenv("SIDE_LLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4"),
-            api_key=os.getenv("SIDE_LLM_API_KEY", os.environ.get("ANTHROPIC_AUTH_TOKEN", "")),
-            default_model=os.getenv("SIDE_LLM_MODEL", "glm-4-flash"),
-        )
-    logger.info(
-        "side-agent LLM wired: format=%s model=%s",
-        _state.side_llm_client.format,
-        getattr(_state.side_llm_client, "anthropic_model", None)
-        or _state.side_llm_client.default_model,
-    )
-else:
-    _state.side_llm_client = None
-# side agent 注入源:启用 side 实例则用它,否则 fallback 主 client(行为等同改动前)。
-_side_llm = _state.side_llm_client or _state.llm_client
+# side-agent parallel mechanism removed (Part5) — _state.side_* stay None.
+# memory/sideline/* archived, awaiting AO2 capability rewrite.
 
 # Knowledge graph must be created first — MemoryService depends on it.
 _state.knowledge_graph = KnowledgeGraph()
@@ -225,18 +185,6 @@ if _SKILL_TOOLS_AVAILABLE:
 
 _state.tool_executor = ToolExecutor(_tool_registry)
 _state.communication_bus = CommunicationBus()
-
-# 通信桥(后端侧):把 CommunicationBus 的 direct-delivery 桥到 SSE 流 ——
-# register_delivery_callback 此前全仓零调用。direct agent-to-agent 投递现在会
-# 经 _state.emit_agent_message 推一条 agent_message SSE 事件(前端 dispatch 是 L4)。
-async def _bridge_agent_delivery(message, recipient_id):
-    try:
-        _state.emit_agent_message(message, recipient_id)
-    except Exception:
-        logger.warning("agent_message SSE bridge failed", exc_info=True)
-
-
-_state.communication_bus.register_delivery_callback(_bridge_agent_delivery)
 _state.concurrency_controller = ConcurrencyController()
 
 # ── 持久化双向(原 L5 并入):PostgresStore 做 agent 持久化 ──────────────
@@ -310,14 +258,8 @@ _state.memory_event_bus.register(
 if os.getenv("MEMORY_EVENT_BUS_ENABLED", "1") != "1":
     _state.memory_event_bus.set_enabled(False)
 
-# P3: deterministic state pruner (zero-LLM-cost膨胀控制) + task-post
-# consolidator (background_review style online consolidation).
+# P3: deterministic state pruner (zero-LLM-cost膨胀控制).
 _state.state_pruner = TimeBasedStatePruner(_state.memory_service)
-_state.task_consolidator = TaskConsolidationAgent(
-    _state.memory_service,
-    _side_llm,
-    BackwardWriter(_state.memory_service, _side_llm),
-)
 # External-memory watcher: detects external DB writes (other harnesses sharing
 # the sqlite DB) and runs the deterministic maintenance chain. Zero LLM.
 _state.db_watcher = MemoryDBWatcher(
@@ -325,21 +267,11 @@ _state.db_watcher = MemoryDBWatcher(
     poll_interval=float(os.getenv("MEMORY_DB_WATCH_INTERVAL", "60")),
 )
 
-# ── Memory-kernel side agents (Part 1) + neural field (Part 2) ─────
-# Five feature-gated singletons. Each is default-OFF (grey-rollout):
-#  MEMORY_INGESTOR_ENABLED / MEMORY_CONSOLIDATOR_ENABLED /
-#  MEMORY_RETRIEVER_ENABLED / MEMORY_CURATOR_ENABLED /
-#  MEMORY_NEURAL_FIELD_ENABLED. When off the hook is not registered, so the
-# bus emit for that event is a no-op and behaviour matches the deterministic
-# baseline (zero regression). Review correction #12: each hook is registered
-# explicitly for ONE event (register(hook, EventType.X)) — never the default
-# all-events mount, which would fan all 10 events to every hook.
+# ── Neural field (Part 2) + runtime observer ──────────────────────
+# side agents (ingestor/consolidator/retriever/curator) removed (Part5
+# side-agent archive). neural_field is zero-LLM drift, retained.
 
 from src.memory.event_bus import EventType
-from src.memory.sideline.ingestor_agent import IngestorAgent, IngestorHook
-from src.memory.sideline.consolidator_agent import ConsolidatorAgent, ConsolidatorHook
-from src.memory.sideline.retriever_agent import RetrieverAgent, RetrieverHook
-from src.memory.sideline.curator_agent import CuratorAgent, CuratorHook
 from src.memory.runtime_observer import RuntimeObserverHook
 from src.memory.neural_field import (
     NeuralFieldEngine,
@@ -351,47 +283,6 @@ from src.memory.neural_field import (
 _neural_store = NeuralFieldStore("data/neural_field.db")
 _neural_engine = NeuralFieldEngine()
 _neural_robustness = NeuralFieldRobustness(_neural_store, _neural_engine)
-
-if os.getenv("MEMORY_INGESTOR_ENABLED", "0") == "1":
-    _state.ingestor = IngestorAgent(
-        memory_service=_state.memory_service,
-        llm_client=_side_llm,
-        kg=_state.knowledge_graph,
-    )
-    # Review correction #12: explicit single-event registration.
-    _state.memory_event_bus.register(
-        IngestorHook(_state.ingestor), EventType.INGEST
-    )
-
-if os.getenv("MEMORY_CONSOLIDATOR_ENABLED", "0") == "1":
-    _state.consolidator = ConsolidatorAgent(
-        memory_service=_state.memory_service,
-        llm_client=_side_llm,
-    )
-    # Consolidator fires on both CONSOLIDATE (periodic) and SESSION_END.
-    _state.memory_event_bus.register(
-        ConsolidatorHook(_state.consolidator),
-        EventType.CONSOLIDATE,
-        EventType.SESSION_END,
-    )
-
-if os.getenv("MEMORY_RETRIEVER_ENABLED", "0") == "1":
-    _state.retriever = RetrieverAgent(
-        memory_service=_state.memory_service,
-        kg=_state.knowledge_graph,
-    )
-    _state.memory_event_bus.register(
-        RetrieverHook(_state.retriever), EventType.RECALL
-    )
-
-if os.getenv("MEMORY_CURATOR_ENABLED", "0") == "1":
-    _state.curator = CuratorAgent(
-        memory_service=_state.memory_service,
-        llm_client=_side_llm,
-    )
-    _state.memory_event_bus.register(
-        CuratorHook(_state.curator), EventType.CURATE
-    )
 
 if os.getenv("MEMORY_NEURAL_FIELD_ENABLED", "0") == "1":
     _state.neural_store = _neural_store
@@ -417,6 +308,23 @@ _state.memory_event_bus.register(
     RuntimeObserverHook(), EventType.TURN_END, EventType.SESSION_END,
 )
 
+# Part2: memory lifecycle → observe. MemoryObserveHook (OBSERVER) forwards
+# every lifecycle event to observe /ws/ingest via a dedicated emitter. Fixed
+# identity "memory"/"memory" — memory lifecycle is global, not per-session.
+# Fire-and-forget (ADR-7): emit is a no-op when WS is not connected. The
+# emitter is also stored on _state so engine/db_watcher can ship prune/forget/
+# migrate events (which are NOT bus EventTypes — SSE-only sidechannels).
+from src.harness.emit import ObserveEmitter
+from src.memory.observe_hook import MemoryObserveHook, memory_event
+
+_state.memory_observe_emitter = ObserveEmitter(
+    "memory", harness_id="memory_global", session_id="memory",
+)
+_state.memory_event_bus.register(MemoryObserveHook(_state.memory_observe_emitter))
+# emitter.connect() 移到 startup hook(_connect_memory_observe_emitter),非模块级 —
+# 避免 import 时 get_event_loop 创建/污染全局 loop(致测试 event loop 隔离失败)。
+# emit 在 WS 未连时 no-op(ADR-7)。
+
 # Ensure data directory exists for SQLite databases
 Path("data").mkdir(exist_ok=True)
 
@@ -427,6 +335,14 @@ Path("data").mkdir(exist_ok=True)
 # non-empty _state.agents and skips re-creating the default. If PG is
 # unavailable (pg_store is None) the hook is a no-op and behaviour matches the
 # in-memory baseline.
+
+
+@app.on_event("startup")
+async def _connect_memory_observe_emitter() -> None:
+    """Part2: 连 memory observe emitter WS(生产,有 running loop)。
+    非模块级——避免 import 时 get_event_loop 污染测试 loop。"""
+    if _state.memory_observe_emitter is not None:
+        asyncio.create_task(_state.memory_observe_emitter.connect())
 
 
 @app.on_event("startup")
@@ -465,26 +381,26 @@ async def _start_forgetting_sweep() -> None:
                     #膨胀控制), then importance-based forgetting, then migration.
                     if _state.state_pruner is not None:
                         prune_result = await _state.state_pruner.prune(agent_id=agent_id)
-                        _state.emit_memory_event("prune", {
+                        await _state.memory_observe_emitter.emit(memory_event("prune", {
                             "agent_id": agent_id,
                             "scanned": prune_result.scanned,
                             "stale": prune_result.to_stale,
                             "archived": prune_result.to_archived,
-                        })
+                        }))
                     forget_result = await _state.active_forgetting.run_sweep(agent_id=agent_id)
-                    _state.emit_memory_event("forget", {
+                    await _state.memory_observe_emitter.emit(memory_event("forget", {
                         "agent_id": agent_id,
                         "scanned": forget_result.scanned,
                         "archived": forget_result.archived,
                         "archived_ids": forget_result.archived_ids[:10],
-                    })
+                    }))
                     migrate_ids = await _state.memory_migrator.migrate_episodic_to_semantic(agent_id)
-                    _state.emit_memory_event("migrate", {
+                    await _state.memory_observe_emitter.emit(memory_event("migrate", {
                         "agent_id": agent_id,
                         "path": "episodic_to_semantic",
                         "count": len(migrate_ids),
                         "ids": migrate_ids[:10],
-                    })
+                    }))
             except Exception:
                 pass
 
@@ -540,13 +456,9 @@ async def _shutdown() -> None:
 
 # ── Register route routers ─────────────────────────────────────────
 
-from src.api.routes.agents import router as agents_router
 from src.api.routes.memory import router as memory_router
 from src.api.routes.chat import router as chat_router, root_router_health
-from src.api.routes.entities import router as entities_router
-from src.api.routes.pitfail import router as pitfail_router
 from src.api.routes.orchestrate import router as orchestrate_router
-from src.api.routes.conversations import router as conversations_router
 
 # Health endpoint stays at root (no version prefix)
 app.include_router(root_router_health)
@@ -564,13 +476,9 @@ except Exception as e:
     _state.observe_client = None
 
 # All API routes under /v1 prefix
-app.include_router(agents_router, prefix="/v1")
 app.include_router(memory_router, prefix="/v1")
 app.include_router(chat_router, prefix="/v1")
-app.include_router(entities_router, prefix="/v1")
-app.include_router(pitfail_router, prefix="/v1")
 app.include_router(orchestrate_router, prefix="/v1")
-app.include_router(conversations_router, prefix="/v1")
 
 # ── Harness primitive API (ADR-4: orchestrator is the ONLY harness client) ──
 # Thin layer over {claw, claude-code}: sessions CRUD + turn + spawn + switch.
