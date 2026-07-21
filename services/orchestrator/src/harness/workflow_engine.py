@@ -6,7 +6,8 @@
 - R5:模块内零工程纪律 capability import(走 ``native_agent.py:114`` 默认 prepend)。
 
 本文件:W-P0-1 type 定义段 + schema registry;W-P0-2 WorkflowEngine.__init__ +
-_spawn_agent(单一 spawn chokepoint)。run/emit/pipeline/loop 由后续 node 追加。
+_spawn_agent(单一 spawn chokepoint)。W-P0-3 run / W-P0-4 _emit_workflow;
+W-P1-1 pipeline(无 barrier 阶段链);loop 由后续 node 追加。
 """
 
 from __future__ import annotations
@@ -68,6 +69,20 @@ class WorkflowNodesSpec(BaseModel):
     nodes: list[WorkflowNodeSpec] = Field(min_length=1, max_length=4096)
     fan_in: Literal["list", "merge"] = "list"
     timeout_per_node_ms: int = 120000
+
+
+class PipelineSpec(BaseModel):
+    """pipeline() 入口 spec(W-P1-1):N 个 stage 串联,M 个 item 并发流过。
+
+    每 item 独立跑完所有 stage(stage[i] 输入 = item / stage[i-1] 输出),
+    wall-clock ≈ 单 item 链长(N × 单 stage),非 sum(M × N)(item 在不同 stage
+    重叠)。stage prompt + 上一阶段 output 拼接成子 agent task input(R6 空串
+    占位仍由 _spawn_agent 兜底)。
+    """
+
+    stages: list[WorkflowNodeSpec] = Field(min_length=1, max_length=64)
+    items: list[str] = Field(min_length=1, max_length=4096)
+    concurrency: int = Field(default=8, ge=1, le=64)
 
 
 @dataclass
@@ -407,6 +422,125 @@ class WorkflowEngine:
                 run_id, event_name,
                 exc_info=True,
             )
+
+    # ───────────────────────────────────────────────────────────────────
+    # P1 pipeline — 无 barrier 阶段链(asyncio.Queue per stage 串联)
+    # ───────────────────────────────────────────────────────────────────
+    async def pipeline(
+        self,
+        spec: "PipelineSpec",
+        ctx: WorkflowContext,
+    ) -> list[Any]:
+        """无 barrier 阶段链:每 item 独立跑完所有 stage,wall-clock ≈ 单 item 链长。
+
+        模型:N 个 stage 串联,M 个 item 并发流过。stage[i] worker 从 in_q 取 item,
+        跑 _spawn_agent(stage prompt + prev output 拼接成 task input),output 入
+        out_q;item 在不同 stage 重叠 → wall-clock = N × 单 stage(非 M × N sum)。
+
+        - 闭包 bug 修正:``for stage in stages: async def _stage_worker(stage=stage)``
+          默认参数绑定循环变量(避免所有 worker 共享末 stage)。
+        - asyncio.Queue per stage 串联 + Semaphore(concurrency)cap per stage。
+        - poison pill(哨兵 None)传播:前 stage 处理完所有 item 后向 out_q 投放
+          None,下游 worker 收到 None 即向前传并退出。
+        - _spawn_agent 失败 / output 非 str:短路透传(本 item 后续 stage 不再 spawn,
+          output 保留为前值)——ponytail:不重试,error 经 NodeResult.status 透出。
+        - 事件 emit:workflow_pipeline_stage_started/completed per (stage × item),
+          wire tick_completed(R4)。R1/R2/R5 经 _spawn_agent 零增量负担。
+        """
+        stages = spec.stages
+        n_stages = len(stages)
+        # N+1 queues:queue[0] = input(queue[0..N-1] 为 stage i 的 in_q),
+        # queue[N] = sink(终态)。stage i 读 queue[i],写 queue[i+1]。
+        queues: list[asyncio.Queue] = [asyncio.Queue() for _ in range(n_stages + 1)]
+        sem = asyncio.Semaphore(max(1, spec.concurrency))
+
+        # 投放 M 个初始 item 到 queue[0]
+        for item_idx, item in enumerate(spec.items):
+            await queues[0].put((item_idx, item))
+
+        async def _stage_worker(
+            stage_idx: int,
+            stage: WorkflowNodeSpec,  # 默认参数绑定(闭包 bug 修正)
+            in_q: asyncio.Queue,
+            out_q: asyncio.Queue,
+        ) -> None:
+            """stage worker:从 in_q 取 item,跑 _spawn_agent,output 入 out_q。
+
+            收到 poison pill(None)→ 向 out_q 传 None + 退出(下游连锁停止)。
+            """
+            while True:
+                msg = await in_q.get()
+                try:
+                    if msg is None:
+                        # poison pill 传播
+                        await out_q.put(None)
+                        return
+                    item_idx, current = msg
+                    # stage prompt + 上一阶段 output(若有)拼接成 task input。
+                    task_input = (
+                        stage.prompt if current == "" or stage_idx == 0
+                        else f"{stage.prompt}\n[prev_output]\n{current}"
+                    )
+                    self._emit_workflow(
+                        "workflow_pipeline_stage_started",
+                        ctx.run_id,
+                        {
+                            "stage_idx": stage_idx,
+                            "stage_label": stage.label,
+                            "item_idx": item_idx,
+                        },
+                        session_id=ctx.session_id,
+                    )
+                    node = WorkflowNodeSpec(
+                        prompt=task_input,
+                        label=f"{stage.label}_i{item_idx}_s{stage_idx}",
+                        model=stage.model,
+                        schema_ref=stage.schema_ref,
+                        effort=stage.effort,
+                        isolation=stage.isolation,
+                    )
+                    async with sem:
+                        nr = await self._spawn_agent(node, ctx)
+                    self._emit_workflow(
+                        "workflow_pipeline_stage_completed",
+                        ctx.run_id,
+                        {
+                            "stage_idx": stage_idx,
+                            "stage_label": stage.label,
+                            "item_idx": item_idx,
+                            "status": nr.status,
+                            "error": nr.error,
+                        },
+                        session_id=ctx.session_id,
+                    )
+                    # 透传:success → output 作为下一 stage 输入;error → 短路保留
+                    next_val = nr.output if nr.status == "success" else current
+                    await out_q.put((item_idx, next_val))
+                finally:
+                    in_q.task_done()
+
+        # 启动 N 个 stage worker(stage_idx, stage 默认参数绑定避闭包 bug)
+        workers = [
+            asyncio.create_task(_stage_worker(stage_idx, stage, queues[stage_idx], queues[stage_idx + 1]))
+            for stage_idx, stage in enumerate(stages)
+        ]
+        # 主协程等所有 M item 到达 sink(queue[N])后,投 N 个 poison pill 触发连锁停止。
+        # queue[N] 不 spawn worker(它是 sink);主协程收集 M 个 item + 之后投 poison pills。
+        results: dict[int, Any] = {}
+        sink = queues[n_stages]
+        for _ in range(len(spec.items)):
+            item_idx, output = await sink.get()
+            results[item_idx] = output
+            sink.task_done()
+
+        # 所有 item 出 sink,投 N 个 poison pill 到 queue[0] 触发 stage[0] worker 停止,
+        # 它会向 queue[1] 传 None,连锁停所有 worker。
+        # ponytail:poison pill 数量 = 1(单 worker per stage);worker 收到即停。
+        await queues[0].put(None)
+        await asyncio.gather(*workers, return_exceptions=True)
+
+        # 按 item_idx 顺序返(进队列序 == 出 sink 序)
+        return [results[i] for i in range(len(spec.items))]
 
 
 # ─────────────────────────────────────────────────────────────────────
