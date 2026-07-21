@@ -23,27 +23,6 @@ def build_marker(ttl: str = "5m") -> dict[str, str]:
     return marker
 
 
-def remaining_breakpoint_budget(sys_markers: int, tool_markers: int) -> int:
-    """Remaining Anthropic cache_control breakpoints available for the
-    messages side.
-
-    Anthropic allows up to 4 ``cache_control`` breakpoints per request.
-    Native ModelSettings already consumes ``sys_markers`` (via
-    ``anthropic_cache_instructions``) + ``tool_markers`` (via
-    ``anthropic_cache_tool_definitions``); what's left is what the
-    messages-side ``static_count`` region may use. Mirrors claw
-    ``anthropic.ts:1075-1079``.
-
-    >>> remaining_breakpoint_budget(0, 0)
-    4
-    >>> remaining_breakpoint_budget(1, 1)
-    2
-    >>> remaining_breakpoint_budget(3, 3)
-    0
-    """
-    return max(0, 4 - sys_markers - tool_markers)
-
-
 def apply_cache_marker(msg: dict[str, Any], cache_marker: dict[str, str]) -> None:
     """Add cache_control to a single message in place, handling content formats.
 

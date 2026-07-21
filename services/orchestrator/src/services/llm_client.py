@@ -19,7 +19,7 @@ from typing import Any
 
 import httpx
 
-from src.services.prompt_cache import apply_cache_control, remaining_breakpoint_budget
+from src.services.prompt_cache import apply_cache_control
 
 
 class LLMError(Exception):
@@ -189,15 +189,15 @@ class LLMClient:
         if not self.anthropic_api_key:
             raise LLMError("No Anthropic key configured — set ANTHROPIC_AUTH_TOKEN")
 
-        # Inject cache_control at the static-prefix boundary (Zhipu anthropic
-        # endpoint honours it). Budget: native ModelSettings already consumes
-        # 2 breakpoints (anthropic_cache_instructions + tool_definitions);
-        # only place messages-side breakpoints when the reverse budget leaves
-        # room (max 4 total per request — Anthropic limit, claw anthropic.ts).
+        # Inject cache_control at the static-prefix boundary when the caller
+        # supplies ``static_count`` (Zhipu anthropic endpoint honours it).
+        # ponytail: budget gating removed — native ModelSettings
+        # (routes.py anthropic_cache_instructions/tool_definitions="5m") is the
+        # actual cache source on the main path; production callers never pass
+        # static_count so the budget branch was dead. apply_cache_control kept
+        # as a pure helper for future messages-side breakpoints.
         sc = static_count or 0
-        sys_markers = 1   # anthropic_cache_instructions="5m" (routes.py native path)
-        tool_markers = 1  # anthropic_cache_tool_definitions="5m"
-        if self.cache_enabled and sc > 0 and remaining_breakpoint_budget(sys_markers, tool_markers) > 0:
+        if self.cache_enabled and sc > 0:
             messages = apply_cache_control(messages, sc, self.cache_ttl)
 
         system, anthropic_msgs = self._to_anthropic(messages, sc)
