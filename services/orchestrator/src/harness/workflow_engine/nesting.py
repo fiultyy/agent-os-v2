@@ -57,51 +57,15 @@ def get_workflow_context() -> Optional["WorkflowContext"]:
     return _WF_CTX.get()
 
 
-# ─────────────────────────────────────────────────────────────────────
-# Engine 单例(模块级,持 emitter / pitfail / tool_executor)。
-# ponytail:懒建 + 单进程复用(emitter WS 连接 module-level);不做 thread-safe
-# (单 asyncio loop 串行)。同 v2_workflow._build_engine 风格,但缓存实例。
-# ─────────────────────────────────────────────────────────────────────
-_engine_instance: Optional["WorkflowEngine"] = None  # type: ignore[name-defined]
-
-
-def _get_engine() -> "WorkflowEngine":  # type: ignore[name-defined]
-    """模块级 WorkflowEngine 单例(design §7)。
-
-    从 ``src.services._state`` 注入 emitter / pitfail_registry / tool_executor;
-    None-guard 全降级(emitter=None 时 _emit_workflow 静默跳过,run 不崩)。
-    """
-    global _engine_instance
-    if _engine_instance is not None:
-        return _engine_instance
-    from .engine import WorkflowEngine
-    try:
-        from src.services import _state
-        emitter = getattr(_state, "memory_observe_emitter", None)
-        pitfail = getattr(_state, "pitfall_registry", None)
-        tool_executor = getattr(_state, "tool_executor", None)
-    except Exception:  # noqa: BLE001 — _state 不可用时降级 None deps
-        logger.warning(
-            "workflow_engine.nesting: _state unavailable, engine with None deps",
-        )
-        emitter = pitfail = tool_executor = None
-    _engine_instance = WorkflowEngine(
-        emitter=emitter, pitfail_registry=pitfail, tool_executor=tool_executor,
-    )
-    return _engine_instance
-
-
-def set_engine(engine: "WorkflowEngine") -> None:  # type: ignore[name-defined]
-    """测试 hook:注入 fake engine(monkeypatch 替代 _get_engine 默认单例)。"""
-    global _engine_instance
-    _engine_instance = engine
-
-
 async def nested_run(
     spec: "WorkflowNodesSpec",
     parent_ctx: "WorkflowContext",
+    engine: "WorkflowEngine",
 ) -> "WorkflowResult":
     """一层嵌套限制的 workflow run(design §7 逐字实现)。
+
+    ``engine`` 显式注入 — 调用方与生产 chokepoint(``v2_workflow._build_engine``)
+    共用同一 Engine 构造路径(单一 chokepoint,避免两套孤立 Engine 构造)。
 
     - ``_WF_CTX.get()`` 非 None(已在 child 上下文内) → 用其作 parent(深度叠加
       检查);None(root 调用首次进入)→ fallback 显式 ``parent_ctx``。
@@ -138,7 +102,6 @@ async def nested_run(
 
     token = _WF_CTX.set(child_ctx)
     try:
-        engine = _get_engine()
         result = await engine.run(spec, child_ctx)
         return result
     finally:

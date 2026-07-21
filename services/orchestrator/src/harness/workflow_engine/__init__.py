@@ -35,13 +35,12 @@ from .engine import (
     register_schema,
     resolve_schema,
 )
-# W-P2-2:nesting 子模块(nested_run / WorkflowNestingError / _WF_CTX / set_engine)。
+# W-P2-2:nesting 子模块(nested_run / WorkflowNestingError / _WF_CTX)。
 from .nesting import (
     WorkflowNestingError,
     _WF_CTX,
     get_workflow_context,
     nested_run,
-    set_engine,
 )
 # W-P2-3:worktree 子模块(WorktreeManager / _chdir;per-agent opt-in git worktree 隔离)。
 from .worktree import WorktreeManager, _chdir
@@ -65,7 +64,6 @@ __all__ = [
     "nested_run",
     "WorkflowNestingError",
     "get_workflow_context",
-    "set_engine",
     # P2 worktree(W-P2-3)
     "WorktreeManager",
     "_chdir",

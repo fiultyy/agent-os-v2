@@ -18,7 +18,6 @@ from harness.workflow_engine import (
     WorkflowNestingError,
     WorkflowNodesSpec,
     nested_run,
-    set_engine,
 )
 from pydantic_ai.usage import RunUsage
 
@@ -90,20 +89,13 @@ def _root_ctx(concurrency=8, **kw):
     )
 
 
-def _setup_engine():
-    """set_engine(WorkflowEngine())注入 — nesting._get_engine 返此实例。
+def _new_engine() -> WorkflowEngine:
+    """构造注入用的 WorkflowEngine(emitter=None → _emit_workflow 静默跳过)。
 
-    返 (engine, restore)。engine.emitter=None(_emit_workflow 静默跳过)。
+    F1:nested_run 改为接受 engine 参数(单一 Engine 构造 chokepoint),
+    不再依赖 nesting 模块级单例;测试显式构造注入。
     """
-    engine = WorkflowEngine()
-    set_engine(engine)
-
-    def restore():
-        # 重置 nesting 模块级单例为 None(下次 _get_engine 重建)
-        from harness.workflow_engine import nesting as nest_mod
-        nest_mod._engine_instance = None
-
-    return engine, restore
+    return WorkflowEngine()
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -112,14 +104,12 @@ def _setup_engine():
 def test_nested_run_root_to_child_success():
     agents = [_FakeAgent(output="child_a"), _FakeAgent(output="child_b")]
     cap, restore_build = _patch_build(agents)
-    _, restore_engine = _setup_engine()
     try:
         parent_ctx = _root_ctx()
         spec = _spec([{"prompt": "t1"}, {"prompt": "t2"}])
-        result = run_async(nested_run(spec, parent_ctx))
+        result = run_async(nested_run(spec, parent_ctx, _new_engine()))
     finally:
         restore_build()
-        restore_engine()
 
     # 两子 agent 各 spawn 一次
     assert cap["count"] == 2
@@ -134,13 +124,11 @@ def test_nested_run_child_depth_is_one():
     """nested_run 调后,_WF_CTX 已 reset 回 None(栈式 finally 回退)。"""
     agents = [_FakeAgent(output="ok")]
     _, restore_build = _patch_build(agents)
-    _, restore_engine = _setup_engine()
     try:
         parent_ctx = _root_ctx()
-        run_async(nested_run(_spec([{"prompt": "t"}]), parent_ctx))
+        run_async(nested_run(_spec([{"prompt": "t"}]), parent_ctx, _new_engine()))
     finally:
         restore_build()
-        restore_engine()
     # 栈式回退:_WF_CTX 重置回调用前状态(root 调用前是 None)
     from harness.workflow_engine import get_workflow_context
     assert get_workflow_context() is None
@@ -153,7 +141,6 @@ def test_nested_run_child_cannot_nest_again():
     """在已是 child 的 _WF_CTX 内再调 nested_run → raise WorkflowNestingError。"""
     agents = [_FakeAgent(output="ok")]
     _, restore_build = _patch_build(agents)
-    _, restore_engine = _setup_engine()
     try:
         parent_ctx = _root_ctx()
         # 顶层 nested_run 模拟"child 调 nested_run":手动先 set child_ctx(depth=1)
@@ -166,7 +153,9 @@ def test_nested_run_child_cannot_nest_again():
         try:
             raised = False
             try:
-                run_async(nested_run(_spec([{"prompt": "t"}]), parent_ctx))
+                run_async(
+                    nested_run(_spec([{"prompt": "t"}]), parent_ctx, _new_engine())
+                )
             except WorkflowNestingError:
                 raised = True
             assert raised, "child 内再 nested_run 应 raise WorkflowNestingError"
@@ -174,7 +163,6 @@ def test_nested_run_child_cannot_nest_again():
             _WF_CTX.reset(token)
     finally:
         restore_build()
-        restore_engine()
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -186,26 +174,26 @@ def test_concurrent_nested_runs_do_not_cross_contaminate():
     """asyncio.gather 并发 2 nested_run,两 child 的 run_id 独立 + 不串味。
 
     共享父 total_usage:两 child 各 spawn 1 agent(+1 request each)→ 父
-    total_usage.requests == 2(同一 RunUsage 引用累加)。
+    total_usage.requests == 2(同一 RunUsage 引用累加)。两并发 nested_run 共享
+    同一注入 engine(同原单例语义)。
     """
     agents = [_FakeAgent(output="c1"), _FakeAgent(output="c2")]
     cap, restore_build = _patch_build(agents)
-    _, restore_engine = _setup_engine()
     try:
         parent_ctx = _root_ctx()
         spec = _spec([{"prompt": "t"}])
+        engine = _new_engine()
 
         async def _two_concurrent():
             r1, r2 = await asyncio.gather(
-                nested_run(spec, parent_ctx),
-                nested_run(spec, parent_ctx),
+                nested_run(spec, parent_ctx, engine),
+                nested_run(spec, parent_ctx, engine),
             )
             return r1, r2
 
         r1, r2 = run_async(_two_concurrent())
     finally:
         restore_build()
-        restore_engine()
 
     # 两 child 各 spawn 1 次(共 2 次)
     assert cap["count"] == 2
@@ -230,17 +218,15 @@ def test_parent_abort_short_circuits_child_spawn():
     """父 abort.set() 后 child 的 run._bounded 见 abort → skipped,不 spawn。"""
     agents = [_FakeAgent(output="should_not_run")]  # 不应被消费
     cap, restore_build = _patch_build(agents)
-    _, restore_engine = _setup_engine()
     try:
         parent_ctx = _root_ctx()
         # 父 ctx 设 abort Event 并 set()(模拟父已 abort)
         parent_ctx.abort = asyncio.Event()
         parent_ctx.abort.set()
         spec = _spec([{"prompt": "t1"}, {"prompt": "t2"}])
-        result = run_async(nested_run(spec, parent_ctx))
+        result = run_async(nested_run(spec, parent_ctx, _new_engine()))
     finally:
         restore_build()
-        restore_engine()
 
     # abort 短路:_spawn_agent 不被调(build_native_agent 计数=0)
     assert cap["count"] == 0
@@ -264,15 +250,15 @@ def test_child_commits_usage_back_to_parent_via_incr():
     """
     agents = [_FakeAgent(output="ok")]
     _, restore_build = _patch_build(agents)
-    _, restore_engine = _setup_engine()
     try:
         parent_ctx = _root_ctx()
         # 记 parent 初始 total_usage 引用(回 commit 应原地 mutate 此对象)
         parent_usage_obj = parent_ctx.total_usage
-        run_async(nested_run(_spec([{"prompt": "t"}]), parent_ctx))
+        run_async(
+            nested_run(_spec([{"prompt": "t"}]), parent_ctx, _new_engine())
+        )
     finally:
         restore_build()
-        restore_engine()
 
     # parent_ctx.total_usage 引用未变(nesting 经 incr 原地 mutate,不重绑)
     assert parent_ctx.total_usage is parent_usage_obj

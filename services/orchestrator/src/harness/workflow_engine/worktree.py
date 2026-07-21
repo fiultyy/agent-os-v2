@@ -97,7 +97,7 @@ class WorktreeManager:
         self._wt_semaphore: Optional[asyncio.Semaphore] = None
 
     def _sem(self) -> asyncio.Semaphore:
-        """懒建 Semaphore(避免模块导入时无 running loop,匹配 nesting._get_engine 风格)。"""
+        """懒建 Semaphore(避免模块导入时无 running loop;首次 acquire 时 await 前建)。"""
         if self._wt_semaphore is None:
             self._wt_semaphore = asyncio.Semaphore(1)
         return self._wt_semaphore
