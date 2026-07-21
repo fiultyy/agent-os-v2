@@ -176,3 +176,79 @@ def test_workflow_tools_available_flag_set():
     # 本测运行 = engine 成功 import = flag True。生产环境若 v2_workflow import 失败,
     # engine 仍启动(降级 _WORKFLOW_TOOLS=[]),_WORKFLOW_TOOLS_AVAILABLE=False。
     assert getattr(engine_mod, "_WORKFLOW_TOOLS_AVAILABLE", False) is True
+
+
+# ─────────────────────────────────────────────────────────────────────
+# W-P1-4 / F6(review fix):workflow_loop 通电(design 声明但修前未实现)。
+# verify(逐字 design §5 W-P1-4):
+# - ``_tool_registry.get('workflow_loop')`` 命中(register 名无 v2_ 前缀)
+# - 经 ``ToolBridgeCapability.get_toolset`` 后模型可见 ``v2_workflow_loop``
+#   (不带双 ``v2_`` 前缀 — RK11 对位 workflow_run)
+# ─────────────────────────────────────────────────────────────────────
+def test_workflow_loop_registered_unprefixed():
+    """register 名 = 'workflow_loop'(无 v2_ 前缀)— ToolBridge 自动加成 v2_workflow_loop。"""
+    tool = _tool_registry.get("workflow_loop")
+    assert tool is not None, "workflow_loop not registered (W-P1-4 / F6 missing)"
+    params = tool["parameters"]
+    assert params["required"] == ["finder_spec"]
+    assert params["additionalProperties"] is False
+    # finder_spec 单 node schema(prompt required,minLength=1)
+    assert params["properties"]["finder_spec"]["required"] == ["prompt"]
+    # max_iter / dry_limit / seen_key_fn 约束来自 WORKFLOW_LOOP_SCHEMA(design §2.2.2)
+    assert params["properties"]["max_iter"]["maximum"] == 100
+    assert params["properties"]["seen_key_fn"]["enum"] == ["content_hash", "label"]
+
+
+def test_workflow_loop_registered_at_composite_layer():
+    """layer = ToolLayer.COMPOSITE(与 workflow_run 同层)。"""
+    entries = _tool_registry.get_catalog().entries
+    wf_entry = entries.get("workflow_loop")
+    assert wf_entry is not None, "workflow_loop not in catalog"
+    assert wf_entry.layer == ToolLayer.COMPOSITE
+
+
+def test_workflow_loop_v2_prefixed_name_not_registered():
+    """RK11 反向断言:register 名必须 **不是** 'v2_workflow_loop'。"""
+    assert _tool_registry.get("v2_workflow_loop") is None
+    assert _tool_registry.get("v2_v2_workflow_loop") is None
+
+
+def test_model_visible_name_is_v2_workflow_loop_no_double_prefix():
+    """RK11:ToolBridge .prefixed('v2') 自动加成 v2_workflow_loop(对位 workflow_run 测)。"""
+    from pydantic_ai._run_context import RunContext
+    from pydantic_ai.models.test import TestModel
+    from pydantic_ai.usage import RunUsage
+
+    ctx = RunContext(deps=None, model=TestModel(), usage=RunUsage())
+    cap = ToolBridgeCapability(tool_executor=_tool_executor)
+    ts = cap.get_toolset()
+    names = asyncio.run(ts.get_tools(ctx)).keys()
+
+    assert "v2_workflow_loop" in names, (
+        f"model-visible name missing 'v2_workflow_loop'; got: {sorted(names)}"
+    )
+    assert "v2_v2_workflow_loop" not in names, "RK11 FAIL: double v2_ prefix"
+    assert "workflow_loop" not in names
+
+
+def test_dispatch_strips_v2_prefix_and_calls_loop_handler():
+    """dispatch 端 strip 前缀回 workflow_loop,空 finder_spec 触发 R7 状态化 error。"""
+    from pydantic_ai._run_context import RunContext
+    from pydantic_ai.models.test import TestModel
+    from pydantic_ai.usage import RunUsage
+
+    ctx = RunContext(deps=None, model=TestModel(), usage=RunUsage())
+    cap = ToolBridgeCapability(tool_executor=_tool_executor, pitfail_registry=None)
+    ts = cap.get_toolset()
+    tools = asyncio.run(ts.get_tools(ctx))
+    tool = tools["v2_workflow_loop"]
+
+    # finder_spec={} → handler 首行 LoopSpec.model_validate 拒(RK7)→ R7 status=error
+    result_str = asyncio.run(ts.call_tool(
+        "v2_workflow_loop", {"finder_spec": {}}, ctx, tool,
+    ))
+    assert isinstance(result_str, str)
+    assert "invalid loop spec" in result_str, (
+        f"dispatch did not route to workflow_loop_handler; got: {result_str!r}"
+    )
+    assert "status" in result_str and "error" in result_str

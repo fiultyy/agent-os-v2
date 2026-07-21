@@ -171,7 +171,9 @@ if _SKILL_TOOLS_AVAILABLE:
     _WORKFLOW_TOOLS_AVAILABLE = False
     try:
         from src.tools.composite.v2_workflow import (
+            WORKFLOW_LOOP_SCHEMA,
             WORKFLOW_RUN_SCHEMA,
+            workflow_loop_handler,
             workflow_run_handler,
         )
         _WORKFLOW_TOOLS_AVAILABLE = True
@@ -186,6 +188,13 @@ if _SKILL_TOOLS_AVAILABLE:
              "Workflow fan-out/fan-in — spawn N sub-agents via build_native_agent, "
              "gather results (list|merge). Sub-agents inherit ToolBridge, zero memory.",
              WORKFLOW_RUN_SCHEMA, ToolLayer.COMPOSITE),
+            # workflow_loop 通电(W-P1-4,F6):薄桥调 WorkflowEngine.loop(finder
+            # 每轮产候选 → seen 去重 → dry/budget 早收敛 break)。register 名
+            # **workflow_loop**(无 v2_ 前缀,RK11),ToolBridge 自动加成 v2_workflow_loop。
+            ("workflow_loop", workflow_loop_handler,
+             "Workflow loop — finder sub-agent produces candidates each iteration, "
+             "dedup via seen set, break on dry-streak or budget. Zero memory.",
+             WORKFLOW_LOOP_SCHEMA, ToolLayer.COMPOSITE),
         ]
     else:
         _WORKFLOW_TOOLS = []

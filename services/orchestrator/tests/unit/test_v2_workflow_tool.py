@@ -37,6 +37,8 @@ _spec.loader.exec_module(v2_workflow)
 
 WORKFLOW_RUN_SCHEMA = v2_workflow.WORKFLOW_RUN_SCHEMA
 workflow_run_handler = v2_workflow.workflow_run_handler
+WORKFLOW_LOOP_SCHEMA = v2_workflow.WORKFLOW_LOOP_SCHEMA
+workflow_loop_handler = v2_workflow.workflow_loop_handler
 
 # ── sync wrapper(避开 pytest-asyncio loop pollution;母版见 test_workflow_engine_run)──
 _LOOP = None
@@ -350,3 +352,177 @@ def test_handler_journal_construction_failure_degrades_to_none(monkeypatch):
     assert result["status"] == "success"
     # R3 核心:journal 不可用时 ctx.journal=None,engine 侧 no-op,run 不崩
     assert capture["ctx"].journal is None, "F5 R3: journal construction failure must degrade to None"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# F6(review fix):workflow_loop_handler 薄桥(W-P1-4 design 声明但修前未实现)。
+# verify:
+# - 非法 spec(finder_spec 缺 prompt / max_iter 越界 / seen_key_fn 非 Literal)
+#   → status='error', error='invalid loop spec'
+# - 合法薄桥调 WorkflowEngine.loop(mock)→ 返状态化 dict
+# - engine.loop raise 时 R7 状态化 error 不冒泡
+# - WORKFLOW_LOOP_SCHEMA 关键字段存在(design §2.2.2)
+# ─────────────────────────────────────────────────────────────────────
+def _patch_engine_loop(fake_result=None, capture=None):
+    """monkeypatch WorkflowEngine.loop 为 fake;返 restore。同步 stub _build_journal
+    避免落盘污染(对位 _patch_engine_run)。"""
+    orig = wf_mod.WorkflowEngine.loop
+    orig_build_journal = v2_workflow._build_journal
+
+    async def _fake_loop(self, spec, ctx):
+        if capture is not None:
+            capture["spec"] = spec
+            capture["ctx"] = ctx
+        if fake_result is not None:
+            return fake_result
+        return _fake_result(status="success", n=1)
+
+    wf_mod.WorkflowEngine.loop = _fake_loop
+    v2_workflow._build_journal = lambda: None
+
+    def restore():
+        wf_mod.WorkflowEngine.loop = orig
+        v2_workflow._build_journal = orig_build_journal
+
+    return restore
+
+
+def test_loop_handler_invalid_finder_spec_returns_invalid_loop_error():
+    # finder_spec 缺 prompt → LoopSpec.finder_spec(WorkflowNodeSpec) min_length=1 拒
+    result = run_async(workflow_loop_handler(finder_spec={}))
+    assert result["status"] == "error"
+    assert result["error"] == "invalid loop spec"
+    assert "output" not in result
+
+
+def test_loop_handler_empty_finder_prompt_returns_invalid_loop_error():
+    result = run_async(workflow_loop_handler(finder_spec={"prompt": ""}))
+    assert result["status"] == "error"
+    assert result["error"] == "invalid loop spec"
+
+
+def test_loop_handler_max_iter_out_of_range_returns_invalid_loop_error():
+    # max_iter > 100 违反 LoopSpec max_iter le=100
+    result = run_async(workflow_loop_handler(
+        finder_spec={"prompt": "find"}, max_iter=999,
+    ))
+    assert result["status"] == "error"
+    assert result["error"] == "invalid loop spec"
+
+
+def test_loop_handler_bad_seen_key_fn_returns_invalid_loop_error():
+    # seen_key_fn 非 Literal["content_hash","label"]
+    result = run_async(workflow_loop_handler(
+        finder_spec={"prompt": "find"}, seen_key_fn="bogus",  # type: ignore[arg-type]
+    ))
+    assert result["status"] == "error"
+    assert result["error"] == "invalid loop spec"
+
+
+def test_loop_handler_valid_spec_dispatches_engine_loop():
+    capture: dict = {}
+    restore = _patch_engine_loop(fake_result=_fake_result(status="success", n=1), capture=capture)
+    try:
+        result = run_async(workflow_loop_handler(
+            finder_spec={"prompt": "find candidates"},
+            max_iter=5,
+            dry_limit=3,
+            seen_key_fn="label",
+        ))
+    finally:
+        restore()
+
+    # handler 返状态化 dict(顶层 status 来自 WorkflowResult.status)
+    assert result["status"] == "success"
+    assert "output" in result
+    out = result["output"]
+    assert out["run_id"] == "wf_testrun"
+
+    # 薄桥确实调了 engine.loop(spec, ctx)
+    spec = capture["spec"]
+    assert spec.max_iter == 5
+    assert spec.dry_limit == 3
+    assert spec.seen_key_fn == "label"
+    assert spec.finder_spec.prompt == "find candidates"
+    # ctx.run_id 模块级生成 wfl_<hex12>(loop 前缀区分 run)
+    assert capture["ctx"].run_id.startswith("wfl_")
+    assert len(capture["ctx"].run_id) == 16  # 'wfl_' + 12 hex
+
+
+def test_loop_handler_engine_loop_exception_returns_error_not_raise():
+    """R7:engine.loop raise 时 handler 状态化返 error,不冒泡。"""
+    orig = wf_mod.WorkflowEngine.loop
+
+    async def _raise(self, spec, ctx):
+        raise RuntimeError("loop imploded")
+
+    wf_mod.WorkflowEngine.loop = _raise
+    v2_workflow._build_journal = lambda: None
+    try:
+        result = run_async(workflow_loop_handler(finder_spec={"prompt": "x"}))
+    finally:
+        wf_mod.WorkflowEngine.loop = orig
+
+    assert result["status"] == "error"
+    assert "engine.loop" in result["error"]
+    assert "loop imploded" in result["error"]
+
+
+def test_loop_handler_ctx_journal_wired():
+    """F6 复用 F5 通电:workflow_loop_handler 构造的 ctx.journal 非 None(对位
+    workflow_run_handler test_handler_constructs_ctx_with_real_journal)。"""
+    import tempfile
+    orig_run = wf_mod.WorkflowEngine.loop
+    capture: dict = {}
+
+    async def _capture(self, spec, ctx):
+        capture["ctx"] = ctx
+        return _fake_result()
+
+    wf_mod.WorkflowEngine.loop = _capture
+    db = tempfile.mktemp(suffix=".db")
+    orig_build_journal = v2_workflow._build_journal
+
+    def _build():
+        return WorkflowJournal(db)
+
+    v2_workflow._build_journal = _build
+    try:
+        run_async(workflow_loop_handler(finder_spec={"prompt": "find"}))
+    finally:
+        wf_mod.WorkflowEngine.loop = orig_run
+        v2_workflow._build_journal = orig_build_journal
+
+    ctx = capture["ctx"]
+    assert ctx.journal is not None, "F6: workflow_loop_handler must wire ctx.journal (复用 F5)"
+    assert isinstance(ctx.journal, WorkflowJournal)
+    ctx.journal.close()
+
+
+def test_workflow_loop_schema_has_design_fields():
+    """design §2.2.2 字面:finder_spec / max_iter / budget / schema_ref /
+    seen_key_fn / dry_limit。"""
+    schema = WORKFLOW_LOOP_SCHEMA
+    assert schema["type"] == "object"
+    assert schema["required"] == ["finder_spec"]
+    assert schema["additionalProperties"] is False
+
+    props = schema["properties"]
+    # finder_spec 是单 node schema(prompt required + minLength=1)
+    assert props["finder_spec"]["required"] == ["prompt"]
+    assert props["finder_spec"]["properties"]["prompt"]["minLength"] == 1
+    # max_iter 范围
+    assert props["max_iter"]["minimum"] == 1
+    assert props["max_iter"]["maximum"] == 100
+    assert props["max_iter"]["default"] == 10
+    # seen_key_fn Literal
+    assert props["seen_key_fn"]["enum"] == ["content_hash", "label"]
+    assert props["seen_key_fn"]["default"] == "content_hash"
+    # dry_limit 范围
+    assert props["dry_limit"]["minimum"] == 1
+    assert props["dry_limit"]["maximum"] == 5
+    assert props["dry_limit"]["default"] == 2
+    # budget 子字段
+    budget_props = props["budget"]["properties"]
+    for key in ("request_limit", "input_tokens_limit", "output_tokens_limit", "total_tokens_limit"):
+        assert key in budget_props

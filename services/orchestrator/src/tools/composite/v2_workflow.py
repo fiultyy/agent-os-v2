@@ -30,6 +30,7 @@ import uuid
 from typing import Any
 
 from harness.workflow_engine import (
+    LoopSpec,
     WorkflowContext,
     WorkflowEngine,
     WorkflowNodesSpec,
@@ -103,6 +104,56 @@ WORKFLOW_RUN_SCHEMA: dict[str, Any] = {
             "maximum": 64,
             "default": 8,
         },
+    },
+}
+
+
+# ─────────────────────────────────────────────────────────────────────
+# JSON Schema(design §2.2.2 — workflow_loop,P1):finder_spec 单 node(产候选)
+# + max_iter / budget / schema_ref / seen_key_fn / dry_limit。handler 内
+# ``LoopSpec.model_validate`` 是兜底双校验(RK7)。finder_spec 用与 RUN_SCHEMA.nodes
+# 同形 node schema(逐字内联,JSON-schema 无 $ref 跨文件,工具自包含)。
+# ─────────────────────────────────────────────────────────────────────
+_WORKFLOW_NODE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["prompt"],
+    "additionalProperties": False,
+    "properties": {
+        "prompt": {"type": "string", "minLength": 1},
+        "label": {"type": "string"},
+        "model": {"type": "string"},
+        "schema_ref": {"type": "string"},
+        "effort": {
+            "type": "string",
+            "enum": ["low", "medium", "high", "xhigh", "max"],
+        },
+        "isolation": {"type": "string", "enum": ["worktree"]},
+    },
+}
+
+WORKFLOW_LOOP_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["finder_spec"],
+    "additionalProperties": False,
+    "properties": {
+        "finder_spec": _WORKFLOW_NODE_SCHEMA,
+        "max_iter": {"type": "integer", "minimum": 1, "maximum": 100, "default": 10},
+        "budget": {
+            "type": "object",
+            "properties": {
+                "request_limit": {"type": "integer"},
+                "input_tokens_limit": {"type": "integer"},
+                "output_tokens_limit": {"type": "integer"},
+                "total_tokens_limit": {"type": "integer"},
+            },
+        },
+        "schema_ref": {"type": "string"},
+        "seen_key_fn": {
+            "type": "string",
+            "enum": ["content_hash", "label"],
+            "default": "content_hash",
+        },
+        "dry_limit": {"type": "integer", "minimum": 1, "maximum": 5, "default": 2},
     },
 }
 
@@ -187,6 +238,70 @@ async def workflow_run_handler(
             "workflow_run_handler: engine.run failed (run=%s): %s", run_id, exc,
         )
         return {"status": "error", "output": None, "error": f"engine.run: {exc}"}
+
+    return {
+        "status": result.status,
+        "output": _result_to_dict(result),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────
+# workflow_loop_handler(P1 薄桥,design §2.2.3):每轮 spawn finder 子 agent
+# 产候选 → seen 去重 → dry counter / budget 早收敛 break。
+# 与 workflow_run_handler 同形:首行 ``LoopSpec.model_validate`` 二次校验(RK7),
+# 非法返 ``{"status":"error","error":"invalid loop spec"}``(R7 状态化非 raise);
+# 合法薄桥调 ``WorkflowEngine.loop(spec, ctx)``(ctx 含 journal,复用 F5 通电)。
+# ─────────────────────────────────────────────────────────────────────
+async def workflow_loop_handler(
+    finder_spec: dict,
+    max_iter: int = 10,
+    budget: dict | None = None,
+    schema_ref: str | None = None,
+    seen_key_fn: str = "content_hash",
+    dry_limit: int = 2,
+) -> dict[str, Any]:
+    """P1 入口 — workflow_loop 工具薄桥(design §2.2.3)。
+
+    1. **首行** ``LoopSpec.model_validate(...)`` 二次校验(RK7):finder_spec 非 node /
+       max_iter 越界 / seen_key_fn 非 Literal → 返
+       ``{"status": "error", "error": "invalid loop spec"}``(R7 返值非 raise)。
+    2. 合法薄桥调 ``WorkflowEngine.loop(spec, ctx)``(ctx 从 _state 构造,journal
+       复用 ``_build_journal`` F5 通电;session_id/agent_id_prefix P1 用默认)。
+    3. 返回状态化 dict(同 workflow_run_handler 形状)。
+    """
+    # ── RK7 二次校验(首行)— budget dict 原样透传,LoopSpec 内 UsageLimits 解析 ──
+    try:
+        spec = LoopSpec.model_validate({
+            "finder_spec": finder_spec,
+            "max_iter": max_iter,
+            "budget": budget,
+            "schema_ref": schema_ref,
+            "seen_key_fn": seen_key_fn,
+            "dry_limit": dry_limit,
+        })
+    except Exception as exc:  # noqa: BLE001 — R7:返值非 raise
+        logger.warning("workflow_loop_handler: invalid loop spec: %s", exc)
+        return {"status": "error", "error": "invalid loop spec"}
+
+    # ── ctx 构造(复用 _build_journal F5 通电)──
+    run_id = f"wfl_{uuid.uuid4().hex[:12]}"
+    ctx = WorkflowContext(
+        session_id="workflow",
+        agent_id_prefix="wf",
+        run_id=run_id,
+        concurrency=1,  # loop 是单 node 串行(finder 每轮一次),无 fan-out
+        journal=_build_journal(),
+    )
+
+    # ── 薄桥调 engine.loop ──
+    engine = _build_engine()
+    try:
+        result = await engine.loop(spec, ctx)
+    except Exception as exc:  # noqa: BLE001 — R7:engine.loop 异常状态化不冒泡
+        logger.warning(
+            "workflow_loop_handler: engine.loop failed (run=%s): %s", run_id, exc,
+        )
+        return {"status": "error", "output": None, "error": f"engine.loop: {exc}"}
 
     return {
         "status": result.status,
