@@ -234,3 +234,212 @@ class WorkflowEngine:
             usage=node_usage,
             status="success",
         )
+
+    # ───────────────────────────────────────────────────────────────────
+    # P0 run — fan-out(Semaphore cap)+ fan-in(gather BARRIER,单点聚合)
+    # ───────────────────────────────────────────────────────────────────
+    async def run(
+        self,
+        spec: WorkflowNodesSpec,
+        ctx: WorkflowContext,
+    ) -> WorkflowResult:
+        """P0 fan-out + fan-in 单点聚合。
+
+        - Semaphore(ctx.concurrency=8) cap(RK4 智谱通道并发限流兜底)。
+        - ``asyncio.gather(*[_bounded(n) for n in nodes], return_exceptions=True)``
+          是 BARRIER 原语(零自研):单失败不 abort sibling。
+        - R7 pitfall 语义鸿沟:``gather`` 后 ``isinstance(r, Exception)`` 转
+          ``NodeResult(status='error')``(tool_executor 返 {status:'error'} 非
+          raise,但 ``_spawn_agent`` 的 agent.run 异常走 raise 通道)。
+        - RK2 fan-in 聚合:per-node RunUsage 在 ``asyncio.Lock`` 内
+          ``ctx.total_usage += r.usage``(避共享可变引用竞态)。
+        - fan_in='list' 原样数组(success/error 混杂);'merge' dict 字段合并
+          (success only,later-wins;error 聚合 errors list,design §11 Q2)。
+        - 4 事件 emit:workflow_started / node_started×N / node_completed×N /
+          workflow_completed(R4 wire tick_completed)。
+        """
+        import time
+
+        loop = asyncio.get_running_loop()  # RK1:沿主 event loop,禁 run_sync/asyncio.run
+        lock = asyncio.Lock()              # RK2 fan-in 聚合锁
+        sem = asyncio.Semaphore(max(1, ctx.concurrency))
+
+        self._emit_workflow(
+            "workflow_started",
+            ctx.run_id,
+            {"node_count": len(spec.nodes), "fan_in": spec.fan_in},
+            session_id=ctx.session_id,
+        )
+
+        async def _bounded(node: WorkflowNodeSpec) -> NodeResult:
+            self._emit_workflow(
+                "workflow_node_started",
+                ctx.run_id,
+                {"label": node.label, "model": node.model},
+                session_id=ctx.session_id,
+            )
+            async with sem:
+                nr = await self._spawn_agent(node, ctx)
+            # RK2 fan-in 聚合(per-node usage 在 Lock 内 +=;__add__ 返新对象)
+            async with lock:
+                ctx.total_usage = ctx.total_usage + nr.usage
+            self._emit_workflow(
+                "workflow_node_completed",
+                ctx.run_id,
+                {
+                    "label": nr.label,
+                    "agent_id": nr.agent_id,
+                    "status": nr.status,
+                    "error": nr.error,
+                },
+                session_id=ctx.session_id,
+            )
+            return nr
+
+        started = time.monotonic()
+        raw = await asyncio.gather(
+            *[_bounded(n) for n in spec.nodes],
+            return_exceptions=True,  # R3 BARRIER:单失败不 abort sibling
+        )
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+
+        node_results: list[NodeResult] = []
+        for r in raw:
+            if isinstance(r, Exception):
+                # R7 语义鸿沟:转 NodeResult(status='error') 不冒泡。
+                node_results.append(NodeResult(
+                    label="unknown",
+                    agent_id="unknown",
+                    status="error",
+                    error=f"{type(r).__name__}: {r}",
+                ))
+            else:
+                node_results.append(r)
+
+        # fan-in 聚合(design §11 Q2:list 原样 / merge success-only 字段合并)
+        merged_output, errors = _fan_in(node_results, spec.fan_in)
+        overall_status = "error" if all(nr.status != "success" for nr in node_results) else "success"
+
+        self._emit_workflow(
+            "workflow_completed",
+            ctx.run_id,
+            {
+                "status": overall_status,
+                "node_count": len(node_results),
+                "usage": _usage_dict(ctx.total_usage),
+            },
+            session_id=ctx.session_id,
+        )
+        # 标 merged_output 供 handler 暴露(经 WorkflowResult 字段不增,这里仅日志侧用)
+        if spec.fan_in == "merge":
+            logger.info(
+                "workflow_engine.run fan_in=merge (run=%s): %d fields merged, %d errors",
+                ctx.run_id,
+                len(merged_output) if isinstance(merged_output, dict) else 0,
+                len(errors),
+            )
+
+        return WorkflowResult(
+            status=overall_status,
+            node_results=node_results,
+            total_usage=ctx.total_usage,
+            elapsed_ms=elapsed_ms,
+            node_count=len(node_results),
+            run_id=ctx.run_id,
+        )
+
+    # ───────────────────────────────────────────────────────────────────
+    # P0 _emit_workflow — fire-and-forget(ADR-7),wire tick_completed(R4)
+    # ───────────────────────────────────────────────────────────────────
+    def _emit_workflow(
+        self,
+        event_name: str,
+        run_id: str,
+        payload: dict,
+        session_id: Optional[str] = None,
+    ) -> None:
+        """workflow_* 事件 → observe wire。
+
+        R4 照搬 ``flow.py:98-121`` 的 ``flow_event()`` 模式:event_type 恒
+        ``tick_completed``(observe EventType enum 冻结),真实语义塞
+        ``data.flow_event ∈ WORKFLOW_FLOW_EVENTS`` + ``data.flow_payload``。
+        绝不 import EventType 或新增枚举值。
+
+        R3 fire-and-forget:emitter=None 跳过;整体 try/except pass(emit 本身
+        fire-and-forget,这里二重兜底);同步签名(design §2.1)经
+        ``asyncio.create_task`` 调度 emit,run 内 await 点不会被 emit 阻塞。
+        """
+        try:
+            if self.emitter is None:
+                return
+            if event_name not in WORKFLOW_FLOW_EVENTS:
+                logger.warning(
+                    "workflow_engine._emit_workflow: unknown flow_event=%s (run=%s)",
+                    event_name, run_id,
+                )
+            ev = {
+                "event_id": str(uuid.uuid4()),
+                "harness_type": "workflow",
+                "harness_id": run_id,
+                "session_id": session_id or run_id,
+                "tick_id": run_id,
+                "event_type": "tick_completed",  # R4:冻结
+                "data": {
+                    "status": "success",
+                    "response": "",
+                    "flow_event": event_name,    # R4:真实语义
+                    "flow_payload": payload,     # R4:真实 payload
+                },
+                "timestamp": _now_ts(),
+            }
+            emit = self.emitter.emit
+            # fire-and-forget:调度协程不 await,emit 内部已 try/except(emit.py:95-105)
+            loop = asyncio.get_event_loop()
+            loop.create_task(emit(ev))
+        except Exception:  # noqa: BLE001 — R3 fire-and-forget,绝不冒泡主路径
+            logger.warning(
+                "workflow_engine._emit_workflow: emit scheduling failed (run=%s event=%s)",
+                run_id, event_name,
+                exc_info=True,
+            )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# P0 fan-in helper(design §11 Q2)+ usage 序列化 + timestamp
+# ponytail:模块级函数,测试可直接 import 断言;无 class 包袱
+# ─────────────────────────────────────────────────────────────────────
+def _fan_in(
+    node_results: list[NodeResult],
+    fan_in: Literal["list", "merge"],
+) -> tuple[Any, list[str]]:
+    """fan_in='list' → 原样 [nr.output for nr in ...](success/error 混杂)。
+    fan_in='merge' → success-only dict 字段合并(later-wins;error 聚合 errors list)。
+    返 (merged_or_list, errors)。
+    """
+    errors = [nr.error for nr in node_results if nr.status != "success" and nr.error]
+    if fan_in == "list":
+        return [nr.output for nr in node_results], errors
+    # merge:只合 success node 的 dict output
+    merged: dict = {}
+    for nr in node_results:
+        if nr.status != "success":
+            continue
+        if isinstance(nr.output, dict):
+            merged.update(nr.output)  # later-wins
+    return merged, errors
+
+
+def _usage_dict(usage: RunUsage) -> dict:
+    """RunUsage → JSON-safe dict(emit payload 用)。"""
+    return {
+        "requests": getattr(usage, "requests", 0) or 0,
+        "input_tokens": getattr(usage, "input_tokens", 0) or 0,
+        "output_tokens": getattr(usage, "output_tokens", 0) or 0,
+        "total_tokens": getattr(usage, "total_tokens", 0) or 0,
+    }
+
+
+def _now_ts() -> str:
+    """ISO8601 UTC timestamp(照搬 events.py:_now,内联避拉 events import)。"""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
