@@ -25,6 +25,15 @@ Claude 有效,glm(中文)待 A/B 对照。默认抄 CC,提供 ``enabled`` / ``di
 + ``AO2_DISCIPLINE_DISABLED`` env 旋钮(读于 ``build_native_agent`` 组装层)做 opt-out / 文本
 替换,验证后再固化。
 
+boundary strip known-divergence(ADR L115):ADR L115 规定 transport 层 **无条件 strip** boundary
+标记(标记泄漏是注入向量,hard requirement)。AO2 的 boundary = pydantic-ai
+``InstructionPart(dynamic=False)``,capability instructions 经 ``AbstractCapability`` 接口进
+``_cap_instructions``,由 pydantic-ai 在 ``_get_instructions`` 装配为结构化 ``InstructionPart``
+列表 —— **非文本 marker**(没有 ``<<<BOUNDARY>>>`` 之类可被 prompt 注入伪造的 delimiter),故
+**无 leak 向量,strip 无对象**。ADR L115 strip hard requirement 在此 **不适用(no marker to strip)**,
+标 known-divergence。等 AO2 脱离 pydantic-ai、自组装 system 字符串(届时需自管 boundary 标记)时,
+再按 ADR L115 补 strip —— 不现在硬补(违反 YAGNI:为不存在的注入向量加防御层)。
+
 否决项(ADR 明示,不引入):80 字 micro-manifest、\"不可覆盖\"修辞、71K 字膨胀。
 """
 

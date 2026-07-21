@@ -70,3 +70,39 @@ def test_env_disabled_opt_out(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(nat, "_DISCIPLINE_DISABLED", True)
     agent = nat.build_native_agent(instructions="hi")
     assert "Tools over shell" not in _cap_text(agent)
+
+
+def test_l115_boundary_strip_known_divergence_documented() -> None:
+    """P5 哨兵(ADR L115):module docstring 必须显式标 boundary strip known-divergence。
+
+    ADR L115 要求 transport 层无条件 strip boundary 标记。AO2 boundary =
+    pydantic-ai InstructionPart(dynamic=False),非文本 marker,无 leak 向量 → strip 不适用。
+    docstring 标 known-divergence,不硬补 strip(YAGNI)。若有人删该声明或误加 strip,
+    本测立即红,逼其先读 ADR L115 决策再动。
+    """
+    from src.harness.capabilities import engineering_discipline_capability as mod
+
+    doc = mod.__doc__ or ""
+    # 关键决策锚点齐全(任一缺失 = docstring 回归)
+    assert "ADR L115" in doc
+    assert "InstructionPart" in doc
+    assert "dynamic=False" in doc
+    assert "known-divergence" in doc
+    assert "no marker to strip" in doc
+
+
+def test_l115_no_textual_boundary_marker_in_output() -> None:
+    """P5 哨兵:capability 输出是纯纪律文本,不含任何可注入的文本 boundary delimiter。
+
+    这印证「AO2 boundary 非文本 marker」的事实前提 —— 无 ``<<<``/``>>>``/``` ` `` 包裹的
+    boundary marker,故 ADR L115 strip 无对象。若有人未来在输出里加文本 marker,本测红,
+    逼其先补 strip(届时 known-divergence 不再适用)。
+    """
+    from src.harness.capabilities import EngineeringDisciplineCapability
+
+    out = EngineeringDisciplineCapability().get_instructions()
+    # 没有任何形如 <<<...>>> 或 [[[...]]] 的文本 boundary marker
+    assert "<<<" not in out
+    assert ">>>" not in out
+    assert "[[[" not in out
+    assert "]]]" not in out
