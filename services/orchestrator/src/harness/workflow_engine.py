@@ -393,8 +393,13 @@ class WorkflowEngine:
                 "timestamp": _now_ts(),
             }
             emit = self.emitter.emit
-            # fire-and-forget:调度协程不 await,emit 内部已 try/except(emit.py:95-105)
-            loop = asyncio.get_event_loop()
+            # fire-and-forget:调度协程不 await,emit 内部已 try/except(emit.py:95-105)。
+            # 优先 get_running_loop(异步路径内更稳);RuntimeError 时(同步直调场景,
+            # 如单测 / 主 agent 非协程上下文)回退 get_event_loop 取/建 loop。
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = asyncio.get_event_loop()
             loop.create_task(emit(ev))
         except Exception:  # noqa: BLE001 — R3 fire-and-forget,绝不冒泡主路径
             logger.warning(
