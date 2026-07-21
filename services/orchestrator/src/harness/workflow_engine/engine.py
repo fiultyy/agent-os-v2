@@ -23,8 +23,20 @@ from pydantic_ai.usage import RunUsage, UsageLimits
 
 # R2 import 白名单:仅 build_native_agent(ADR-sanctioned 统一 spawn 入口)+ caps。
 # (线性图原语 + 工程纪律 capability 见 docstring,不 import — grep 机械守恒)
-from .capabilities import ObserveCapability, ToolBridgeCapability
-from .native_agent import build_native_agent
+from ..capabilities import ObserveCapability, ToolBridgeCapability
+from ..native_agent import build_native_agent
+
+# W-P2-1 包化:``build_native_agent`` 经包 namespace 间接查找(让测试的
+# ``wf_mod.build_native_agent = _fake`` monkeypatch 仍生效 — wf_mod 即包 __init__)。
+# engine.py 本身的 ``from ..native_agent import build_native_agent`` 仅作为 grep 守恒
+# 标记 + fallback(包 __init__ 未通电的极端场景);调用点 ``_spawn_agent_inner`` 走
+# ``_resolve_build_native_agent()`` 取包 namespace 最新值。
+def _resolve_build_native_agent():
+    import sys
+    pkg = sys.modules.get("harness.workflow_engine")
+    if pkg is not None and hasattr(pkg, "build_native_agent"):
+        return pkg.build_native_agent
+    return build_native_agent
 
 logger = logging.getLogger(__name__)
 
@@ -315,7 +327,8 @@ class WorkflowEngine:
             ))
 
         # R5:不传工程纪律 capability 实例 → 走默认 prepend 分支(native_agent.py:114)。
-        agent = build_native_agent(
+        # W-P2-1 包化:经包 namespace 解析(让 wf_mod.build_native_agent monkeypatch 生效)。
+        agent = _resolve_build_native_agent()(
             instructions="",  # P0 子 agent 走 neutral system;node.prompt 是 task input
             capabilities=capabilities,
             model_name=node.model,
