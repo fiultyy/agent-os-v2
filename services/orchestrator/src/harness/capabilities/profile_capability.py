@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pydantic_ai.capabilities import AbstractCapability
 
 from src.agent.profile import AgentBaseProfile, LayerProfile
+from src.harness.capabilities._stable_cache import _cached
 
 
 @dataclass
@@ -47,7 +48,12 @@ class LayerCapability(AbstractCapability[None]):
     defer_loading: bool = False
 
     def get_instructions(self) -> str:
-        return f"=== {self.source} (L{self.layer}) ===\n{self.content}"
+        # G1: stable prefix hash 缓存 —— (layer, source, content) 决定输出,
+        # pydantic-ai 每 .run() 重调,缓存免每轮重拼。content 为空也走同路径。
+        return _cached(
+            (self.layer, self.source, self.content),
+            lambda: f"=== {self.source} (L{self.layer}) ===\n{self.content}",
+        )
 
 
 def make_profile_capabilities(profile: AgentBaseProfile | None) -> list[LayerCapability]:

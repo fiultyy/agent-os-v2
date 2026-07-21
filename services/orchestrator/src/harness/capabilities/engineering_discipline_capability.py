@@ -35,6 +35,8 @@ from typing import Any
 
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
 
+from src.harness.capabilities._stable_cache import _cached
+
 _DISCIPLINE = """\
 ## Engineering Discipline
 
@@ -71,6 +73,14 @@ class EngineeringDisciplineCapability(AbstractCapability[Any]):
         return CapabilityOrdering(position="outermost")
 
     def get_instructions(self) -> str:
+        # G1: stable prefix hash 缓存 —— (enabled, discipline_text) 决定输出,
+        # pydantic-ai 每 .run() 重调,缓存免每轮重读常量/重判分支。
+        return _cached(
+            ("discipline", self.discipline_text, self.enabled),
+            self._build_instructions,
+        )
+
+    def _build_instructions(self) -> str:
         if not self.enabled:
             return ""
         if self.discipline_text is not None:
