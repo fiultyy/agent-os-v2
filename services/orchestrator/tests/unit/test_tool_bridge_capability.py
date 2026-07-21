@@ -122,11 +122,17 @@ def test_instructions_empty_when_no_executor() -> None:
 
 
 def test_toolset_has_named_tool() -> None:
-    """V1:registry 每个 tool 一具名字段(名=registry name)。"""
+    """V1:registry 每个 tool 一具名字段(名=v2_<registry name>,prefixed 隔离)。"""
+    from pydantic_ai._run_context import RunContext
+    from pydantic_ai.models.test import TestModel
+    from pydantic_ai.usage import RunUsage
+
+    ctx = RunContext(deps=None, model=TestModel(), usage=RunUsage())
     cap = ToolBridgeCapability(tool_executor=_StubExecutor())
     ts = cap.get_toolset()
-    assert "file_read" in ts.tools
-    assert "execute_tool" not in ts.tools   # V0 dispatch tool 已退役
+    names = asyncio.run(ts.get_tools(ctx)).keys()   # PrefixedToolset 无同步 .tools
+    assert "v2_file_read" in names
+    assert "execute_tool" not in names   # V0 dispatch tool 已退役
 
 
 def test_defer_loading_false() -> None:

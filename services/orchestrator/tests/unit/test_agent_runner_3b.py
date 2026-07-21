@@ -174,8 +174,13 @@ async def test_toolbridge_injects_registry_tools(_clean_state):
 
         bridges = [c for c in captured["caps"] if isinstance(c, ToolBridgeCapability)]
         assert len(bridges) == 1, "ToolBridgeCapability 必须挂载(子代理 tools 全覆盖)"
-        tool_names = set(bridges[0].get_toolset().tools.keys())
-        assert "search_kb" in tool_names
+        # PrefixedToolset(prefix='v2')无同步 .tools 字段 → 经 async get_tools 取名(grill blocker A)
+        from pydantic_ai._run_context import RunContext
+        from pydantic_ai.models.test import TestModel
+        from pydantic_ai.usage import RunUsage
+        ctx = RunContext(deps=None, model=TestModel(), usage=RunUsage())
+        tool_names = set((await bridges[0].get_toolset().get_tools(ctx)).keys())
+        assert "v2_search_kb" in tool_names
     finally:
         _state.tool_executor = saved_executor
 

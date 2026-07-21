@@ -29,6 +29,7 @@ from typing import Any
 
 from pydantic_ai import FunctionToolset, Tool
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.toolsets import AbstractToolset
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,11 @@ class ToolBridgeCapability(AbstractCapability[Any]):
         # 进 tools[]);返回空字符串。模型直接从 tools[] 字段读 tool 清单。
         return ""
 
-    def get_toolset(self) -> FunctionToolset[Any]:
+    def get_toolset(self) -> AbstractToolset[Any]:
+        # 返 PrefixedToolset(prefix='v2'),tool 名变 v2_<name>。命名空间隔离:
+        # 与 5B MCP 侧 build_mcp_toolsets 的 .prefixed(name) 对称,两路并入
+        # pydantic-ai CombinedToolset 不再因跨 toolset 重名抛 UserError(grill blocker A)。
+        # PrefixedToolset.call_tool 自动 strip v2_ 前缀再 dispatch,execute 路径零回归。
         ts = FunctionToolset[Any]()
         executor = self.tool_executor
         if executor is None or executor.registry is None:
@@ -75,7 +80,7 @@ class ToolBridgeCapability(AbstractCapability[Any]):
             desc = t.get("description") or ""
             params = t.get("parameters") or {"type": "object", "properties": {}}
             ts.add_tool(_make_named_tool(executor, self.pitfail_registry, name, desc, params))
-        return ts
+        return ts.prefixed("v2")
 
     @staticmethod
     def _record_pitfall(pitfail: Any, tool_name: str, error_msg: str) -> None:
