@@ -10,13 +10,26 @@ test_profile.py 实例化,list_profiles/load_from_files/save_to_file/load_from_f
 等 API 仅 test 引用。architect.py/taskspec.py 有 profile_registry 引用但未实例化。
 保留作为 defer 子系统待接线决策。
 """
-from pathlib import Path
 import json
 import logging
+import os
+from pathlib import Path
 
 from .profile import AgentBaseProfile, LayerProfile
 
 logger = logging.getLogger(__name__)
+
+# ADR(harness-adr.md L26)用户指令位置:固定文件名 + 固定顺序 + per-file 截断(抄 claw
+# CONTEXT_FILE_ORDER)。identity/user 是 claw 特定身份/用户偏好,AO2 无对应语义 → 不引入
+# (YAGNI,决策点 2A)。AGENTS.md 单独 _split 拆 L1(identity)+ L2(guidelines),不进此列表。
+_STABLE_FILES: list[tuple[str, int, str, int, list[str]]] = [
+    ("SOUL.md", 0, "soul_md", 100, ["identity", "soul"]),
+    ("MEMORY.md", 3, "memory_md", 70, ["memory"]),
+    ("TOOLS.md", 4, "tools_md", 60, ["tools"]),
+    ("BOOTSTRAP.md", 4, "bootstrap_md", 55, ["bootstrap"]),
+]
+# per-file 最大长度裁剪(保前段核心,防爆 context 稀释纪律段;env 旋钮默认 8192)。
+_MAX_CHARS = int(os.getenv("AO2_PROFILE_FILE_MAX_CHARS", "8192"))
 
 
 class ProfileRegistry:
@@ -86,11 +99,13 @@ class ProfileRegistry:
     def load_from_files(self, agent_id: str, workspace_path: str) -> AgentBaseProfile:
         """Load a profile from workspace files.
 
-        Parses standard workspace files and maps them to layers:
-        - SOUL.md → L0 (Model Identity)
-        - AGENTS.md → L1 (Agent Identity) + L2 (Operational Guidelines)
+        Parses standard workspace files and maps them to layers(ADR L26 固定文件名 +
+        固定顺序 + per-file 截断,抄 claw CONTEXT_FILE_ORDER):
+        - AGENTS.md → L1 (Agent Identity) + L2 (Operational Guidelines),_split by header
+        - SOUL.md → L0, MEMORY.md → L3, TOOLS.md/BOOTSTRAP.md → L4
 
-        If a file does not exist, the corresponding layers are skipped silently.
+        每文件 read 后按 ``AO2_PROFILE_FILE_MAX_CHARS``(默认 8192)截断保前段核心。
+        文件不存在静默跳过。
 
         Args:
             agent_id: The agent identifier for the new profile.
@@ -102,62 +117,58 @@ class ProfileRegistry:
         workspace = Path(workspace_path)
         profile = AgentBaseProfile(agent_id=agent_id)
 
-        # SOUL.md → L0
-        soul_file = workspace / "SOUL.md"
-        if soul_file.is_file():
-            content = soul_file.read_text(encoding="utf-8").strip()
-            if content:
-                profile.add_layer(LayerProfile(
-                    layer=0,
-                    source="soul_md",
-                    content=content,
-                    priority=100,
-                    tags=["identity", "soul"],
-                ))
-                logger.debug("Loaded SOUL.md for agent %s (%d chars)", agent_id, len(content))
-        else:
-            logger.debug("SOUL.md not found at %s, skipping L0", soul_file)
-
-        # AGENTS.md → L1 (identity) + L2 (guidelines)
+        # AGENTS.md → L1 (identity) + L2 (guidelines),_split(特殊:双段)
         agents_file = workspace / "AGENTS.md"
         if agents_file.is_file():
-            content = agents_file.read_text(encoding="utf-8").strip()
+            content = self._read_truncated(agents_file)
             if content:
-                # Split on major section headers to distribute content
-                sections = self._split_agents_md_sections(content)
-
-                # Skip empty initial sections (content starts with a header = no preamble)
-                non_empty = [s for s in sections if s.strip()]
-                if not non_empty:
-                    return profile
-
-                # First non-empty section → L1 (Agent Identity)
-                profile.add_layer(LayerProfile(
-                    layer=1,
-                    source="agents_md_identity",
-                    content=non_empty[0].strip(),
-                    priority=90,
-                    tags=["identity", "agents"],
-                ))
-
-                # Remaining non-empty sections → L2 (Operational Guidelines)
-                if len(non_empty) > 1:
-                    remaining = "\n\n".join(non_empty[1:]).strip()
-                    if remaining:
-                        profile.add_layer(LayerProfile(
-                            layer=2,
-                            source="agents_md_guidelines",
-                            content=remaining,
-                            priority=80,
-                            tags=["guidelines", "agents"],
-                        ))
-
-                logger.debug("Loaded AGENTS.md for agent %s (%d chars, %d sections)",
-                             agent_id, len(content), len(sections))
+                self._add_agents_layers(profile, agent_id, content)
         else:
             logger.debug("AGENTS.md not found at %s, skipping L1/L2", agents_file)
 
+        # 其余 stable 文件:per-file 截断 + add_layer(ADR L26)
+        for basename, layer, source, priority, tags in _STABLE_FILES:
+            f = workspace / basename
+            if not f.is_file():
+                logger.debug("%s not found at %s, skipping L%d", basename, f, layer)
+                continue
+            content = self._read_truncated(f)
+            if content:
+                profile.add_layer(LayerProfile(
+                    layer=layer, source=source, content=content,
+                    priority=priority, tags=tags,
+                ))
+                logger.debug("Loaded %s for agent %s (%d chars, L%d)",
+                             basename, agent_id, len(content), layer)
+
         return profile
+
+    def _read_truncated(self, path: Path) -> str:
+        """read + strip + per-file 截断保前段(ADR L26),超额追加 [truncated] 标记。"""
+        content = path.read_text(encoding="utf-8").strip()
+        if len(content) > _MAX_CHARS:
+            content = content[:_MAX_CHARS] + f"\n\n...[truncated {len(content) - _MAX_CHARS} chars]"
+        return content
+
+    def _add_agents_layers(self, profile: AgentBaseProfile, agent_id: str, content: str) -> None:
+        """AGENTS.md _split → L1 (identity) + L2 (guidelines)。"""
+        sections = self._split_agents_md_sections(content)
+        non_empty = [s for s in sections if s.strip()]
+        if not non_empty:
+            return
+        profile.add_layer(LayerProfile(
+            layer=1, source="agents_md_identity",
+            content=non_empty[0].strip(), priority=90, tags=["identity", "agents"],
+        ))
+        if len(non_empty) > 1:
+            remaining = "\n\n".join(non_empty[1:]).strip()
+            if remaining:
+                profile.add_layer(LayerProfile(
+                    layer=2, source="agents_md_guidelines",
+                    content=remaining, priority=80, tags=["guidelines", "agents"],
+                ))
+        logger.debug("Loaded AGENTS.md for agent %s (%d chars, %d sections)",
+                     agent_id, len(content), len(sections))
 
     def _split_agents_md_sections(self, content: str) -> list[str]:
         """Split AGENTS.md content into logical sections.
