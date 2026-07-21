@@ -8,6 +8,7 @@ P2 ProfileCapability / P3 MemoryCapability / P4 GuardrailCapability /
 P5 ObserveCapability / P6 SkillCapabilityFactory。
 """
 
+from .engineering_discipline_capability import EngineeringDisciplineCapability
 from .guardrail_capability import GuardrailCapability
 from .memory_capability import MemoryCapability
 from .memory_writer_capability import MemoryWriterCapability
@@ -17,6 +18,7 @@ from .skill_capability import SkillCapability, make_skill_capabilities
 from .tool_bridge_capability import ToolBridgeCapability
 
 __all__ = [
+    "EngineeringDisciplineCapability",
     "ProfileCapability",
     "LayerCapability",
     "make_profile_capabilities",
