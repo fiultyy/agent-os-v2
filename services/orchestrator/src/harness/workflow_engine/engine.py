@@ -141,6 +141,11 @@ class WorkflowResult:
     budget_exceeded(W-P1-2):budget 短路触达(至少 1 个 node 因 ``check_before_request``
     超限被 short-circuit)时 True。由 ``ctx.budget_tripped`` 显式标记(与 ``ctx.abort``
     的外部主动 abort 正交 — 外部 abort 不污染此信号)。
+
+    merged_output / errors(F2 fan-in 结果落地,design §11 Q2):``fan_in='merge'`` 时
+    ``merged_output`` 是 success-only dict 字段合并(later-wins);``fan_in='list'`` 时
+    ``merged_output=None``(消费者读 ``node_results[i].output`` 原样数组)。``errors`` 聚合
+    所有 ``status != 'success'`` node 的 ``error`` 字符串(两种 fan_in 均填)。
     """
 
     status: Literal["success", "error"]
@@ -150,6 +155,8 @@ class WorkflowResult:
     node_count: int
     run_id: str
     budget_exceeded: bool = False
+    merged_output: Optional[dict] = None
+    errors: list[str] = field(default_factory=list)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -579,6 +586,8 @@ class WorkflowEngine:
 
         # fan-in 聚合(design §11 Q2:list 原样 / merge success-only 字段合并)
         merged_output, errors = _fan_in(node_results, spec.fan_in)
+        # F2:fan_in 结果落地到 WorkflowResult(merge → dict;list → None,消费者读 node_results)
+        result_merged = merged_output if spec.fan_in == "merge" else None
         overall_status = "error" if all(nr.status != "success" for nr in node_results) else "success"
 
         self._emit_workflow(
@@ -591,12 +600,12 @@ class WorkflowEngine:
             },
             session_id=ctx.session_id,
         )
-        # 标 merged_output 供 handler 暴露(经 WorkflowResult 字段不增,这里仅日志侧用)
+        # F2:fan_in=merge 时记日志(merged dict 字段已落地 WorkflowResult.merged_output)
         if spec.fan_in == "merge":
             logger.info(
                 "workflow_engine.run fan_in=merge (run=%s): %d fields merged, %d errors",
                 ctx.run_id,
-                len(merged_output) if isinstance(merged_output, dict) else 0,
+                len(result_merged) if isinstance(result_merged, dict) else 0,
                 len(errors),
             )
 
@@ -624,6 +633,9 @@ class WorkflowEngine:
             run_id=ctx.run_id,
             # W-P1-2:budget_tripped 显式标记(与 ctx.abort 外部 abort 正交)。
             budget_exceeded=ctx.budget_tripped,
+            # F2:fan-in 结果落地(merge → dict;list → None)+ errors 聚合(design §11 Q2)。
+            merged_output=result_merged,
+            errors=errors,
         )
 
     # ───────────────────────────────────────────────────────────────────

@@ -177,7 +177,12 @@ async def workflow_run_handler(
 # RunUsage 序列化复用 workflow_engine._usage_dict(同源,零重复实现)。
 # ─────────────────────────────────────────────────────────────────────
 def _result_to_dict(result: Any) -> dict[str, Any]:
-    """WorkflowResult dataclass → dict(node_results 逐项展开)。"""
+    """WorkflowResult dataclass → dict(node_results 逐项展开 + fan-in 字段)。
+
+    F2(design §11 Q2):``merged_output``(fan_in='merge' 时 success-only dict 字段合并,
+    'list' 时 None)+ ``errors``(status!='success' node 的 error 字符串聚合)序列化,
+    让模型 / 主 agent 收到 fan-in 结果(此前仅 logger.info → 对模型 no-op)。
+    """
     from harness.workflow_engine import _usage_dict
 
     return {
@@ -186,6 +191,8 @@ def _result_to_dict(result: Any) -> dict[str, Any]:
         "node_count": result.node_count,
         "elapsed_ms": result.elapsed_ms,
         "total_usage": _usage_dict(result.total_usage),
+        "merged_output": getattr(result, "merged_output", None),
+        "errors": getattr(result, "errors", []),
         "node_results": [
             {
                 "label": nr.label,

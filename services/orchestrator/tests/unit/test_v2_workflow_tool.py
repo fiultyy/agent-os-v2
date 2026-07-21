@@ -56,6 +56,8 @@ def _fake_result(status="success", n=2):
         elapsed_ms=42,
         node_count=n,
         run_id="wf_testrun",
+        merged_output={"k": "v"} if status == "success" else None,
+        errors=["err1"] if status == "error" else [],
     )
 
 
@@ -137,6 +139,9 @@ def test_handler_valid_nodes_dispatches_engine_run():
     # total_usage 字段存在(_usage_dict 序列化)
     assert "total_usage" in out
     assert out["total_usage"]["requests"] == 0  # RunUsage() 零基线
+    # F2:fan-in 字段序列化(merged_output / errors)—— 此前 handler 不暴露,对模型 no-op
+    assert out["merged_output"] == {"k": "v"}
+    assert out["errors"] == []
 
     # 薄桥确实调了 engine.run(spec, ctx)
     assert capture["spec"] is not None

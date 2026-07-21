@@ -161,25 +161,82 @@ def test_run_per_node_usage_independent_objects():
 
 
 # ─────────────────────────────────────────────────────────────────────
-# fan_in='list':原样数组(success/error 混杂)
+# F2:fan_in='list' 时 WorkflowResult.merged_output=None / errors 聚合
+# (原 _fan_in helper 语义保留 — helper 仍返原样数组,但 run 不再把数组挂字段;
+#  消费者读 node_results[i].output;errors 聚合 status!='success' node)
 # ─────────────────────────────────────────────────────────────────────
-def test_run_fan_in_list_preserves_order_mixed():
-    agents = [_FakeAgent(output="a"), _FakeAgent(exc=RuntimeError("x")), _FakeAgent(output="c")]
+def test_run_fan_in_list_merged_output_none_errors_aggregated():
+    agents = [_FakeAgent(output="a"), _FakeAgent(exc=RuntimeError("boom")), _FakeAgent(output="c")]
     _, restore = _patch_build(agents)
     try:
         e = WorkflowEngine()
-        spec = _spec([{"prompt": "1"}, {"prompt": "2"}, {"prompt": "3"}], fan_in="list")
-        run_async(e.run(spec, _ctx()))
+        spec = _spec(
+            [{"prompt": "1"}, {"prompt": "2"}, {"prompt": "3"}],
+            fan_in="list",
+        )
+        result = run_async(e.run(spec, _ctx()))
     finally:
         restore()
-    # fan_in=list 走 _fan_in helper,原样 output 数组(success output + error None)
-    # (run 不把 fan_in 结果挂 WorkflowResult 字段;这里直接测 _fan_in helper)
+
+    # F2:list 模式 merged_output=None(消费者读 node_results 原样 output)
+    assert result.merged_output is None
+    # errors 聚合所有 status!='success' node 的 error 字符串
+    assert result.errors == ["boom"]
+    # node_results 仍保留原样(success output + error None 混杂)
+    outputs = [nr.output for nr in result.node_results]
+    assert outputs == ["a", None, "c"]
+
+
+# ─────────────────────────────────────────────────────────────────────
+# F2:fan_in='merge' 时 WorkflowResult.merged_output=合并 dict + errors 聚合
+# (success-only 字段合并 later-wins;非 dict success output 跳过;errors 聚合)
+# ─────────────────────────────────────────────────────────────────────
+def test_run_fan_in_merge_merged_output_dict_later_wins():
+    agents = [
+        _FakeAgent(output={"a": 1, "shared": "first"}),
+        _FakeAgent(exc=RuntimeError("boom")),
+        _FakeAgent(output={"b": 2, "shared": "second"}),  # later-wins on 'shared'
+    ]
+    _, restore = _patch_build(agents)
+    try:
+        e = WorkflowEngine()
+        spec = _spec(
+            [{"prompt": "1"}, {"prompt": "2"}, {"prompt": "3"}],
+            fan_in="merge",
+        )
+        result = run_async(e.run(spec, _ctx()))
+    finally:
+        restore()
+
+    # F2:merged_output 是 success-only dict 字段合并(later-wins)
+    assert result.merged_output == {"a": 1, "b": 2, "shared": "second"}
+    # errors 聚合
+    assert result.errors == ["boom"]
+
+
+def test_run_fan_in_merge_skips_non_dict_success_output():
+    """F2:success 但 output 非 dict(str)→ skip 不崩,merged 只含 dict 字段。"""
+    agents = [
+        _FakeAgent(output="not a dict"),  # success str → skip
+        _FakeAgent(output={"x": 1}),
+    ]
+    _, restore = _patch_build(agents)
+    try:
+        e = WorkflowEngine()
+        spec = _spec([{"prompt": "1"}, {"prompt": "2"}], fan_in="merge")
+        result = run_async(e.run(spec, _ctx()))
+    finally:
+        restore()
+    assert result.merged_output == {"x": 1}
+    assert result.errors == []
+
+
+# ─────────────────────────────────────────────────────────────────────
+# _fan_in helper 语义仍直测(模块级纯函数,run 内部依赖)
+# ─────────────────────────────────────────────────────────────────────
+def test_fan_in_helper_list_returns_original_array():
     from harness.workflow_engine import _fan_in
-    # 重建 node_results 同序验证
-    nrs = [nr for nr in [
-        # 不能从 run 拿 fan_in 结果,改直接验证 helper 语义
-    ] if False]  # placeholder
-    # 直接验证 helper:list 原样 output
+
     class _NR:
         def __init__(self, status, output, error=None):
             self.status = status
@@ -191,44 +248,6 @@ def test_run_fan_in_list_preserves_order_mixed():
     )
     assert out == ["a", None, "c"]  # 原样含 error node 的 None
     assert errs == ["boom"]
-
-
-# ─────────────────────────────────────────────────────────────────────
-# fan_in='merge':success-only dict 字段合并(later-wins)+ errors 聚合
-# ─────────────────────────────────────────────────────────────────────
-def test_fan_in_merge_dict_field_merge_later_wins():
-    from harness.workflow_engine import _fan_in
-
-    class _NR:
-        def __init__(self, status, output, error=None):
-            self.status = status
-            self.output = output
-            self.error = error
-
-    nrs = [
-        _NR("success", {"a": 1, "shared": "first"}),
-        _NR("error", None, "boom"),
-        _NR("success", {"b": 2, "shared": "second"}),  # later-wins
-    ]
-    merged, errs = _fan_in(nrs, "merge")
-    assert merged == {"a": 1, "b": 2, "shared": "second"}  # later-wins
-    assert errs == ["boom"]  # error 聚合
-
-
-def test_fan_in_merge_skips_non_dict_success_output():
-    from harness.workflow_engine import _fan_in
-
-    class _NR:
-        def __init__(self, status, output, error=None):
-            self.status = status
-            self.output = output
-            self.error = error
-
-    # success 但 output 非 dict(str)→ skip,不崩
-    nrs = [_NR("success", "not a dict"), _NR("success", {"x": 1})]
-    merged, errs = _fan_in(nrs, "merge")
-    assert merged == {"x": 1}
-    assert errs == []
 
 
 # ─────────────────────────────────────────────────────────────────────
