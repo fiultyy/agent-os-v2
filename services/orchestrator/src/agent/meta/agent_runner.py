@@ -1,6 +1,11 @@
-"""run_agent_turn — 公共子 agent 单轮执行函数。
+"""run_agent_turn — 公共子 agent 单轮执行函数(经 build_native_agent 组装器收敛)。
 
-P1 多 agent 通电的最小执行原语(见 docs/multi-agent-poweron-roadmap.md §P1)。
+3B 收敛点:子代理不再手搓 ``messages=[{system},{user}]`` + ``llm_client.chat``,而是走
+与主 agent 同一个组装入口 :func:`src.harness.native_agent.build_native_agent` ——
+自动得到「纪律段(CC 5 条)默认 prepend + ToolBridge 全覆盖 + (可选)ObserveCapability 子代理事件」。
+副作用:子代理配置的 ``model`` 现在透传给 ``build_native_agent(model_name=...)`` 覆盖默认模型;
+原本的 ``llm.chat`` 直连路径退役。A2A 铺路:未来 A2A 协议发现的外部 agent 走同一入口。
+
 设计目标:把一个 *临时* subagent 跑一轮 LLM 对话并返回响应字符串,**完全不碰**
 顶层 agent 的 GraphState / context / 记忆模块 —— 子 agent 是临时态,记忆只在
 fan-in 后由主 agent 单点落库。
@@ -9,16 +14,16 @@ fan-in 后由主 agent 单点落库。
 ----
 R1 (记忆零触碰):
     本函数体 *不调用* ``memory_event_bus.emit`` / ``_trigger_ingest`` /
-    ``_trigger_kg_extraction`` / ``memory_service.*`` 中的任何一个。grep 本文件
-    零 memory 调用即守恒此红线。子 agent 不沉淀记忆。
+    ``_trigger_kg_extraction`` / ``memory_service.*`` 中的任何一个,也 *不挂*
+    ``MemoryWriterCapability``(子代理不沉淀记忆)。grep 本文件零 memory 调用即守恒此红线。
 
 R2 (主路径冻结):
     本函数 *不 import 也不修改* ``_build_execution_graph`` / ``_node_llm`` /
-    ``chat.py`` 的 ``/execute`` 线性图。它直接构造本地 messages 并调用
-    ``_state.llm_client.chat``,与顶层 agent 的执行图物理隔离。
+    ``chat.py`` 的 ``/execute`` 线性图。``build_native_agent`` 不是 R2 禁项 —— R2 只
+    禁主路径线性图;组装器是 ADR-sanctioned 的统一 spawn 入口。
 
 上下文隔离:
-    独立 ``agent_id`` + 独立 ``messages`` 列表(本地构建)。不复用顶层 agent 的
+    独立 ``agent_id`` + 独立 pydantic-ai Agent(本地 messages)。不复用顶层 agent 的
     GraphState/messages/context,避免串味。
 """
 
@@ -27,6 +32,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from src.harness.capabilities import ObserveCapability, ToolBridgeCapability
+from src.harness.native_agent import build_native_agent
 from src.services import _state
 
 logger = logging.getLogger(__name__)
@@ -40,33 +47,26 @@ async def run_agent_turn(
 ) -> str:
     """Run one LLM turn for a transient subagent and return the response.
 
-    Reads the subagent's config (``system_prompt`` / ``model``) from the in-memory
-    ``_state.agents`` registry, builds a *local* message list, and calls the LLM
-    client directly. This is the multi-agent orchestration equivalent of a single
-    chat round, deliberately stripped of every memory-trigger side effect (R1) and
-    decoupled from the main ``/execute`` linear graph (R2).
+    经 ``build_native_agent`` 组装 native in-process Agent(纪律段 + ToolBridge +
+    可选 ObserveCapability),跑 ``agent.run(input)`` 返回 ``result.output``。
+    子代理是临时态,**不挂 MemoryWriterCapability**(R1:子代理不沉淀记忆,记忆
+    在 fan-in 后由主 agent 单点落库)。
 
     Args:
         agent_id: Subagent id (as returned by ``agent_manager.create_subagent``).
-        input: The user/task input for this turn.
-        session_id: Session id for logging/correlation only — *no* memory hook
-            attaches to it here (memory writes happen fan-in, on the main agent).
+        input: The user/task input for this turn. 空串时用占位 ``"(no task input)"``
+            (空 messages 被智谱/Anthropic 通道拒为 400 code 1214)。
+        session_id: Session id for logging/correlation + ObserveCapability 上报;
+            *no* memory hook attaches to it here (memory writes happen fan-in).
         system_prompt: Optional system prompt override. When ``None`` the prompt
             is taken from the subagent's stored config, falling back to a neutral
             default.
 
     Returns:
         The assistant's reply as a string. On a *non-fatal* degradation (agent
-        config missing, or no LLM client wired) an error string is returned rather
-        than raised — the orchestration caller surfaces it via ``subgraph_results``
-        without aborting sibling agents.
-
-    None-safe contract:
-        - ``_state.agents`` may not contain ``agent_id`` (race / teardown) → the
-          prompt/model default; we still attempt the LLM call with defaults.
-        - ``_state.llm_client`` may be ``None`` (LLM not wired, e.g. cold start /
-          degraded mode) → return ``"[run_agent_turn error] no llm_client"`` and
-          skip the call entirely (no exception bubbles up).
+        run failed) an error string is returned rather than raised — the
+        orchestration caller surfaces it via ``subgraph_results`` without
+        aborting sibling agents.
     """
     # Pull subagent config from the in-memory registry (None-safe). A subagent is
     # created by create_subagent and lives in _state.agents until teardown.
@@ -79,39 +79,43 @@ async def run_agent_turn(
         cfg_model = None
 
     # Effective system prompt: explicit arg > stored config > neutral default.
+    # 进 build_native_agent 作 instructions(组装器自动 prepend 纪律段 + tool 桥接)。
     effective_system = system_prompt if system_prompt is not None else cfg_system
     if not effective_system:
         effective_system = "You are a helpful sub-agent. Complete the assigned task."
 
-    # ── Build a LOCAL message list (context isolation) ───────────────────────
-    # The system message is lifted to Anthropic top-level ``system`` by
-    # llm_client._to_anthropic (and ignored on the OpenAI channel's system slot
-    # via the same conversion). We never reuse the parent agent's GraphState.
-    messages: list[dict[str, Any]] = [{"role": "system", "content": effective_system}]
-    # 防御:input 为空时加占位 user message。否则 _to_anthropic 把 system 提取
-    # 到 top-level 后 convo 为空,智谱/Anthropic 通道拒绝空 messages
-    # (HTTP 400 code 1214 "messages 参数非法")。worker 正常路径经 turn_input
-    # 回退已保证非空,此处是纵深防御(其他 caller 传空 input 也不崩)。
-    if input:
-        messages.append({"role": "user", "content": input})
-    else:
-        messages.append({"role": "user", "content": "(no task input)"})
+    # ── Assemble native Agent via the unified spawn entry (A2A 铺路) ───────────
+    capabilities: list[Any] = [
+        ToolBridgeCapability(
+            tool_executor=_state.tool_executor,
+            pitfail_registry=_state.pitfail_registry,
+        ),
+    ]
+    # ObserveCapability(可选):把子代理 run 事件转发到 observe-service(子代理自己的
+    # harness_id 区分,fire-and-forget —— observe 不可达零回归)。复用 _state 上的
+    # ObserveEmitter(若通电);None 则跳过,事件仍 forward 只是不上报 observe。
+    emitter = _state.memory_observe_emitter
+    if emitter is not None:
+        capabilities.append(ObserveCapability(
+            emitter=emitter,
+            harness_id=f"sub_{agent_id[:8]}",
+            session_id=session_id,
+        ))
+    # R1:不挂 MemoryWriterCapability(子代理不沉淀记忆)。
 
-    # ── None-safe LLM call ───────────────────────────────────────────────────
-    llm = _state.llm_client
-    if llm is None:
-        # LLM not wired — degrade to an explicit error string (no raise). Keeps
-        # sibling agents running; the orchestrator surfaces this in results.
-        logger.warning("run_agent_turn: llm_client is None (agent=%s)", agent_id)
-        return f"[run_agent_turn error] no llm_client for agent {agent_id}"
+    agent = build_native_agent(
+        instructions=effective_system,
+        capabilities=capabilities,
+        model_name=cfg_model,  # 子代理配置 model 覆盖;None → build_model 读 env
+    )
+
+    # 防御:input 空时加占位。空 messages 被智谱/Anthropic 通道拒为 400 code 1214。
+    task_input = input if input else "(no task input)"
 
     try:
-        # Direct LLM call: no tools, no native function-calling, no memory hooks.
-        # kwargs (max_tokens/temperature) intentionally omitted to use LLM client
-        # defaults — subagent turns are short prompts, not long generations.
-        response: str = await llm.chat(messages, model=cfg_model)
-    except Exception as exc:  # noqa: BLE001 — LLM failures degrade, not abort
-        logger.warning("run_agent_turn: LLM call failed (agent=%s): %s", agent_id, exc)
-        return f"[run_agent_turn error] llm call failed: {exc}"
+        result = await agent.run(task_input)
+    except Exception as exc:  # noqa: BLE001 — Agent.run 失败降级,不 abort sibling agents
+        logger.warning("run_agent_turn: agent.run failed (agent=%s): %s", agent_id, exc)
+        return f"[run_agent_turn error] agent run failed: {exc}"
 
-    return response or ""
+    return result.output or ""

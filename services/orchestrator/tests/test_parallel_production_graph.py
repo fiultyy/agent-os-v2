@@ -64,6 +64,28 @@ class _ScriptedLLM:
         return "default-response"
 
 
+class _ScriptedNativeAgent:
+    """``build_native_agent`` 的测试替身:把 ``agent.run(input)`` 透传到
+    ``_state.llm_client.chat``(system=instructions, user=input)。
+
+    动态读 ``_state.llm_client``(不闭包),让每测内替换 _ScriptedLLM 生效。
+    3B 后 run_agent_turn 经组装器,本替身让其仍受 scripted LLM 控制。
+    """
+
+    def __init__(self, instructions: str):
+        self.instructions = instructions
+
+    async def run(self, user_input: str, **kw):
+        from src.services import _state as _s
+        messages = [
+            {"role": "system", "content": self.instructions},
+            {"role": "user", "content": user_input},
+        ]
+        resp = await _s.llm_client.chat(messages)
+        import types as _types
+        return _types.SimpleNamespace(output=resp)
+
+
 @pytest.fixture
 def parallel_state():
     """备份/还原 _state 关键字段,装配最小并行依赖。"""
@@ -89,7 +111,15 @@ def parallel_state():
     from src.concurrency.controller import ConcurrencyController
     _state.concurrency_controller = ConcurrencyController()
 
-    yield
+    # 3B:patch build_native_agent → _ScriptedNativeAgent(透传到 _state.llm_client),
+    # 让 run_agent_turn 经组装器路径仍受每测内 _ScriptedLLM 控制。
+    from unittest.mock import patch as _patch
+
+    def _fake_build(instructions: str = "", **kwargs):
+        return _ScriptedNativeAgent(instructions)
+
+    with _patch("src.agent.meta.agent_runner.build_native_agent", side_effect=_fake_build):
+        yield
     for k, v in saved.items():
         setattr(_state, k, v)
 

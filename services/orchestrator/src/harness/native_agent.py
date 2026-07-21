@@ -38,8 +38,13 @@ _DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/anthropic"
 _DISCIPLINE_DISABLED = os.getenv("AO2_DISCIPLINE_DISABLED", "").lower() in ("1", "true", "yes", "on")
 
 
-def build_model() -> AnthropicModel:
-    """智谱 glm via anthropic-compatible endpoint(/v1/messages)。"""
+def build_model(model_name: str | None = None) -> AnthropicModel:
+    """智谱 glm via anthropic-compatible endpoint(/v1/messages)。
+
+    model_name:可选模型名覆盖。``None``(默认)→ 读 ``ANTHROPIC_MODEL`` env(glm-4.7);
+    非空 → 用此名(其余 base_url/api_key 仍走 env)。让 ``build_native_agent`` 在不改
+    env 的前提下覆盖单次 spawn 的模型(子代理配置 model / A2A 路由模型协商)。
+    """
     base_url = os.getenv("ANTHROPIC_BASE_URL", _DEFAULT_BASE_URL)
     api_key = os.getenv("ANTHROPIC_AUTH_TOKEN", "")
     if not api_key:
@@ -47,9 +52,9 @@ def build_model() -> AnthropicModel:
         raise RuntimeError(
             "native_agent needs ANTHROPIC_AUTH_TOKEN env (智谱 glm anthropic key)"
         )
-    model_name = os.getenv("ANTHROPIC_MODEL", "glm-4.7")
+    resolved = model_name or os.getenv("ANTHROPIC_MODEL", "glm-4.7")
     return AnthropicModel(
-        model_name,
+        resolved,
         provider=AnthropicProvider(base_url=base_url, api_key=api_key),
     )
 
@@ -59,6 +64,7 @@ def build_native_agent(
     capabilities: Sequence[Any] | None = None,
     toolsets: Sequence[Any] | None = None,
     model_settings: Any = None,
+    model_name: str | None = None,
 ) -> Agent:
     """组装 native in-process Agent。
 
@@ -66,11 +72,15 @@ def build_native_agent(
     model_settings:P8 R2 cache_control(AnthropicModelSettings,如
     anthropic_cache_instructions/tool_definitions="5m"),替代老 ContextCompiler/static_count。
 
+    model_name:可选模型名覆盖。``None``(默认)→ ``build_model`` 读 ``ANTHROPIC_MODEL`` env
+    (glm-4.7);非空 → 用此名建 AnthropicModel(其余 base_url/api_key 仍走 env)。语义:让调用方
+    (如 ``run_agent_turn`` 子代理配置指定的 model)在不改 env 的前提下覆盖单次 spawn 的模型。
+    A2A 铺路:统一 spawn 入口,未来 A2A 协议发现的外部 agent 仍走 ``build_native_agent``。
+
     ADR(harness-adr.md 第一层「工程纪律」):默认 prepend EngineeringDisciplineCapability
     (CC 5 条 + context-mgmt,进 stable ``dynamic=False`` 段,模型每轮可见、可 cache)。
     覆盖边界:所有 ``build_native_agent`` 调用方(harness routes / 老 chat / graph 多 agent
-    经 agent_factory / smoke)自动注入;**meta-agent transient subagent(``run_agent_turn``)
-    不经此处,不覆盖**(见 capability docstring;agent_runner.py R2 红线,改它超 scope)。
+    经 agent_factory / smoke / ``run_agent_turn`` 子代理收敛)自动注入。
     纪律段在 capability-tier 内居首,调用方传非空 instructions 时排在其后(非 instructions 绝对首段)。
 
     覆盖/换文本通道(ADR line114 A/B):去重守卫下,调用方传 ``EngineeringDisciplineCapability``
@@ -81,8 +91,9 @@ def build_native_agent(
     if not any(isinstance(c, EngineeringDisciplineCapability) for c in caps):
         # 默认注入(env 旋钮关段;调用方显式传实例则去重=override 通道,见 docstring)
         caps.insert(0, EngineeringDisciplineCapability(enabled=not _DISCIPLINE_DISABLED))
+    model = build_model(model_name) if model_name else build_model()
     return Agent(
-        build_model(),
+        model,
         instructions=instructions,
         capabilities=caps,
         toolsets=list(toolsets) if toolsets else [],

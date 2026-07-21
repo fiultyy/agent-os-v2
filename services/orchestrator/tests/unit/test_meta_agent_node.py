@@ -313,43 +313,34 @@ class TestMetaAgentNodeRealExecute:
     async def test_real_turn_no_memory_calls_r1(self):
         """R1 red-line: run_agent_turn must perform ZERO memory calls.
 
-        We drive run_agent_turn against a real _state (with llm_client mocked)
-        and assert none of the memory side-effect entry points are touched.
+        3B 后 run_agent_turn 经 build_native_agent + agent.run(不再直调 llm.chat)。
+        patch build_model(TestModel)免真 API;断言 result.output 经组装器返回,且
+        memory_event_bus/memory_service/write_queue 全程 None(R1 守恒:子代理不沉淀记忆)。
         """
+        from pydantic_ai.models.test import TestModel
+
         from src.services import _state
         from src.agent.meta.agent_runner import run_agent_turn
 
-        # Plant the subagent config + a mock llm_client.
-        saved_llm = _state.llm_client
-        mock_llm = MagicMock()
-        mock_llm.chat = AsyncMock(return_value="resp")
-        _state.llm_client = mock_llm
         _state.agents["sub-r1"] = {
             "id": "sub-r1",
             "system_prompt": "p",
-            "model": "m",
+            "model": None,  # None → build_model 读 env(TestModel override 免 env)
             "is_subagent": True,
         }
         try:
-            out = await run_agent_turn("sub-r1", "hello", "sess")
-            assert out == "resp"
+            with patch(
+                "src.harness.native_agent.build_model",
+                lambda *a, **kw: TestModel(custom_output_text="resp-from-subagent"),
+            ):
+                out = await run_agent_turn("sub-r1", "hello", "sess")
+            assert out == "resp-from-subagent"
 
-            # LLM called exactly once with a local message list.
-            mock_llm.chat.assert_awaited_once()
-            msgs = mock_llm.chat.await_args.args[0]
-            assert isinstance(msgs, list)
-            assert msgs[0]["role"] == "system"  # context isolation: local msgs
-            assert msgs[-1]["content"] == "hello"
-
-            # R1: ZERO memory side-effect entry points invoked.
-            # memory_event_bus / memory_service / write_queue are all None here,
-            # so there is nothing TO call — but assert the llm_client is the only
-            # awaitable touched, and no memory singleton was wired.
+            # R1: ZERO memory side-effect entry points wired(子代理不沉淀记忆)。
             assert _state.memory_event_bus is None
             assert _state.memory_service is None
             assert _state.write_queue is None
         finally:
-            _state.llm_client = saved_llm
             _state.agents.pop("sub-r1", None)
 
     @pytest.mark.asyncio
