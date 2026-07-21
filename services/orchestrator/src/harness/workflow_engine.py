@@ -85,6 +85,23 @@ class PipelineSpec(BaseModel):
     concurrency: int = Field(default=8, ge=1, le=64)
 
 
+class LoopSpec(BaseModel):
+    """loop() 入口 spec(W-P1-3):finder 子 agent 每轮产候选 → 去重 → 早收敛 break。
+
+    finder 跑一轮产出若干候选(`list[str]` 或可 str() 化的对象);新候选(key 由
+    ``seen_key_fn`` 决定)入 ``ctx.seen`` + ``dry_counter`` 归 0;全为旧候选时
+    ``dry_counter += 1``,连续 ``dry_limit`` 轮无新候选 → break 省预算。``budget
+    token limit 触达同样 break``。
+    """
+
+    finder_spec: WorkflowNodeSpec
+    max_iter: int = Field(default=10, ge=1, le=100)
+    budget: Optional[UsageLimits] = None
+    schema_ref: Optional[str] = None
+    seen_key_fn: Literal["content_hash", "label"] = "content_hash"
+    dry_limit: int = Field(default=2, ge=1, le=5)
+
+
 @dataclass
 class NodeResult:
     """单 node spawn 结果。R7:tool_executor 返 {status:'error'} 非 raise,
@@ -648,6 +665,144 @@ class WorkflowEngine:
         # 按 item_idx 顺序返(进队列序 == 出 sink 序)
         return [results[i] for i in range(len(spec.items))]
 
+    # ───────────────────────────────────────────────────────────────────
+    # P1 loop — while + seen set 去重 + dry counter 早收敛 + budget guard
+    # ───────────────────────────────────────────────────────────────────
+    async def loop(
+        self,
+        spec: "LoopSpec",
+        ctx: WorkflowContext,
+    ) -> WorkflowResult:
+        """finder 子 agent 每轮跑一次产候选 → 去重 → 早收敛 break。
+
+        控制流(design §5 W-P1-3 字面):
+        - ``while iter < max_iter``:每轮 spawn finder 子 agent(经 ``_spawn_agent``,
+          R1/R5/R6/R3/R7 纪律零增量负担)。
+        - finder 产出候选 → ``seen_key_fn`` 决定 key(``'content_hash'`` sha256[:16]
+          / ``'label'``),与 ``ctx.seen`` 去重:
+          * 有新候选 → ``ctx.dry_counter = 0``(修正 design [2] 不重置 bug),
+            新 key 入 ``ctx.seen``。
+          * 全为旧候选 → ``ctx.dry_counter += 1``;``dry_counter >= dry_limit`` → break。
+        - ``budget.total_tokens_limit`` guard(若 spec.budget 给定):每轮前
+          ``check_before_request(ctx.total_usage)`` 超限 → break(短路)。budget
+          路径占 ``ctx.budget_lock`` 串行根治竞态(复用 W-P1-2 既有机制)。
+        - 事件 emit:``workflow_loop_started``(iter=0)/ ``workflow_loop_iteration``
+          per 轮 / ``workflow_loop_completed``(终态)。
+        - finder 是单 node spawn(非 fan-out),无并发竞态;``ctx.total_usage`` 经
+          ``_spawn_agent`` fan-in commit 直接累加(同 run 路径)。
+
+        返 ``WorkflowResult``(node_results = 每轮一个 finder NodeResult;finder
+        失败轮 status='error' 透传不 abort loop)。
+        """
+        import time
+
+        if ctx.abort is None:
+            ctx.abort = asyncio.Event()
+        if ctx.budget_lock is None:
+            ctx.budget_lock = asyncio.Lock()
+        if ctx.seen is None:
+            ctx.seen = set()
+
+        # spec.budget 同步到 ctx.budget_limits(若调用者未显式设)— 后续 _spawn_agent
+        # 走 W-P1-2 budget 路径(has_token_limits + budget_lock 串行)。
+        if spec.budget is not None and ctx.budget_limits is None:
+            ctx.budget_limits = spec.budget
+
+        self._emit_workflow(
+            "workflow_loop_started",
+            ctx.run_id,
+            {
+                "max_iter": spec.max_iter,
+                "dry_limit": spec.dry_limit,
+                "seen_key_fn": spec.seen_key_fn,
+                "has_budget": spec.budget is not None and spec.budget.has_token_limits(),
+            },
+            session_id=ctx.session_id,
+        )
+
+        node_results: list[NodeResult] = []
+        started = time.monotonic()
+        iter_idx = 0
+        for iter_idx in range(spec.max_iter):
+            # ── budget 短路 guard:每轮前 check_before_request ──
+            if ctx.budget_limits is not None and ctx.budget_limits.has_token_limits():
+                try:
+                    ctx.budget_limits.check_before_request(ctx.total_usage)
+                except Exception:  # noqa: BLE001 — UsageLimitExceeded
+                    logger.info(
+                        "workflow_engine.loop: budget exceeded (run=%s iter=%d "
+                        "total_tokens=%d) — break",
+                        ctx.run_id, iter_idx, ctx.total_usage.total_tokens,
+                    )
+                    ctx.budget_tripped = True
+                    break
+
+            # cooperative-cancel(外部 abort / budget 触达)
+            if ctx.abort is not None and ctx.abort.is_set():
+                break
+
+            nr = await self._spawn_agent(spec.finder_spec, ctx)
+            node_results.append(nr)
+
+            # ── finder 候选去重 + dry counter ──
+            candidates = _extract_candidates(nr.output)
+            new_keys: list[str] = []
+            for cand in candidates:
+                key = _seen_key(cand, spec.seen_key_fn)
+                if key not in ctx.seen:
+                    ctx.seen.add(key)
+                    new_keys.append(key)
+
+            if new_keys:
+                ctx.dry_counter = 0  # 修正 design [2] 不重置 bug
+            else:
+                ctx.dry_counter += 1
+
+            self._emit_workflow(
+                "workflow_loop_iteration",
+                ctx.run_id,
+                {
+                    "iter": iter_idx,
+                    "new_count": len(new_keys),
+                    "dry_count": ctx.dry_counter,
+                    "seen_size": len(ctx.seen),
+                    "finder_status": nr.status,
+                },
+                session_id=ctx.session_id,
+            )
+
+            if ctx.dry_counter >= spec.dry_limit:
+                break
+
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+
+        self._emit_workflow(
+            "workflow_loop_completed",
+            ctx.run_id,
+            {
+                "iters_run": iter_idx + 1 if node_results else 0,
+                "total_candidates": len(ctx.seen),
+                "dry_streak": ctx.dry_counter,
+                "budget_exceeded": ctx.budget_tripped,
+                "usage": _usage_dict(ctx.total_usage),
+            },
+            session_id=ctx.session_id,
+        )
+
+        overall_status = "success" if node_results and any(
+            nr.status == "success" for nr in node_results
+        ) else "error"
+
+        return WorkflowResult(
+            status=overall_status,
+            node_results=node_results,
+            total_usage=ctx.total_usage,
+            elapsed_ms=elapsed_ms,
+            node_count=len(node_results),
+            run_id=ctx.run_id,
+            budget_exceeded=ctx.budget_tripped,
+        )
+
 
 # ─────────────────────────────────────────────────────────────────────
 # P0 fan-in helper(design §11 Q2)+ usage 序列化 + timestamp
@@ -688,3 +843,43 @@ def _now_ts() -> str:
     """ISO8601 UTC timestamp(照搬 events.py:_now,内联避拉 events import)。"""
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()
+
+
+# ─────────────────────────────────────────────────────────────────────
+# P1 loop helpers — finder 候选提取 + seen key(W-P1-3)
+# ponytail:模块级纯函数,单测直接 import 断言
+# ─────────────────────────────────────────────────────────────────────
+def _extract_candidates(output: Any) -> list[str]:
+    """finder 输出 → 候选 list[str]。
+
+    归一化:None / error 路径 → 空列表(本轮视作无候选 → dry_counter +1);str →
+    单候选;list/tuple/set → 每 item str() 化;pydantic BaseModel → 若有
+    ``candidates``/``items`` 字段用之,否则 str(whole)。
+    """
+    if output is None:
+        return []
+    if isinstance(output, str):
+        return [output]
+    if isinstance(output, (list, tuple, set)):
+        return [str(x) for x in output]
+    # pydantic / dataclass 等结构体:尝试常见字段名(ponytail:不引 pydantic runtime)
+    for field_name in ("candidates", "items"):
+        val = getattr(output, field_name, None)
+        if isinstance(val, (list, tuple, set)):
+            return [str(x) for x in val]
+    return [str(output)]
+
+
+def _seen_key(candidate: str, seen_key_fn: Literal["content_hash", "label"]) -> str:
+    """候选 → seen set key。
+
+    - ``'content_hash'``(默认):sha256(candidate)[:16] — 去重靠内容非字面 label,
+      label 相同内容不同仍视作新候选(真实 finder 场景)。
+    - ``'label'``:直接用 candidate 字面(label-like)— 调用者保证候选是稳定 label。
+
+    ponytail:sha256 覆盖 dataclass/__eq__ 不一致风险;[]16 充分防碰撞。
+    """
+    if seen_key_fn == "label":
+        return candidate
+    import hashlib
+    return hashlib.sha256(candidate.encode("utf-8")).hexdigest()[:16]
