@@ -164,6 +164,31 @@ if _SKILL_TOOLS_AVAILABLE:
          {"type": "object", "properties": {"query": {"type": "string"}, "path": {"type": "string"}, "pattern_type": {"type": "string"}, "file_filter": {"type": "string"}, "case_sensitive": {"type": "boolean"}, "context_lines": {"type": "integer"}, "max_results": {"type": "integer"}, "recursive": {"type": "boolean"}, "max_depth": {"type": "integer"}}, "required": ["query"]}, ToolLayer.SKILL),
     ]
     # composite skipped: browser_flow_execute / code_review_run (heavy deps)
+    # workflow_run 通电(W-P0-6):薄桥 handler + JSON schema 来自
+    # tools/composite/v2_workflow.py(W-P0-5)。register 名 **workflow_run**(无
+    # v2_ 前缀!)— ToolBridgeCapability.get_toolset 已 .prefixed("v2")(RK11),
+    # 模型可见名 = v2_workflow_run;若 register 带 v2_ 致 v2_v2_workflow_run。
+    _WORKFLOW_TOOLS_AVAILABLE = False
+    try:
+        from src.tools.composite.v2_workflow import (
+            WORKFLOW_RUN_SCHEMA,
+            workflow_run_handler,
+        )
+        _WORKFLOW_TOOLS_AVAILABLE = True
+    except ImportError as _wf_import_err:
+        logger.warning(
+            "workflow tools unavailable (optional deps missing): %s", _wf_import_err,
+        )
+
+    if _WORKFLOW_TOOLS_AVAILABLE:
+        _WORKFLOW_TOOLS: list[tuple] = [
+            ("workflow_run", workflow_run_handler,
+             "Workflow fan-out/fan-in — spawn N sub-agents via build_native_agent, "
+             "gather results (list|merge). Sub-agents inherit ToolBridge, zero memory.",
+             WORKFLOW_RUN_SCHEMA, ToolLayer.COMPOSITE),
+        ]
+    else:
+        _WORKFLOW_TOOLS = []
 
     def _bulk_register(registry, items):
         n = 0
@@ -176,10 +201,11 @@ if _SKILL_TOOLS_AVAILABLE:
 
     _n_prim = _bulk_register(_tool_registry, _PRIMITIVE_TOOLS)
     _n_skill = _bulk_register(_tool_registry, _SKILL_TOOLS)
+    _n_wf = _bulk_register(_tool_registry, _WORKFLOW_TOOLS)
     logger.info(
-        "tool register: primitive=%d skill=%d total=%d | list_tools=%d catalog.count=%d "
+        "tool register: primitive=%d skill=%d workflow=%d total=%d | list_tools=%d catalog.count=%d "
         "(composite skipped: browser_flow/code_review)",
-        _n_prim, _n_skill, _n_prim + _n_skill,
+        _n_prim, _n_skill, _n_wf, _n_prim + _n_skill + _n_wf,
         len(_tool_registry.list_tools()), _tool_registry.get_catalog().count(),
     )
 
