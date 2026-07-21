@@ -19,7 +19,7 @@ from typing import Any
 
 import httpx
 
-from src.services.prompt_cache import apply_cache_control
+from src.services.prompt_cache import apply_cache_control, remaining_breakpoint_budget
 
 
 class LLMError(Exception):
@@ -190,9 +190,14 @@ class LLMClient:
             raise LLMError("No Anthropic key configured — set ANTHROPIC_AUTH_TOKEN")
 
         # Inject cache_control at the static-prefix boundary (Zhipu anthropic
-        # endpoint honours it).
+        # endpoint honours it). Budget: native ModelSettings already consumes
+        # 2 breakpoints (anthropic_cache_instructions + tool_definitions);
+        # only place messages-side breakpoints when the reverse budget leaves
+        # room (max 4 total per request — Anthropic limit, claw anthropic.ts).
         sc = static_count or 0
-        if self.cache_enabled and sc > 0:
+        sys_markers = 1   # anthropic_cache_instructions="5m" (routes.py native path)
+        tool_markers = 1  # anthropic_cache_tool_definitions="5m"
+        if self.cache_enabled and sc > 0 and remaining_breakpoint_budget(sys_markers, tool_markers) > 0:
             messages = apply_cache_control(messages, sc, self.cache_ttl)
 
         system, anthropic_msgs = self._to_anthropic(messages, sc)
