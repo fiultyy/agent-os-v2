@@ -43,6 +43,8 @@ from .nesting import (
     nested_run,
     set_engine,
 )
+# W-P2-3:worktree 子模块(WorktreeManager / _chdir;per-agent opt-in git worktree 隔离)。
+from .worktree import WorktreeManager, _chdir
 
 __all__ = [
     # P0 types
@@ -64,6 +66,9 @@ __all__ = [
     "WorkflowNestingError",
     "get_workflow_context",
     "set_engine",
+    # P2 worktree(W-P2-3)
+    "WorktreeManager",
+    "_chdir",
     # helpers(测试内联 import 兼容)
     "_fan_in",
     "_usage_dict",

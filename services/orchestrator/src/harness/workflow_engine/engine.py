@@ -25,6 +25,9 @@ from pydantic_ai.usage import RunUsage, UsageLimits
 # (线性图原语 + 工程纪律 capability 见 docstring,不 import — grep 机械守恒)
 from ..capabilities import ObserveCapability, ToolBridgeCapability
 from ..native_agent import build_native_agent
+# W-P2-3 worktree:仅 import _chdir 上下文管理器(WorktreeManager 经 ctx 注入,
+# 不在 engine.py 顶层实例化;worktree.py 不 import engine → 零循环依赖)。
+from .worktree import _chdir
 
 # W-P2-1 包化:``build_native_agent`` 经包 namespace 间接查找(让测试的
 # ``wf_mod.build_native_agent = _fake`` monkeypatch 仍生效 — wf_mod 即包 __init__)。
@@ -342,10 +345,34 @@ class WorkflowEngine:
         # RK3:显式 unset request_limit(默认 50 在 fan-out N=8+ 提前 UsageLimitExceeded)。
         # 子任务 budget 罩由 ctx.budget_limits(check_before_request 短路),父 limit 独立。
         node_usage_limits = UsageLimits(request_limit=None)
+
+        # ── W-P2-3 worktree opt-in:isolation='worktree' + ctx.worktree_manager ──
+        # ADR-4:native in-process Agent 无 harness client,worktree 仅切 Python 进程 cwd
+        # (build_native_agent 无 cwd/deps 参数 verified,design §8)。_wt_semaphore(1)
+        # 串行化所有 worktree node —— os.chdir 进程全局,per-agent 独占执行。opt-in
+        # 边缘场景:默认 isolation=None 走 session cwd。release 在 finally 保证 agent.run
+        # raise 时也清理(git worktree remove --force 容错)。agent.run 的 R3 降级外层
+        # try/except 在两分支统一包(共享同一 except 通道,无重复代码)。
+        wt_manager = ctx.worktree_manager
+        use_worktree = node.isolation == "worktree" and wt_manager is not None
         try:
-            result = await agent.run(
-                task_input, usage=node_usage, usage_limits=node_usage_limits,
-            )
+            if use_worktree:
+                # worktree 节点串行化(os.chdir 全局);_sem() 懒建(无 running loop 时
+                # asyncio.Semaphore(1) 会 raise,worktree.py:_sem 兜底)。
+                async with wt_manager._sem():
+                    wt_path = await wt_manager.acquire(node.label, ctx.run_id)
+                    try:
+                        with _chdir(wt_path):
+                            result = await agent.run(
+                                task_input, usage=node_usage,
+                                usage_limits=node_usage_limits,
+                            )
+                    finally:
+                        await wt_manager.release(node.label)
+            else:
+                result = await agent.run(
+                    task_input, usage=node_usage, usage_limits=node_usage_limits,
+                )
         except Exception as exc:  # noqa: BLE001 — R3 降级,不 abort sibling
             logger.warning(
                 "workflow_engine._spawn_agent: agent.run failed (run=%s node=%s agent=%s): %s",
@@ -353,6 +380,7 @@ class WorkflowEngine:
             )
             # error node 不计 usage(对位 agent_runner 母版;design verify 断言
             # total_usage 仅 success node 累计)— 返默认 RunUsage(),fan-in commit 加 0。
+            # worktree 分支的 release 在 finally 内已完成(agent.run raise 前后均清)。
             return NodeResult(
                 label=node.label,
                 agent_id=agent_id,
