@@ -25,6 +25,7 @@ from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.providers.anthropic import AnthropicProvider
 
 from .capabilities.engineering_discipline_capability import EngineeringDisciplineCapability
+from .mcp_config import build_mcp_toolset, build_mcp_toolsets, load_global_mcp_servers
 
 HARNESS_TYPE = "agent-os-v2"  # 与 observe/client.py 对齐(agent-os-v2 harness)
 
@@ -65,6 +66,7 @@ def build_native_agent(
     toolsets: Sequence[Any] | None = None,
     model_settings: Any = None,
     model_name: str | None = None,
+    mcp_servers: Sequence[dict[str, Any]] | None = None,
 ) -> Agent:
     """组装 native in-process Agent。
 
@@ -76,6 +78,27 @@ def build_native_agent(
     (glm-4.7);非空 → 用此名建 AnthropicModel(其余 base_url/api_key 仍走 env)。语义:让调用方
     (如 ``run_agent_turn`` 子代理配置指定的 model)在不改 env 的前提下覆盖单次 spawn 的模型。
     A2A 铺路:统一 spawn 入口,未来 A2A 协议发现的外部 agent 仍走 ``build_native_agent``。
+
+    mcp_servers(5B):MCP server 配置列表,每项形如::
+
+        {
+          "name": "echo",                    # 工具前缀(多 server 去歧义)
+          "transport": "stdio" | "sse" | "streamable_http",
+          # stdio:command + args + env(可选)
+          "command": "python", "args": ["-m", "echo_mcp"], "env": {"K": "v"},
+          # sse / streamable_http:url + headers(可选)
+          "url": "http://localhost:8000/sse", "headers": {"Authorization": "Bearer x"},
+        }
+
+    按配置构造 ``MCPToolset``(stdio→``StdioTransport``;sse/http→URL 直传 pydantic-ai
+    ``MCPToolset``,后者自行按 URL 推断 SSE vs streamable_http;transport 显式时可省 url
+    scheme 推断)。toolset 经 ``.prefixed(name)`` 加前缀防跨 server 重名。Agent.run
+    自动进入/退出 toolset(``AsyncExitStack`` 管理生命周期,见 pydantic-ai Agent.run
+    ``exit_stack.enter_async_context(toolset)``),调用方无需手动 connect/disconnect。
+
+    配置来源(ponytail):agent 配置(``_state.agents[...]`` 里的 ``mcp_servers`` 字段,
+    经 ``run_agent_turn`` / ``_build_native_session`` 透传)优先;全局 ``.mcp.json``
+    fallback 留给后续(见 ``docs/mcp-config-template.md``)。
 
     ADR(harness-adr.md 第一层「工程纪律」):默认 prepend EngineeringDisciplineCapability
     (CC 5 条 + context-mgmt,进 stable ``dynamic=False`` 段,模型每轮可见、可 cache)。
@@ -91,12 +114,16 @@ def build_native_agent(
     if not any(isinstance(c, EngineeringDisciplineCapability) for c in caps):
         # 默认注入(env 旋钮关段;调用方显式传实例则去重=override 通道,见 docstring)
         caps.insert(0, EngineeringDisciplineCapability(enabled=not _DISCIPLINE_DISABLED))
+    # 5B:MCP server 配置 → toolset 列表(与调用方传入的 toolsets 并列)。
+    ts = list(toolsets) if toolsets else []
+    if mcp_servers:
+        ts.extend(build_mcp_toolsets(mcp_servers))
     model = build_model(model_name) if model_name else build_model()
     return Agent(
         model,
         instructions=instructions,
         capabilities=caps,
-        toolsets=list(toolsets) if toolsets else [],
+        toolsets=ts,
         model_settings=model_settings or {},
     )
 

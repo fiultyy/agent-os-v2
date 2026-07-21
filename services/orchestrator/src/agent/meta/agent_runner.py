@@ -74,9 +74,11 @@ async def run_agent_turn(
     if agent_cfg is not None:
         cfg_system = agent_cfg.get("system_prompt") or ""
         cfg_model = agent_cfg.get("model")
+        cfg_mcp = agent_cfg.get("mcp_servers") or None  # 5B:agent 配置 inline MCP
     else:
         cfg_system = ""
         cfg_model = None
+        cfg_mcp = None
 
     # Effective system prompt: explicit arg > stored config > neutral default.
     # 进 build_native_agent 作 instructions(组装器自动 prepend 纪律段 + tool 桥接)。
@@ -107,6 +109,7 @@ async def run_agent_turn(
         instructions=effective_system,
         capabilities=capabilities,
         model_name=cfg_model,  # 子代理配置 model 覆盖;None → build_model 读 env
+        mcp_servers=cfg_mcp,  # 5B:agent 配置 inline MCP server(优先于全局 .mcp.json)
     )
 
     # 防御:input 空时加占位。空 messages 被智谱/Anthropic 通道拒为 400 code 1214。

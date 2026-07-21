@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "echo_stdio": {
+      "command": "python",
+      "args": ["-m", "echo_mcp_server"],
+      "env": { "ECHO_LANG": "zh" }
+    },
+    "remote_sse": {
+      "url": "http://localhost:8001/sse"
+    },
+    "remote_http": {
+      "url": "http://localhost:8002/mcp",
+      "headers": { "Authorization": "Bearer ${MCP_TOKEN}" }
+    }
+  }
+}
