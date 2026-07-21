@@ -109,24 +109,24 @@ def test_executor_none_returns_unavailable() -> None:
     assert "unavailable" in r
 
 
-# ── instructions + toolset 披露 ───────────────────────────────────────
+# ── instructions + toolset 披露(V1:具名 tool,instructions 空) ─────────
 
-def test_instructions_lists_tools() -> None:
+def test_instructions_empty_in_v1() -> None:
+    """V1 ADR L27:tool 清单不再进 system prompt。"""
     cap = ToolBridgeCapability(tool_executor=_StubExecutor())
-    instr = cap.get_instructions()
-    assert "file_read" in instr
-    assert "execute_tool" in instr
-    assert "path" in instr            # params JSON schema
+    assert cap.get_instructions() == ""
 
 
 def test_instructions_empty_when_no_executor() -> None:
     assert ToolBridgeCapability(tool_executor=None).get_instructions() == ""
 
 
-def test_toolset_has_execute_tool() -> None:
+def test_toolset_has_named_tool() -> None:
+    """V1:registry 每个 tool 一具名字段(名=registry name)。"""
     cap = ToolBridgeCapability(tool_executor=_StubExecutor())
     ts = cap.get_toolset()
-    assert "execute_tool" in ts.tools
+    assert "file_read" in ts.tools
+    assert "execute_tool" not in ts.tools   # V0 dispatch tool 已退役
 
 
 def test_defer_loading_false() -> None:

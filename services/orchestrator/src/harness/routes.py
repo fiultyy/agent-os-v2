@@ -353,7 +353,8 @@ async def _build_native_session(
             agent_id=session_id,
             session_id=session_id,
         ),
-        # P8 ToolBridge:v2 ToolRegistry → execute_tool dispatch(模型经它调 v2 tool)。
+        # P8 ToolBridge:v2 ToolRegistry → 具名 pydantic-ai tool(每 tool 一独立字段,
+        # V1 ADR L27 — 模型直接调具名 tool,observe 事件 tool_name=具名)。
         # P7 pitfail:tool_executor 返 {status:'error'} 非 raise → wrapper 内显式计数。
         ToolBridgeCapability(
             tool_executor=_state.tool_executor,

@@ -1,17 +1,21 @@
-"""P8 ToolBridgeCapability — v2 ToolRegistry → pydantic-ai dispatch tool 桥接。
+"""P8 ToolBridgeCapability — v2 ToolRegistry → pydantic-ai 具名 tool 桥接。
 
 ADR: docs/adr/pydantic-ai-v2-adoption.md(P8 主路径退役核心前置 + P7 pitfall 解)。
+ADR L27 硬要求:每个 v2 tool **独立字段**进 tools[](name+description+schema),
+不再拼进 system prompt。
 
 v2 tool 是 ``handler(**arguments)`` 动态签名,不能逐个转 pydantic-ai tool(后者要固定
-函数签名作 schema)。**解法:dispatch tool**——单个 ``execute_tool(tool_name, arguments)``
-桥接 ``tool_executor.execute``;``get_instructions`` 列出可用 tool(name+description+
-parameters JSON schema)供模型选。模式对称 MemoryCapability 的 experience_memory
-(operation, params)单入口 dispatch。
+函数签名作 schema)。**V1 解法**:``get_toolset`` 为 registry 每个 tool 动态注册 1 个
+具名 pydantic-ai tool(name=registry name,description=registry desc),
+``Tool.from_schema`` 直注 registry parameters JSON schema(强 schema,跳过 pydantic
+校验,any_schema validator + 模型原样传 arguments dict)。``get_instructions`` 返空
+字符串(tool 清单不再进 system prompt,模型直接看 tools[] 字段)。
+模式对称 MemoryCapability 的 dispatch 思路,但每个 tool 一独立字段(ADR L27)。
 
 **P7 pitfall 语义鸿沟解**(workflow 对抗验证发现):``tool_executor.execute`` 返
 ``{status:'error'}`` 是**返回值非 raise**,pydantic-ai ``on_tool_execute_error`` 只在
-raise 时触发,pitfail 计数会静默失效。本 capability 在 dispatch wrapper **内**显式处理
-失败状态 → 调 ``pitfall_registry.match/increment/record``,不依赖 hook 自动接管。
+raise 时触发,pitfail 计数会静默失效。本 capability在每个具名 tool 的 wrapper **内**显式
+处理失败状态 → 调 ``pitfall_registry.match/increment/record``,不依赖 hook 自动接管。
 
 web 弃用后 canvas 双发不再迁移(随 P8 _node_tool 退役删);observe 由 ObserveCapability
 独立覆盖。本 capability 只管 tool 执行 + pitfall 计数。
@@ -19,12 +23,11 @@ web 弃用后 canvas 双发不再迁移(随 P8 _node_tool 退役删);observe 由
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic_ai import FunctionToolset
+from pydantic_ai import FunctionToolset, Tool
 from pydantic_ai.capabilities import AbstractCapability
 
 logger = logging.getLogger(__name__)
@@ -48,41 +51,30 @@ def _classify_tool_error(error_msg: str) -> str:
 
 @dataclass
 class ToolBridgeCapability(AbstractCapability[Any]):
-    """v2 ToolRegistry → pydantic-ai dispatch tool(execute_tool)+ pitfall wrapper。"""
+    """v2 ToolRegistry → pydantic-ai 具名 tool(每 tool 一独立字段)+ pitfall wrapper。"""
 
     id: str = "tool_bridge"
-    description: str = "Bridge v2 ToolRegistry → execute_tool dispatch + pitfail counting"
+    description: str = "Bridge v2 ToolRegistry → per-tool named pydantic-ai Tool + pitfail counting"
     defer_loading: bool = False  # 主路径工具,必须挂(非 recall)
     tool_executor: Any = None  # src.tools.executor.ToolExecutor(None → no tools)
     pitfail_registry: Any = None  # _state.pitfail_registry(None → pitfall no-op)
 
     def get_instructions(self) -> str:
-        if self.tool_executor is None or self.tool_executor.registry is None:
-            return ""
-        tools = self.tool_executor.registry.list_tools()
-        if not tools:
-            return ""
-        lines = ["Available tools — call execute_tool(tool_name, arguments):"]
-        for t in tools:
-            desc = t.get("description", "") or ""
-            lines.append(f"- {t['name']}: {desc}")
-            params = t.get("parameters")
-            if params:
-                lines.append(f"    params: {json.dumps(params, ensure_ascii=False)}")
-        return "\n".join(lines)
+        # V1:tool 清单不再进 system prompt(ADR L27 — name/desc/schema 各自独立字段
+        # 进 tools[]);返回空字符串。模型直接从 tools[] 字段读 tool 清单。
+        return ""
 
     def get_toolset(self) -> FunctionToolset[Any]:
         ts = FunctionToolset[Any]()
         executor = self.tool_executor
-        pitfail = self.pitfail_registry
-
-        @ts.tool_plain
-        async def execute_tool(tool_name: str, arguments: dict) -> str:
-            """Execute a registered tool by name. tool_name ∈ instructions list;
-            arguments per the tool's params schema. Returns tool output as string,
-            or ``[Tool error] <name>: <msg>`` on failure."""
-            return await _execute_via_registry(executor, pitfail, tool_name, arguments)
-
+        if executor is None or executor.registry is None:
+            return ts
+        tools = executor.registry.list_tools() or []
+        for t in tools:
+            name = t["name"]
+            desc = t.get("description") or ""
+            params = t.get("parameters") or {"type": "object", "properties": {}}
+            ts.add_tool(_make_named_tool(executor, self.pitfail_registry, name, desc, params))
         return ts
 
     @staticmethod
@@ -130,3 +122,24 @@ async def _execute_via_registry(
     error_msg = result.get("error") or f"tool {status}"
     ToolBridgeCapability._record_pitfall(pitfail, tool_name, error_msg)
     return f"[Tool error] {tool_name}: {error_msg}"
+
+
+def _make_named_tool(
+    executor: Any, pitfail: Any, name: str, description: str, parameters: dict,
+) -> Tool[Any]:
+    """V1:为 registry 单个 tool 造一个具名 pydantic-ai Tool(强 schema 路径 a)。
+
+    ``Tool.from_schema`` 直注 registry parameters JSON schema →
+    ``parameters_json_schema``(any_schema validator 跳过 pydantic 校验,
+    模型原样传 arguments dict)。每 tool 一独立字段进 tools[](ADR L27)。
+    wrapper dispatch 到 ``_execute_via_registry``(P7 pitfall 计数语义零回归)。
+    """
+    async def _wrapper(**arguments: Any) -> str:
+        return await _execute_via_registry(executor, pitfail, name, arguments)
+
+    return Tool.from_schema(
+        function=_wrapper,
+        name=name,
+        description=description,
+        json_schema=parameters,
+    )
