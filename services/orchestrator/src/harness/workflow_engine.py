@@ -1,27 +1,31 @@
-"""workflow_engine — workflow 编码级编排内核(P0 type 定义段)。
+"""workflow_engine — workflow 编码级编排内核(P0)。
 
-红线(R1/R2/R5)CI grep 机械守恒(禁字面 token 出现于此 docstring,详见
-docs/specs/workflow-kernel-design.md §3):
-- R1:子 agent 零 memory writer capability;模块内禁调用 ingest / kg 抽取 /
-  memory bus / memory service。
-- R2:模块内禁 import 或改线性图原语(build_execution_graph / node_llm /
-  chat.py / routes turn trigger / multi_agent_graph);workflow 经
-  build_native_agent 合法。
-- R5:模块内禁 import engineering-discipline capability(走 native_agent.py:114
-  默认 prepend)。
+红线(R1/R2/R5)CI grep 机械守恒(详见 docs/specs/workflow-kernel-design.md §3):
+- R1:子 agent 零 memory-writer capability;模块内零记忆落库调用。
+- R2:模块内零线性图原语 import 或改动;workflow 经 ``build_native_agent`` 合法。
+- R5:模块内零工程纪律 capability import(走 ``native_agent.py:114`` 默认 prepend)。
 
-本 node(W-P0-1)只落 type 定义段 + schema registry。spawn/run/emit/pipeline/loop
-由后续 node(W-P0-2..W-P1-3)在同一文件追加。
+本文件:W-P0-1 type 定义段 + schema registry;W-P0-2 WorkflowEngine.__init__ +
+_spawn_agent(单一 spawn chokepoint)。run/emit/pipeline/loop 由后续 node 追加。
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 from pydantic_ai.usage import RunUsage, UsageLimits
+
+# R2 import 白名单:仅 build_native_agent(ADR-sanctioned 统一 spawn 入口)+ caps。
+# (线性图原语 + 工程纪律 capability 见 docstring,不 import — grep 机械守恒)
+from .capabilities import ObserveCapability, ToolBridgeCapability
+from .native_agent import build_native_agent
+
+logger = logging.getLogger(__name__)
 
 # P2 类型仅作字符串 forward-ref(WorkflowJournal / WorktreeManager 在 P2 落地,
 # 此处不 import 避免 runtime ImportError + 触发 R2 grep 噪声)
@@ -133,3 +137,100 @@ def resolve_schema(ref: Optional[str]) -> Optional[type[BaseModel]]:
     if ref is None or ref == "text":
         return None
     return _SCHEMA_REGISTRY.get(ref)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# P0 WorkflowEngine — emitter / pitfail / tool_executor 注入式
+# ─────────────────────────────────────────────────────────────────────
+class WorkflowEngine:
+    """workflow 编码级编排内核。
+
+    所有 spawn 经 ``build_native_agent`` 唯一 chokepoint(R2 合法);caps 组装
+    绝不挂 MemoryWriterCapability(R1 子 agent 零 memory);Agent.run 失败降级返
+    NodeResult(status='error') 不 abort sibling(R3 ADR-7)。
+
+    P0 本 node 落 ``__init__`` + ``_spawn_agent``;``run`` / ``_emit_workflow`` /
+    ``pipeline`` / ``loop`` 由后续 node(W-P0-3/4, W-P1-1/3)在同一类追加。
+    """
+
+    def __init__(
+        self,
+        emitter: Any = None,            # ObserveEmitter(_state.memory_observe_emitter)
+        pitfail_registry: Any = None,   # _state.pitfail_registry(harness 故意 typo,见 design §3 R2)
+        tool_executor: Any = None,      # _state.tool_executor
+    ) -> None:
+        self.emitter = emitter
+        self.pitfail_registry = pitfail_registry
+        self.tool_executor = tool_executor
+
+    async def _spawn_agent(
+        self,
+        node: WorkflowNodeSpec,
+        ctx: WorkflowContext,
+    ) -> NodeResult:
+        """单一 spawn chokepoint:组装 native Agent + 跑一轮 ``agent.run``。
+
+        红线(对位 agent_runner.py:42-124 母版):
+        - R1:caps = [ToolBridgeCapability, ObserveCapability?]——绝不挂
+          记忆写入 capability(子 agent 不沉淀记忆,fan-in 后主 agent 单点落库)。
+        - R5:``build_native_agent`` 调用不传工程纪律 capability 实例 → 走
+          ``native_agent.py:114-116`` 默认 prepend。
+        - R6:``task_input = node.prompt or "(no task input)"``(空 messages
+          被智谱/Anthropic 通道拒为 400 code 1214)。
+        - R3:``agent.run`` 外层 try/except Exception → 降级返
+          NodeResult(status='error', error=str(exc)) 不 abort sibling。
+        - RK2:per-node RunUsage(``agent.run(usage=node_usage)``)避开共享
+          可变引用并发竞态;fan-in 阶段聚合由 ``run`` 负责。
+        - RK3:``agent.run`` 不传 ``usage_limits``(默认 request_limit=50 会
+          在 fan-out N=8+ 提前 UsageLimitExceeded);budget 罩由 P1 ctx.budget_limits。
+        """
+        agent_id = f"{ctx.agent_id_prefix}_{uuid.uuid4().hex[:8]}"
+
+        # ── caps 组装(R1:零记忆写入 capability;R5:零工程纪律 capability)──
+        capabilities: list[Any] = [
+            ToolBridgeCapability(
+                tool_executor=self.tool_executor,
+                pitfail_registry=self.pitfail_registry,
+            ),
+        ]
+        # ObserveCapability 可选:emitter 通电才挂(子 agent run 事件 forward 到 observe)。
+        if self.emitter is not None:
+            capabilities.append(ObserveCapability(
+                emitter=self.emitter,
+                harness_id=f"wf_{agent_id[:12]}",
+                session_id=ctx.session_id,
+            ))
+
+        # R5:不传工程纪律 capability 实例 → 走默认 prepend 分支(native_agent.py:114)。
+        agent = build_native_agent(
+            instructions="",  # P0 子 agent 走 neutral system;node.prompt 是 task input
+            capabilities=capabilities,
+            model_name=node.model,
+        )
+
+        # R6:空串占位(逐字照搬 agent_runner.py:116)。
+        task_input = node.prompt or "(no task input)"
+
+        # RK2:per-node RunUsage(避开共享可变引用并发 incr 无锁竞态)。
+        node_usage = RunUsage()
+        try:
+            result = await agent.run(task_input, usage=node_usage)
+        except Exception as exc:  # noqa: BLE001 — R3 降级,不 abort sibling
+            logger.warning(
+                "workflow_engine._spawn_agent: agent.run failed (run=%s node=%s agent=%s): %s",
+                ctx.run_id, node.label, agent_id, exc,
+            )
+            return NodeResult(
+                label=node.label,
+                agent_id=agent_id,
+                status="error",
+                error=str(exc),
+            )
+
+        return NodeResult(
+            label=node.label,
+            agent_id=agent_id,
+            output=result.output,
+            usage=node_usage,
+            status="success",
+        )
