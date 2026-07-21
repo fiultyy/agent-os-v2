@@ -8,14 +8,19 @@ verify(design §5 W-P0-5):
 - WORKFLOW_RUN_SCHEMA 含 minItems/minLength 等 model-facing 提示(RK7 双校验的
   JSON-schema 侧)
 - ctx 字段透传:concurrency 透传 ctx.concurrency;run_id 模块级生成 ``wf_<hex12>``
+- F5:handler 构造的 ctx.journal 非 None(此前恒 None 致 W-P2-4 journal 双写
+  全 no-op / resume 不可用);run 后 workflow_event 表有 started+result 行;
+  journal 构造失败时 ctx.journal=None 降级不崩(R3 fire-and-forget)
 """
 
 import asyncio
 import importlib.util
+import os
 from pathlib import Path
 
 import harness.workflow_engine as wf_mod
 from harness.workflow_engine import NodeResult, WorkflowResult
+from harness.workflow_engine.journal import WorkflowJournal
 from pydantic_ai.usage import RunUsage
 
 # 直接按文件加载 v2_workflow.py,绕开 tools.composite.__init__(它会触发
@@ -62,8 +67,13 @@ def _fake_result(status="success", n=2):
 
 
 def _patch_engine_run(fake_result=None, capture=None):
-    """monkeypatch WorkflowEngine.run 为 fake;返 restore。"""
+    """monkeypatch WorkflowEngine.run 为 fake;返 restore。
+
+    同步把 ``v2_workflow._build_journal`` 替为返 None 的 stub,避免现存 handler
+    测试每次 tool call 在 worktree 根 data/ 落 orch_workflow.db 文件污染。
+    """
     orig = wf_mod.WorkflowEngine.run
+    orig_build_journal = v2_workflow._build_journal
 
     async def _fake_run(self, spec, ctx):
         if capture is not None:
@@ -74,9 +84,11 @@ def _patch_engine_run(fake_result=None, capture=None):
         return _fake_result()
 
     wf_mod.WorkflowEngine.run = _fake_run
+    v2_workflow._build_journal = lambda: None  # 存量 handler 测试不落盘
 
     def restore():
         wf_mod.WorkflowEngine.run = orig
+        v2_workflow._build_journal = orig_build_journal
 
     return restore
 
@@ -224,3 +236,117 @@ def test_handler_defaults_match_design():
     assert capture["spec"].timeout_per_node_ms == 120000
     # ctx.concurrency 默认 8(handler 默认参数)
     assert capture["ctx"].concurrency == 8
+
+
+# ─────────────────────────────────────────────────────────────────────
+# F5(review fix):handler 构造的 ctx.journal 非 None(journal 模块通电),
+# 且 run 后 workflow_event 表有 started + result 行;db 不可用时降级 None 不崩(R3)。
+# ─────────────────────────────────────────────────────────────────────
+def test_handler_constructs_ctx_with_real_journal(tmp_path, monkeypatch):
+    """F5 主断言:handler 构造的 ctx.journal 是 WorkflowJournal 实例(非 None)。
+
+    修前 handler 未传 journal 致 ctx.journal 恒 None,engine.py:522-533 /
+    _spawn_agent 的 _journal_append 全 no-op,journal 模块 speculative。
+    db 落 tmp_path 避免污染 worktree。
+    """
+    db = str(tmp_path / "wf.db")
+
+    # mock engine.run 但保留真 _build_journal → ctx 落 capture,断言其 .journal
+    orig_run = wf_mod.WorkflowEngine.run
+    capture: dict = {}
+
+    async def _capture_run(self, spec, ctx):
+        capture["ctx"] = ctx
+        return _fake_result()
+
+    monkeypatch.setattr(wf_mod.WorkflowEngine, "run", _capture_run)
+    monkeypatch.setattr(v2_workflow, "_build_journal", lambda: WorkflowJournal(db))
+
+    try:
+        run_async(workflow_run_handler(nodes=[{"prompt": "hi"}]))
+    finally:
+        wf_mod.WorkflowEngine.run = orig_run
+
+    ctx = capture["ctx"]
+    # F5 核心:ctx.journal 非 None —— 此前恒 None 致整个 journal 模块 no-op
+    assert ctx.journal is not None, "F5: handler must wire ctx.journal (was always None pre-fix)"
+    assert isinstance(ctx.journal, WorkflowJournal)
+    ctx.journal.close()
+
+
+def test_handler_run_writes_started_and_result_rows(tmp_path, monkeypatch):
+    """F5 e2e:handler 真跑(engine 未 mock)→ workflow_event 表落 started + result。
+
+    复用 test_workflow_journal_integration 母版的 _RoutingFakeAgent — 真跑 engine
+    证明 journal 双写在 handler 入口不再 no-op。db 落 tmp_path。
+    """
+    db = str(tmp_path / "wf_e2e.db")
+    if os.path.exists(db):
+        os.unlink(db)
+    monkeypatch.setenv("ORCH_WORKFLOW_DB", db)
+
+    # patch 包级 build_native_agent(engine.py:_resolve_build_native_agent 经包 namespace 取)
+    class _FakeRunResult:
+        def __init__(self, output):
+            self.output = output
+
+    class _RoutingFakeAgent:
+        async def run(self, task_input, *, usage=None, usage_limits=None):
+            return _FakeRunResult("out_" + ("a" if "pa" in task_input else "b"))
+
+    monkeypatch.setattr(wf_mod, "build_native_agent", lambda **kw: _RoutingFakeAgent())
+
+    result = run_async(workflow_run_handler(
+        nodes=[{"prompt": "pa"}, {"prompt": "pb"}], fan_in="list",
+    ))
+    assert result["status"] == "success"
+    run_id = result["output"]["run_id"]
+
+    # 读 journal 表验证(journal 已 close 在 ctx 析构前,重开只读核对)
+    j = WorkflowJournal(db)
+    try:
+        events = j.list_events(run_id)
+        started = [e for e in events if e.type == "started"]
+        results = [e for e in events if e.type == "result"]
+        # 每 node 一对 started/result —— 修前 0 行(handler 未通电)
+        assert len(started) == 2, f"expected 2 started rows, got {len(started)} (F5 wiring broken)"
+        assert len(results) == 2, f"expected 2 result rows, got {len(results)} (F5 wiring broken)"
+        # run 终态
+        row = j.fetch_run(run_id)
+        assert row["status"] == "completed"
+    finally:
+        j.close()
+
+
+def test_handler_journal_construction_failure_degrades_to_none(monkeypatch):
+    """F5 R3:_build_journal 失败(只读 FS / pysqlite3 缺)→ ctx.journal=None 降级,
+    handler 不崩,run 正常返回(fire-and-forget,design §3 R3 对位 engine.py:522-533)。
+
+    模拟方式:让 WorkflowJournal 构造 raise(经 _build_journal 内 try/except 兜底
+    返 None — 测试真 R3 路径,不绕过 _build_journal 本身)。
+    """
+    def _boom(*a, **kw):
+        raise RuntimeError("db unavailable (simulated)")
+
+    # patch WorkflowJournal 类(_build_journal 内 try 块 import 后调用其构造)
+    import harness.workflow_engine.journal as journal_mod
+    monkeypatch.setattr(journal_mod, "WorkflowJournal", _boom)
+
+    # mock engine.run 捕获 ctx,验证降级后 ctx.journal=None
+    orig_run = wf_mod.WorkflowEngine.run
+    capture: dict = {}
+
+    async def _capture_run(self, spec, ctx):
+        capture["ctx"] = ctx
+        return _fake_result()
+
+    monkeypatch.setattr(wf_mod.WorkflowEngine, "run", _capture_run)
+    try:
+        result = run_async(workflow_run_handler(nodes=[{"prompt": "hi"}]))
+    finally:
+        wf_mod.WorkflowEngine.run = orig_run
+
+    # 降级不崩,handler 仍返 success(mock engine)
+    assert result["status"] == "success"
+    # R3 核心:journal 不可用时 ctx.journal=None,engine 侧 no-op,run 不崩
+    assert capture["ctx"].journal is None, "F5 R3: journal construction failure must degrade to None"

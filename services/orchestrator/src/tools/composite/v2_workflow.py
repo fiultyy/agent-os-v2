@@ -39,6 +39,25 @@ logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Journal 构造(W-P2-4 通电 — F5 修:此前 handler 未传 ctx.journal 致
+# _spawn_agent/_emit_workflow 的 journal 双写在生产全 no-op,journal 模块
+# speculative / resume 不可用)。
+# fire-and-forget(R3):db 不可用(只读 FS / 路径无写权限 / pysqlite3 缺)→
+# journal=None 降级,run 不崩(对位 engine.py:522-533 start_run try/except)。
+# ponytail:每次 tool call 重建 journal 是可接受开销(sqlite3.connect 是 ms
+# 级 open + executescript IF NOT EXISTS 幂等),且 fire-and-forget 语义下
+# 连接生命周期与 handler 一致(handler 退出 GC 即关,无显式 close 必要)。
+# ─────────────────────────────────────────────────────────────────────
+def _build_journal() -> Any:
+    try:
+        from harness.workflow_engine.journal import WorkflowJournal, _default_db_path
+        return WorkflowJournal(_default_db_path())
+    except Exception:  # noqa: BLE001 — R3 fire-and-forget
+        logger.warning("v2_workflow: journal unavailable, resume disabled", exc_info=True)
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────
 # JSON Schema(design §2.2.1)—— 给模型提示 minItems / minLength 等,handler 内
 # WorkflowNodesSpec.model_validate 是兜底双校验(RK7)。
 # ─────────────────────────────────────────────────────────────────────
@@ -148,12 +167,15 @@ async def workflow_run_handler(
         return {"status": "error", "error": "invalid nodes spec"}
 
     # ── ctx 构造(P0 默认 session_id / agent_id_prefix,见模块 docstring)──
+    # F5:journal 通电(此前 ctx.journal 恒 None 致 W-P2-4 双写全 no-op,resume
+    # 不可用)。_build_journal fire-and-forget 降级 None 时,engine 侧 no-op,run 不崩。
     run_id = f"wf_{uuid.uuid4().hex[:12]}"
     ctx = WorkflowContext(
         session_id="workflow",
         agent_id_prefix="wf",
         run_id=run_id,
         concurrency=concurrency,
+        journal=_build_journal(),
     )
 
     # ── 薄桥调 engine.run ──
