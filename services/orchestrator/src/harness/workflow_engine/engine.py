@@ -355,6 +355,26 @@ class WorkflowEngine:
         # try/except 在两分支统一包(共享同一 except 通道,无重复代码)。
         wt_manager = ctx.worktree_manager
         use_worktree = node.isolation == "worktree" and wt_manager is not None
+
+        # ── W-P2-4 journal hook(started):ctx.journal 通电时同步双写 ──
+        # design §5 W-P2-4 + §6.2:type='started' 在 _spawn_agent 起,payload 含
+        # label/agent_id/model/prompt_sha256。key='v2:'+sha256(prompt+opts)[:16]。
+        # 幂等:resume 重跑半完成 node 时 started 已存在 → IntegrityError 吞掉(对位
+        # design §6.3「半完成 agent 重跑」语义,DB 层兜底 cache 唯一性不二次写)。
+        started_payload = {
+            "label": node.label,
+            "agent_id": agent_id,
+            "model": node.model,
+            "prompt_sha256": _prompt_sha(node.prompt),
+        }
+        result_payload_seed = {
+            "label": node.label,
+            "agent_id": agent_id,
+            "model": node.model,
+        }
+        self._journal_append(ctx, agent_id, node.label, "started", node.prompt,
+                             started_payload)
+
         try:
             if use_worktree:
                 # worktree 节点串行化(os.chdir 全局);_sem() 懒建(无 running loop 时
@@ -381,12 +401,26 @@ class WorkflowEngine:
             # error node 不计 usage(对位 agent_runner 母版;design verify 断言
             # total_usage 仅 success node 累计)— 返默认 RunUsage(),fan-in commit 加 0。
             # worktree 分支的 release 在 finally 内已完成(agent.run raise 前后均清)。
+            self._journal_append(
+                ctx, agent_id, node.label, "result", node.prompt,
+                {**result_payload_seed, "status": "error", "error": str(exc)},
+            )
             return NodeResult(
                 label=node.label,
                 agent_id=agent_id,
                 status="error",
                 error=str(exc),
             )
+
+        self._journal_append(
+            ctx, agent_id, node.label, "result", node.prompt,
+            {
+                **result_payload_seed,
+                "status": "success",
+                "output": result.output,
+                "usage": _usage_dict(node_usage),
+            },
+        )
 
         return NodeResult(
             label=node.label,
@@ -395,6 +429,41 @@ class WorkflowEngine:
             usage=node_usage,
             status="success",
         )
+
+    # ───────────────────────────────────────────────────────────────────
+    # W-P2-4 journal helper — 同步双写(ctx.journal 通电时)
+    # ───────────────────────────────────────────────────────────────────
+    def _journal_append(
+        self,
+        ctx: WorkflowContext,
+        agent_id: str,
+        node_label: str,
+        event_type: str,
+        prompt: str,
+        payload: dict,
+    ) -> None:
+        """同步双写 journal 一行(design §5 W-P2-4 + §6.2)。
+
+        - ctx.journal=None(P2 子模块未通电 / 单测 / 无落盘需求)→ no-op。
+        - key='v2:'+sha256(prompt+opts)[:16] — opts 取 node spawn-derministic 字段
+          (model/effort/schema_ref/isolation);同 prompt+opts 同 key → resume 走 cache。
+        - IntegrityError(UNIQUE INDEX 冲突)吞掉:resume 重跑半完成 node 的 started
+          已存在是设计行为(design §6.3);其余 DB 错误 R3 fire-and-forget 不 abort 主路径。
+        """
+        journal = ctx.journal
+        if journal is None:
+            return
+        try:
+            from .journal import _cache_key
+            opts = {"model": payload.get("model")}
+            key = _cache_key(prompt, opts)
+            journal.append_event(ctx.run_id, agent_id, node_label, event_type, key, payload)
+        except Exception:  # noqa: BLE001 — R3 兜底;IntegrityError 幂等 / DB 错误不 abort
+            logger.debug(
+                "workflow_engine._journal_append: skip (run=%s node=%s type=%s)",
+                ctx.run_id, node_label, event_type,
+                exc_info=True,
+            )
 
     # ───────────────────────────────────────────────────────────────────
     # P0 run — fan-out(Semaphore cap)+ fan-in(gather BARRIER,单点聚合)
@@ -439,6 +508,24 @@ class WorkflowEngine:
             {"node_count": len(spec.nodes), "fan_in": spec.fan_in},
             session_id=ctx.session_id,
         )
+
+        # ── W-P2-4 journal 落盘 run 元数据:resume 重建 spec/ctx 所需 ──
+        # design §5 W-P2-4 + §6.1:start_run 写 workflow_run(spec_json/status/started_at)。
+        # ctx.journal=None 时 no-op;INSERT OR IGNORE 重启幂等。
+        if ctx.journal is not None:
+            try:
+                ctx.journal.start_run(
+                    ctx.run_id,
+                    spec.model_dump_json(),
+                    ctx.session_id,
+                )
+            except Exception:  # noqa: BLE001 — R3 fire-and-forget
+                logger.debug(
+                    "workflow_engine.run: journal.start_run skip (run=%s)",
+                    ctx.run_id, exc_info=True,
+                )
+
+        # ── W-P2-4 run 终态 mark_completed 在 return 前(见下方 journal hook)──
 
         async def _bounded(node: WorkflowNodeSpec) -> NodeResult:
             # W-P1-2 cooperative-cancel:budget 触达后 sibling 入口短路,不再 spawn。
@@ -512,6 +599,21 @@ class WorkflowEngine:
                 len(merged_output) if isinstance(merged_output, dict) else 0,
                 len(errors),
             )
+
+        # ── W-P2-4 journal 终态写回(resume 检 row.status 决定 replay_skip)──
+        # status='completed'(含部分 node error,只要 run 主体完成即终态;overall_status
+        # 'error' 仍写 'completed' 因 run 已到终态,resume 不应重跑 — 错误是 node 级
+        # 语义非 run 级中断)。ctx.journal=None 时 no-op。
+        if ctx.journal is not None:
+            try:
+                ctx.journal.mark_completed(
+                    ctx.run_id, "completed", ctx.total_usage,
+                )
+            except Exception:  # noqa: BLE001 — R3 fire-and-forget
+                logger.debug(
+                    "workflow_engine.run: journal.mark_completed skip (run=%s)",
+                    ctx.run_id, exc_info=True,
+                )
 
         return WorkflowResult(
             status=overall_status,
@@ -884,6 +986,13 @@ def _now_ts() -> str:
     """ISO8601 UTC timestamp(照搬 events.py:_now,内联避拉 events import)。"""
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()
+
+
+def _prompt_sha(prompt: str) -> str:
+    """prompt → sha256[:16](W-P2-4 journal started payload 字段;对位 CC journal.jsonl
+    prompt digest 语义)。空串占位经 _spawn_agent 兜底后 prompt 非空。"""
+    import hashlib
+    return hashlib.sha256((prompt or "").encode("utf-8")).hexdigest()[:16]
 
 
 # ─────────────────────────────────────────────────────────────────────
