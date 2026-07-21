@@ -46,7 +46,7 @@ class _FakeAgent:
         self._exc = exc
         self.run_called_with = None  # 记录调用参数(usage=)
 
-    async def run(self, task_input, *, usage=None):
+    async def run(self, task_input, *, usage=None, usage_limits=None):
         self.run_called_with = {"task_input": task_input, "usage": usage}
         if self._exc is not None:
             raise self._exc

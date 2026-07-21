@@ -49,7 +49,7 @@ class _FakeAgent:
         self._delay = delay
         self.runs: list[str] = []  # 记录每次收到的 task_input
 
-    async def run(self, task_input, *, usage=None):
+    async def run(self, task_input, *, usage=None, usage_limits=None):
         self.runs.append(task_input)
         await asyncio.sleep(self._delay)  # 模拟 stage 处理时间
         return _FakeRunResult(self._transform(task_input))
@@ -100,9 +100,9 @@ def test_pipeline_3_stages_3_items_each_item_full_chain():
         # 包一层记录 task_input(agent.runs[0] 在 transform 之前已 append,稳)
         orig_run = a.run
 
-        async def _wrap(task_input, *, usage=None):
+        async def _wrap(task_input, *, usage=None, usage_limits=None):
             all_inputs.append(task_input)
-            return await orig_run(task_input, usage=usage)
+            return await orig_run(task_input, usage=usage, usage_limits=usage_limits)
 
         a.run = _wrap
         return a
@@ -216,9 +216,9 @@ def test_pipeline_closure_bug_all_stages_get_own_prompt():
         a = _FakeAgent(delay=0.01)
         orig_run = a.run
 
-        async def _wrap(task_input, *, usage=None):
+        async def _wrap(task_input, *, usage=None, usage_limits=None):
             all_inputs.append(task_input)
-            return await orig_run(task_input, usage=usage)
+            return await orig_run(task_input, usage=usage, usage_limits=usage_limits)
 
         a.run = _wrap
         return a
@@ -316,7 +316,7 @@ def test_pipeline_node_failure_short_circuits_item_no_abort():
         def __init__(self):
             self.runs = []
 
-        async def run(self, task_input, *, usage=None):
+        async def run(self, task_input, *, usage=None, usage_limits=None):
             self.runs.append(task_input)
             raise_at["n"] += 1
             if raise_at["n"] == 4:  # stage[1] item[0]

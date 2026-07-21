@@ -50,7 +50,7 @@ class _FakeAgent:
         self._exc = exc
         self.run_usage = None
 
-    async def run(self, task_input, *, usage=None):
+    async def run(self, task_input, *, usage=None, usage_limits=None):
         if usage is not None:
             # 模拟 LLM 调用产生的 token 用量(对 per-node RunUsage 累加)
             usage.requests = (usage.requests or 0) + 1

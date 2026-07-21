@@ -88,19 +88,28 @@ class PipelineSpec(BaseModel):
 @dataclass
 class NodeResult:
     """单 node spawn 结果。R7:tool_executor 返 {status:'error'} 非 raise,
-    由 run() gather 后 isinstance(r, Exception) 转 status='error'。"""
+    由 run() gather 后 isinstance(r, Exception) 转 status='error'。
+
+    W-P1-2:``status='skipped'`` 标 budget 短路 / cooperative-cancel 未 spawn 的
+    node(与真实 'error' 区分;_fan_in 仍按 ``status != 'success'`` 聚合)。
+    """
 
     label: str
     agent_id: str
     output: Any = None
     usage: RunUsage = field(default_factory=RunUsage)
-    status: Literal["success", "error", "timeout"] = "success"
+    status: Literal["success", "error", "timeout", "skipped"] = "success"
     error: Optional[str] = None
 
 
 @dataclass
 class WorkflowResult:
-    """run() 返回。total_usage = per-node RunUsage 聚合(per-node 避开共享可变引用竞态,RK2)。"""
+    """run() 返回。total_usage = per-node RunUsage 聚合(per-node 避开共享可变引用竞态,RK2)。
+
+    budget_exceeded(W-P1-2):budget 短路触达(至少 1 个 node 因 ``check_before_request``
+    超限被 short-circuit)时 True。由 ``ctx.budget_tripped`` 显式标记(与 ``ctx.abort``
+    的外部主动 abort 正交 — 外部 abort 不污染此信号)。
+    """
 
     status: Literal["success", "error"]
     node_results: list[NodeResult]
@@ -108,6 +117,7 @@ class WorkflowResult:
     elapsed_ms: int
     node_count: int
     run_id: str
+    budget_exceeded: bool = False
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -116,7 +126,15 @@ class WorkflowResult:
 @dataclass
 class WorkflowContext:
     """run/pipeline/loop 共享上下文。total_usage 公开化(非 _shared_usage,
-    修正 [0]/[2] 的封装泄露 code smell)。"""
+    修正 [0]/[2] 的封装泄露 code smell)。
+
+    W-P1-2 budget 并发根治:``agent.run`` 有 await 点,concurrency>1 时多 sibling
+    同时读 stale ``total_usage`` → check 全过 → budget 被绕过。根治:``_spawn_agent``
+    在 ``budget_lock`` 内整 lifecycle 串行(check + caps + run + fan-in commit),
+    下个 sibling 入锁时 ``total_usage`` 已含前 node 实际 usage,check 不再读 stale。
+    代价:budget 路径 effective concurrency=1。``budget_tripped`` 是 budget 触达
+    显式标记(与 ``abort`` 正交 — 外部主动 abort 不污染 budget_exceeded 信号)。
+    """
 
     session_id: str
     agent_id_prefix: str
@@ -128,6 +146,8 @@ class WorkflowContext:
     dry_counter: int = 0
     depth: int = 0
     abort: Optional[asyncio.Event] = None
+    budget_tripped: bool = False               # budget 触达显式标记(与 abort 正交)
+    budget_lock: Optional[asyncio.Lock] = None # budget 串行互斥锁
     journal: Optional["WorkflowJournal"] = None  # P2
     worktree_manager: Optional["WorktreeManager"] = None  # P2
 
@@ -196,10 +216,71 @@ class WorkflowEngine:
           NodeResult(status='error', error=str(exc)) 不 abort sibling。
         - RK2:per-node RunUsage(``agent.run(usage=node_usage)``)避开共享
           可变引用并发竞态;fan-in 阶段聚合由 ``run`` 负责。
-        - RK3:``agent.run`` 不传 ``usage_limits``(默认 request_limit=50 会
-          在 fan-out N=8+ 提前 UsageLimitExceeded);budget 罩由 P1 ctx.budget_limits。
+        - RK3:``agent.run(usage_limits=UsageLimits(request_limit=None))`` 显式
+          unset request_limit(默认 50 会在 fan-out N=8+ 提前 UsageLimitExceeded);
+          budget 罩由 P1 ctx.budget_limits(check_before_request 短路)。
+        - W-P1-2 budget 并发根治(skeptic finding #1/#2):``agent.run`` 有 await 点,
+          concurrency>1 时多 sibling 同时读 stale ``ctx.total_usage`` → check 全过 →
+          budget 被绕过(N=8/concurrency=8/budget=100/per_call=60 实测 success=8/
+          total=480/budget_exceeded=False)。根治(skeptic approve 路径 1:「check 在
+          fan-in 锁内同步进行」):``ctx.budget_limits`` 非 None 且有 token limit 时,
+          **整个 check + caps 组装 + agent.run + fan-in commit 在 ``ctx.budget_lock``
+          内串行**(每 node 完整 lifecycle 占锁)。锁释放点 = run 完 fan-in 后;因此
+          sibling 入锁时 total_usage 已含前一个 node 的实际 usage,check 不再读 stale。
+          触达 ``UsageLimitExceeded`` → 返 NodeResult(status='skipped',
+          error='budget_exceeded') 不 spawn,设 ``ctx.budget_tripped=True`` +
+          ``ctx.abort.set()`` 广播停剩余 sibling。
+          代价:budget 路径下 effective concurrency=1(per-node 串行)。无 budget 时
+          锁不参与,Semaphore 原并发不变。升级路径(保并发):per-spawn token estimate
+          预留 + run 后 reconcile(需 estimate;当前不知,defer)。
         """
         agent_id = f"{ctx.agent_id_prefix}_{uuid.uuid4().hex[:8]}"
+
+        # ── W-P1-2 budget 串行根治:budget 路径下整 spawn+run+fan-in 占锁 ──
+        has_budget = (
+            ctx.budget_limits is not None and ctx.budget_limits.has_token_limits()
+        )
+        # ponytail:budget 路径 effective concurrency=1(per-node 串行);升级路径
+        # 见 docstring(per-spawn estimate 预留)。
+        if has_budget and ctx.budget_lock is not None:
+            await ctx.budget_lock.acquire()
+        try:
+            if has_budget:
+                try:
+                    ctx.budget_limits.check_before_request(ctx.total_usage)
+                except Exception as exc:  # UsageLimitExceeded;nox BLE001 兜底(子类)
+                    logger.info(
+                        "workflow_engine._spawn_agent: budget exceeded "
+                        "(run=%s node=%s total_tokens=%d): %s",
+                        ctx.run_id, node.label,
+                        ctx.total_usage.total_tokens, exc,
+                    )
+                    ctx.budget_tripped = True
+                    if ctx.abort is not None:
+                        ctx.abort.set()  # 广播:sibling _bounded 入口 cooperative-cancel
+                    return NodeResult(
+                        label=node.label,
+                        agent_id=agent_id,
+                        status="skipped",
+                        error="budget_exceeded",
+                    )
+            nr = await self._spawn_agent_inner(node, ctx, agent_id)
+            # fan-in commit(per-node usage → total_usage)。budget 路径在锁内
+            # atomic(下个 sibling 入锁看到更新后的 total_usage);无 budget 路径
+            # lock 可能未建,直接提交(_bounded 无并发竞争因总 usage 不读回)。
+            ctx.total_usage = ctx.total_usage + nr.usage
+            return nr
+        finally:
+            if has_budget and ctx.budget_lock is not None:
+                ctx.budget_lock.release()
+
+    async def _spawn_agent_inner(
+        self,
+        node: WorkflowNodeSpec,
+        ctx: WorkflowContext,
+        agent_id: str,
+    ) -> NodeResult:
+        """caps 组装 + agent.run(R1/R5/R6/R3/RK3 纪律;budget 串行锁外提取)。"""
 
         # ── caps 组装(R1:零记忆写入 capability;R5:零工程纪律 capability)──
         capabilities: list[Any] = [
@@ -228,13 +309,20 @@ class WorkflowEngine:
 
         # RK2:per-node RunUsage(避开共享可变引用并发 incr 无锁竞态)。
         node_usage = RunUsage()
+        # RK3:显式 unset request_limit(默认 50 在 fan-out N=8+ 提前 UsageLimitExceeded)。
+        # 子任务 budget 罩由 ctx.budget_limits(check_before_request 短路),父 limit 独立。
+        node_usage_limits = UsageLimits(request_limit=None)
         try:
-            result = await agent.run(task_input, usage=node_usage)
+            result = await agent.run(
+                task_input, usage=node_usage, usage_limits=node_usage_limits,
+            )
         except Exception as exc:  # noqa: BLE001 — R3 降级,不 abort sibling
             logger.warning(
                 "workflow_engine._spawn_agent: agent.run failed (run=%s node=%s agent=%s): %s",
                 ctx.run_id, node.label, agent_id, exc,
             )
+            # error node 不计 usage(对位 agent_runner 母版;design verify 断言
+            # total_usage 仅 success node 累计)— 返默认 RunUsage(),fan-in commit 加 0。
             return NodeResult(
                 label=node.label,
                 agent_id=agent_id,
@@ -266,8 +354,10 @@ class WorkflowEngine:
         - R7 pitfall 语义鸿沟:``gather`` 后 ``isinstance(r, Exception)`` 转
           ``NodeResult(status='error')``(tool_executor 返 {status:'error'} 非
           raise,但 ``_spawn_agent`` 的 agent.run 异常走 raise 通道)。
-        - RK2 fan-in 聚合:per-node RunUsage 在 ``asyncio.Lock`` 内
-          ``ctx.total_usage += r.usage``(避共享可变引用竞态)。
+        - RK2 fan-in 聚合:per-node RunUsage commit 在 ``_spawn_agent`` 内
+          (budget 路径在 ``budget_lock`` 内 atomic,根治 concurrency 读-后-写竞态;
+          无 budget 路径在 ``_spawn_agent`` 末尾直接 commit)。
+          ``run`` 只负责 gather BARRIER + overall status / fan_in merge。
         - fan_in='list' 原样数组(success/error 混杂);'merge' dict 字段合并
           (success only,later-wins;error 聚合 errors list,design §11 Q2)。
         - 4 事件 emit:workflow_started / node_started×N / node_completed×N /
@@ -275,9 +365,15 @@ class WorkflowEngine:
         """
         import time
 
-        loop = asyncio.get_running_loop()  # RK1:沿主 event loop,禁 run_sync/asyncio.run
-        lock = asyncio.Lock()              # RK2 fan-in 聚合锁
+        # RK1:沿主 event loop(asyncio.Lock/Semaphore/Event 需 running loop;
+        # 禁 run_sync/asyncio.run 重起 loop — 见单测 sync wrapper 模式)。
         sem = asyncio.Semaphore(max(1, ctx.concurrency))
+        # W-P1-2:budget 短路 cooperative-cancel Event + budget 串行锁。budget 触达
+        # 由 _spawn_agent check_before_request 设 budget_tripped + abort。
+        if ctx.abort is None:
+            ctx.abort = asyncio.Event()
+        if ctx.budget_lock is None:
+            ctx.budget_lock = asyncio.Lock()
 
         self._emit_workflow(
             "workflow_started",
@@ -287,6 +383,14 @@ class WorkflowEngine:
         )
 
         async def _bounded(node: WorkflowNodeSpec) -> NodeResult:
+            # W-P1-2 cooperative-cancel:budget 触达后 sibling 入口短路,不再 spawn。
+            if ctx.abort is not None and ctx.abort.is_set():
+                return NodeResult(
+                    label=node.label,
+                    agent_id=f"{ctx.agent_id_prefix}_skip_{uuid.uuid4().hex[:6]}",
+                    status="skipped",
+                    error="budget_exceeded_skipped",
+                )
             self._emit_workflow(
                 "workflow_node_started",
                 ctx.run_id,
@@ -295,9 +399,6 @@ class WorkflowEngine:
             )
             async with sem:
                 nr = await self._spawn_agent(node, ctx)
-            # RK2 fan-in 聚合(per-node usage 在 Lock 内 +=;__add__ 返新对象)
-            async with lock:
-                ctx.total_usage = ctx.total_usage + nr.usage
             self._emit_workflow(
                 "workflow_node_completed",
                 ctx.run_id,
@@ -361,6 +462,8 @@ class WorkflowEngine:
             elapsed_ms=elapsed_ms,
             node_count=len(node_results),
             run_id=ctx.run_id,
+            # W-P1-2:budget_tripped 显式标记(与 ctx.abort 外部 abort 正交)。
+            budget_exceeded=ctx.budget_tripped,
         )
 
     # ───────────────────────────────────────────────────────────────────
@@ -453,6 +556,9 @@ class WorkflowEngine:
         # queue[N] = sink(终态)。stage i 读 queue[i],写 queue[i+1]。
         queues: list[asyncio.Queue] = [asyncio.Queue() for _ in range(n_stages + 1)]
         sem = asyncio.Semaphore(max(1, spec.concurrency))
+        # W-P1-2:budget 预留锁复用 run 约定(若 ctx 未带则本地建)。
+        if ctx.budget_lock is None:
+            ctx.budget_lock = asyncio.Lock()
 
         # 投放 M 个初始 item 到 queue[0]
         for item_idx, item in enumerate(spec.items):
