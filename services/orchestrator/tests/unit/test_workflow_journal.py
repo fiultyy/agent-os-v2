@@ -301,12 +301,26 @@ def test_resume_completed_run_skipped():
     assert "completed" in res["reason"]
 
 
+def _node_key(prompt, model=None):
+    """镜像 ``engine._journal_append`` 的 cache key 计算(opts={"model": node.model})。
+
+    F4:resume 按 cache key 去重后,seed 的 event.key 必须与 ``_spawn_agent`` 实际
+    写入的一致(``_cache_key(prompt, {"model": node.model})``),否则 resume 端算
+    的 node key 与 seed 写入的 event.key 不撞 → 误判全 pending。default model=None
+    对位 ``WorkflowNodeSpec.model`` 默认值。
+    """
+    return _cache_key(prompt, {"model": model})
+
+
 def _seed_partial_run(j, run_id, completed_labels, partial_label):
     """构造中断场景:completed_labels 有 started+result;partial_label(可 None)仅 started。
 
     completed node 的 result payload 含 ``usage`` 字段(对位 engine.py:422-430
     success 分支 ``"usage": _usage_dict(node_usage)``)— F3 resume cached usage
     重建依赖此字段。每 completed node 贡献固定 usage(input=7,output=4,requests=1)。
+
+    F4:spec node 默认 model=None,event.key 经 ``_node_key(prompt)`` 与 engine 实际
+    写入路径(``_cache_key(prompt, {"model": None})``)对齐,确保 resume 按 key 命中。
     """
     all_labels = list(completed_labels) + ([partial_label] if partial_label else [])
     nodes = [{"prompt": f"prompt_{lab}", "label": lab} for lab in all_labels]
@@ -321,7 +335,7 @@ def _seed_partial_run(j, run_id, completed_labels, partial_label):
     # 写入 completed 节点的 started + result(含 usage,对位 engine 真实事件结构)
     for lab in completed_labels:
         prompt = f"prompt_{lab}"
-        key = _cache_key(prompt, {})
+        key = _node_key(prompt)
         j.append_event(run_id, f"agent_{lab}", lab, "started", key, {"label": lab})
         j.append_event(
             run_id, f"agent_{lab}", lab, "result", key,
@@ -335,7 +349,7 @@ def _seed_partial_run(j, run_id, completed_labels, partial_label):
     # 仅 started 的半完成 node
     if partial_label is not None:
         prompt = f"prompt_{partial_label}"
-        key = _cache_key(prompt, {})
+        key = _node_key(prompt)
         j.append_event(
             run_id, f"agent_{partial_label}", partial_label, "started", key,
             {"label": partial_label},
@@ -500,7 +514,7 @@ def test_resume_reruns_unstarted_node(patched_engine, tmp_path):
         run_id,
     ))
     j._conn.commit()
-    key1 = _cache_key("p_n1", {})
+    key1 = _node_key("p_n1")
     j.append_event(run_id, "a_n1", "n1", "started", key1, {"label": "n1"})
     j.append_event(run_id, "a_n1", "n1", "result", key1,
                    {"label": "n1", "status": "success", "output": "out_n1"})
@@ -513,6 +527,59 @@ def test_resume_reruns_unstarted_node(patched_engine, tmp_path):
     res = run_async(j.resume(run_id, engine))
     assert res["cached"] == 1
     assert res["fresh"] == 1
+    j.close()
+
+
+# ─────────────────────────────────────────────────────────────────────
+# F4:resume 按 cache key 去重(非 label);同名 label 不同 prompt 不碰撞
+# ─────────────────────────────────────────────────────────────────────
+def test_resume_default_label_no_collision(patched_engine, tmp_path):
+    """F4 验收:2 node 共用默认 label="node" 但不同 prompt → 各自判 cached/pending。
+
+    修前:resume 按 ``node.label not in cached_labels`` 去重,默认 label 都是
+    "node" → 任一 cached 则全部误判 cached,pending_nodes 漏算(本场景会把 node_B
+    也算 cached,fresh=0,不重跑)。
+    修后:按 cache key(``_cache_key(prompt, {"model": node.model})``)去重,node_A
+    cached(node_A prompt 的 result 事件存在),node_B pending(无对应 prompt 的
+    result)→ fresh=1 重跑 node_B。
+
+    spec 两 node 均不指定 label(走 ``WorkflowNodeSpec.label`` 默认 "node")+ 不指定
+    model(走默认 None)→ 仅 prompt 区分;cache key 精确命中 node_A,不误伤 node_B。
+    """
+    engine, engine_mod, monkeypatch = patched_engine
+    db = str(tmp_path / "wf.db")
+    j = WorkflowJournal(db)
+    run_id = "wf_f4_default_label"
+    j.start_run(run_id, "{}", "sess1")
+    # 两 node 均默认 label="node"(spec 不显式给 label),不同 prompt
+    nodes = [
+        {"prompt": "prompt_A"},   # label 省略 → 默认 "node"
+        {"prompt": "prompt_B"},   # label 省略 → 默认 "node"
+    ]
+    j._conn.execute("UPDATE workflow_run SET spec_json=? WHERE run_id=?", (
+        json.dumps({"nodes": nodes, "fan_in": "list", "timeout_per_node_ms": 120000}),
+        run_id,
+    ))
+    j._conn.commit()
+    # node_A 有完整 result 事件(走 cache);node_B 无任何事件(走 pending 重跑)
+    key_a = _node_key("prompt_A")
+    j.append_event(run_id, "agent_A", "node", "started", key_a, {"label": "node"})
+    j.append_event(run_id, "agent_A", "node", "result", key_a, {
+        "label": "node", "status": "success", "output": "out_A",
+        "usage": {"input_tokens": 7, "output_tokens": 4, "requests": 1},
+    })
+
+    outputs = {"prompt_B": "out_B"}
+    monkeypatch.setattr(
+        engine_mod, "build_native_agent",
+        lambda **kw: _RoutingFakeAgent(outputs),
+    )
+
+    res = run_async(j.resume(run_id, engine))
+    assert res["status"] == "resumed"
+    # 修前:fresh=0(误判 node_B 也 cached,label 撞)
+    assert res["cached"] == 1, "only node_A prompt's key is cached"
+    assert res["fresh"] == 1, "node_B must rerun (different prompt → different key)"
     j.close()
 
 

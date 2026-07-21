@@ -329,10 +329,15 @@ class WorkflowJournal:
         """事件溯源 replay(design §6.3 伪码逐字实现)。
 
         - 已完成 / aborted run → ``replay_skip``。
-        - 完成事件(``type='result'``)的 agent payload 进 ``cached_results``,
-          其 label 不进 pending。
+        - 完成事件(``type='result'``)的 key 进 ``cached_keys``,其 node 进 cache。
         - 半完成(``started`` only)/未启动 node → 进 pending,经 ``engine.run`` 重跑。
         - 终态 ``mark_completed`` 写回(ctx.total_usage 已含 cached + fresh)。
+
+        F4:去重按 cache key(prompt+opts sha256[:16]),非 label。``WorkflowNodeSpec.label``
+        默认 "node",多 node 共用默认 label 时按 label 去重会让任一 cached 误判全部
+        cached → pending_nodes 漏算。cache key 与 ``engine._journal_append`` 同源
+        (``_cache_key(prompt, {"model": node.model})``),同 prompt+model 同 key →
+        resume 走 cache;不同 prompt(同 label)不同 key → 各自判 cached/pending 正确。
         """
         row = self.fetch_run(run_id)
         if row is None:
@@ -350,14 +355,20 @@ class WorkflowJournal:
         from pydantic_ai.usage import RunUsage
         spec = WorkflowNodesSpec.model_validate(spec_dict)
 
-        result_payloads: dict[str, dict] = {}    # agent_id → cached payload
-        for ev in events:
-            if ev.type == "result":
-                result_payloads[ev.agent_id or ""] = ev.payload
-
-        # pending nodes:label 不在 cached_results 的 node(对位 design §6.3 伪码)。
-        cached_labels = {p.get("label") for p in result_payloads.values()}
-        pending_nodes = [n for n in spec.nodes if n.label not in cached_labels]
+        # F4:按 cache key 去重(非 label)。result 事件的 ``key`` 列由
+        # ``engine._journal_append`` 用 ``_cache_key(prompt, {"model": node.model})``
+        # 算得(见 engine.py:464-466)。pending nodes:其 cache key 不在 cached_keys 里。
+        cached_keys: set[str] = {
+            ev.key for ev in events if ev.type == "result"
+        }
+        cached_count = sum(
+            1 for n in spec.nodes
+            if _cache_key(n.prompt, {"model": n.model}) in cached_keys
+        )
+        pending_nodes = [
+            n for n in spec.nodes
+            if _cache_key(n.prompt, {"model": n.model}) not in cached_keys
+        ]
 
         # F3:中断 run 的 row.total_usage 列为 NULL(``mark_completed`` 未调),
         # 仅靠该列重建 ctx.total_usage 会丢 cached agent 用量。从事件流重建 cached
@@ -393,7 +404,10 @@ class WorkflowJournal:
         self.mark_completed(run_id, status="completed", total_usage=ctx.total_usage)
         return {
             "status": "resumed",
-            "cached": len(result_payloads),
+            # F4:cached 按 spec node 的 cache key 命中数(非 result 事件行数 —
+            # 同 key 节点不双计;UNIQUE INDEX 兜底)。多 node 默认 label="node" 但不同
+            # prompt 时各自命中,修前会因 label 撞全部判 cached。
+            "cached": cached_count,
             "fresh": fresh_node_count,
             "total_usage": _usage_to_dict(ctx.total_usage),
         }
