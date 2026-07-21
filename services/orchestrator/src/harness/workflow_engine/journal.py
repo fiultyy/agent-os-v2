@@ -153,6 +153,40 @@ def usage_from_json(data: Optional[str]) -> Any:
     return RunUsage(**{f: int(d.get(f, 0) or 0) for f in _USAGE_FIELDS})
 
 
+def _usage_from_dict(d: Any) -> Any:
+    """result 事件 payload.usage(dict)→ RunUsage(F3 resume cached usage 重建)。
+
+    payload 经 ``_usage_dict`` 写入(engine.py:428),字段对齐 ``_USAGE_FIELDS``。
+    d=None / 缺字段 / 非数值 → 该字段 0(防御性,与 ``usage_from_json`` 同语义)。
+    """
+    from pydantic_ai.usage import RunUsage
+    if not isinstance(d, dict):
+        return RunUsage()
+    return RunUsage(**{f: int(d.get(f, 0) or 0) for f in _USAGE_FIELDS})
+
+
+def _merge_cached_usage(events: List["WorkflowEvent"]) -> Any:
+    """遍历 ``type='result'`` 事件累加其 ``payload.usage`` → RunUsage(F3)。
+
+    中断 run 的 ``workflow_run.total_usage`` 列为 NULL(``mark_completed`` 未调),
+    resume 仅靠该列重建 ``ctx.total_usage`` 会丢 cached agent 用量。本辅助从事件流
+    重建 cached usage(success node 的 usage 字段;error node 无 usage 字段 → 0,
+    对位 engine ``_spawn_agent`` error 分支不计 usage 的语义)。
+    """
+    from pydantic_ai.usage import RunUsage
+    total = RunUsage()
+    for ev in events:
+        if ev.type != "result":
+            continue
+        payload = ev.payload or {}
+        # 仅 success node 累计(error node 无 usage 字段;design verify 断言 total_usage
+        # 仅 success node 累计)。status 缺省按 success 兼容旧事件流。
+        if payload.get("status", "success") != "success":
+            continue
+        total = total + _usage_from_dict(payload.get("usage"))
+    return total
+
+
 class WorkflowJournal:
     """跨进程 resume 的 SQLite 事件流存储。
 
@@ -325,11 +359,23 @@ class WorkflowJournal:
         cached_labels = {p.get("label") for p in result_payloads.values()}
         pending_nodes = [n for n in spec.nodes if n.label not in cached_labels]
 
+        # F3:中断 run 的 row.total_usage 列为 NULL(``mark_completed`` 未调),
+        # 仅靠该列重建 ctx.total_usage 会丢 cached agent 用量。从事件流重建 cached
+        # usage,与 row.total_usage(若非 NULL,正常完成 run 二次 resume 路径)取大
+        # 不重复累加 — 二者数据源重叠(cached result 即 row.total_usage 的子集),
+        # row 非 NULL 时优先 row(权威),否则从事件流重建。
+        row_usage = usage_from_json(row["total_usage"])
+        if any(getattr(row_usage, f, 0) for f in _USAGE_FIELDS):
+            # row.total_usage 非 fresh(权威 — 正常完成 run 二次 resume 路径)。
+            ctx_total = row_usage
+        else:
+            ctx_total = _merge_cached_usage(events)
+
         ctx = WorkflowContext(
             session_id=row["session_id"],
             agent_id_prefix=f"wf_{run_id[:8]}",
             run_id=run_id,
-            total_usage=usage_from_json(row["total_usage"]),
+            total_usage=ctx_total,
             journal=self,
         )
 
@@ -341,8 +387,8 @@ class WorkflowJournal:
                 timeout_per_node_ms=spec.timeout_per_node_ms,
             )
             await engine.run(fresh_spec, ctx)
-        # ctx.total_usage 经 engine.run 内 _spawn_agent fan-in commit 含 fresh usage;
-        # cached usage 已在 mark_completed 重建前从 row.total_usage 恢复。
+        # ctx.total_usage 经 engine.run 内 _spawn_agent fan-in commit 累加 fresh usage;
+        # cached usage 已在 ctx 构造前从事件流重建(F3 _merge_cached_usage)。
 
         self.mark_completed(run_id, status="completed", total_usage=ctx.total_usage)
         return {

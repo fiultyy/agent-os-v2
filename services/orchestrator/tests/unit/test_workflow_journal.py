@@ -38,6 +38,7 @@ from harness.workflow_engine.journal import (
     WorkflowEvent,
     WorkflowJournal,
     _cache_key,
+    _merge_cached_usage,
     usage_from_json,
     usage_to_json,
 )
@@ -115,6 +116,18 @@ def patched_engine(monkeypatch):
     import harness.workflow_engine.engine as engine_mod
     engine = WorkflowEngine(emitter=None, pitfail_registry=None, tool_executor=None)
     return engine, engine_mod, monkeypatch
+
+
+@pytest.fixture
+def monkeypatch_pkg(monkeypatch):
+    """package-level build_native_agent patch 目标(``harness.workflow_engine``)。
+
+    ``_resolve_build_native_agent()`` 经包 namespace 取最新值(见 engine.py:32-42),
+    故 patch 必须落包属性而非子模块属性(对位 integration 测试母版)。F3 用量断言
+    需 fake agent 接管,避免真实 agent 的非确定性 usage 污染断言。
+    """
+    import harness.workflow_engine as wf_mod_pkg
+    return wf_mod_pkg, monkeypatch
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -289,7 +302,12 @@ def test_resume_completed_run_skipped():
 
 
 def _seed_partial_run(j, run_id, completed_labels, partial_label):
-    """构造中断场景:completed_labels 有 started+result;partial_label(可 None)仅 started。"""
+    """构造中断场景:completed_labels 有 started+result;partial_label(可 None)仅 started。
+
+    completed node 的 result payload 含 ``usage`` 字段(对位 engine.py:422-430
+    success 分支 ``"usage": _usage_dict(node_usage)``)— F3 resume cached usage
+    重建依赖此字段。每 completed node 贡献固定 usage(input=7,output=4,requests=1)。
+    """
     all_labels = list(completed_labels) + ([partial_label] if partial_label else [])
     nodes = [{"prompt": f"prompt_{lab}", "label": lab} for lab in all_labels]
     j._conn.execute(
@@ -300,14 +318,19 @@ def _seed_partial_run(j, run_id, completed_labels, partial_label):
         ),
     )
     j._conn.commit()
-    # 写入 completed 节点的 started + result
+    # 写入 completed 节点的 started + result(含 usage,对位 engine 真实事件结构)
     for lab in completed_labels:
         prompt = f"prompt_{lab}"
         key = _cache_key(prompt, {})
         j.append_event(run_id, f"agent_{lab}", lab, "started", key, {"label": lab})
         j.append_event(
             run_id, f"agent_{lab}", lab, "result", key,
-            {"label": lab, "status": "success", "output": f"out_{lab}"},
+            {
+                "label": lab,
+                "status": "success",
+                "output": f"out_{lab}",
+                "usage": {"input_tokens": 7, "output_tokens": 4, "requests": 1},
+            },
         )
     # 仅 started 的半完成 node
     if partial_label is not None:
@@ -343,6 +366,91 @@ def test_resume_reruns_partial_and_caches_completed(patched_engine, tmp_path):
     # 终态写回
     row = j.fetch_run(run_id)
     assert row["status"] == "completed"
+    j.close()
+
+
+# ─────────────────────────────────────────────────────────────────────
+# F3:resume 重建 ctx.total_usage 必须含 cached agent 用量(事件流重建)
+# ─────────────────────────────────────────────────────────────────────
+def test_merge_cached_usage_sums_success_events():
+    """``_merge_cached_usage`` 仅累加 success result 事件的 usage 字段。"""
+    j = WorkflowJournal(":memory:")
+    j.start_run("wf_f3a", "{}", "sess1")
+    key1 = _cache_key("p1", {})
+    key2 = _cache_key("p2", {})
+    key3 = _cache_key("p3", {})
+    j.append_event("wf_f3a", "a1", "n1", "result", key1, {
+        "label": "n1", "status": "success", "usage": {"input_tokens": 10, "output_tokens": 4, "requests": 1},
+    })
+    j.append_event("wf_f3a", "a2", "n2", "result", key2, {
+        "label": "n2", "status": "success", "usage": {"input_tokens": 5, "output_tokens": 1, "requests": 1},
+    })
+    # error node 不计 usage(对位 engine error 分支无 usage 字段)
+    j.append_event("wf_f3a", "a3", "n3", "result", key3, {
+        "label": "n3", "status": "error", "error": "boom",
+    })
+    events = j.list_events("wf_f3a")
+    total = _merge_cached_usage(events)
+    assert total.input_tokens == 15
+    assert total.output_tokens == 5
+    assert total.requests == 2
+    j.close()
+
+
+def test_merge_cached_usage_missing_field_tolerant():
+    """result payload 缺 usage 字段 / usage=None → 该节点贡献 0(防御性)。"""
+    j = WorkflowJournal(":memory:")
+    j.start_run("wf_f3b", "{}", "sess1")
+    key = _cache_key("p", {})
+    j.append_event("wf_f3b", "a", "n", "result", key,
+                   {"label": "n", "status": "success"})  # 无 usage 字段
+    total = _merge_cached_usage(j.list_events("wf_f3b"))
+    assert total.input_tokens == 0
+    assert total.requests == 0
+    j.close()
+
+
+def test_resume_total_usage_includes_cached(patched_engine, monkeypatch_pkg, tmp_path):
+    """F3 验收:中断 run(total_usage NULL)resume 后 ctx.total_usage = cached + fresh。
+
+    cached n1 贡献 {input=7,output=4,requests=1}(seed);fresh n2 重跑贡献
+    {input=5,output=3,requests=1}(_RoutingFakeAgent)。resume 返回的 total_usage
+    与终态行 total_usage 均应 = 两 node 累加(无偏低)。修前:cached 丢失,total
+    偏低(仅 fresh)。
+
+    注:patch 必须落 package-level(``harness.workflow_engine.build_native_agent``)
+    非 ``engine_mod.build_native_agent`` —— ``_resolve_build_native_agent()`` 经包
+    namespace 取最新值(见 integration 测试母版)。
+    """
+    engine, _engine_mod, _monkeypatch = patched_engine
+    wf_mod_pkg, monkeypatch = monkeypatch_pkg
+    db = str(tmp_path / "wf.db")
+    j = WorkflowJournal(db)
+    run_id = "wf_f3_resume"
+    j.start_run(run_id, "{}", "sess1")
+    _seed_partial_run(j, run_id, completed_labels=["n1"], partial_label="n2")
+    # row.total_usage 为 NULL(中断 run 未调 mark_completed)— F3 触发条件
+    assert j.fetch_run(run_id)["total_usage"] is None
+
+    outputs = {"prompt_n2": "out_n2"}
+    monkeypatch.setattr(
+        wf_mod_pkg, "build_native_agent",
+        lambda **kw: _RoutingFakeAgent(outputs),
+    )
+
+    res = run_async(j.resume(run_id, engine))
+    assert res["status"] == "resumed"
+    tu = res["total_usage"]
+    # cached(n1: input=7) + fresh(n2: input=5) = 12;修前此处会偏低到 5(仅 fresh)
+    assert tu["input_tokens"] == 12, f"cached usage lost: got {tu}"
+    assert tu["output_tokens"] == 7  # 4(cached) + 3(fresh)
+    assert tu["requests"] == 2
+
+    # 终态行 mark_completed 也写了完整 total_usage(不只 resume 路径)
+    row = j.fetch_run(run_id)
+    stored = json.loads(row["total_usage"])
+    assert stored["input_tokens"] == 12
+    assert stored["requests"] == 2
     j.close()
 
 
