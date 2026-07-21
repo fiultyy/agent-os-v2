@@ -125,6 +125,26 @@ class TestCreateSubagent:
         result = await create_subagent(agent_type="worker", config={})
         assert result["id"] in _state.agents
 
+    @pytest.mark.asyncio
+    async def test_mcp_servers_propagated_from_config(self):
+        # grill blocker B / 5B:agent 配置 mcp_servers 必须写进 _state.agents[id],
+        # 否则 run_agent_turn:77 读 None、build_native_agent 透传不到 MCPToolset,
+        # native_agent.py:99-101 / mcp_config.py:12 文档承诺的「agent 配置优先」成死路径。
+        servers = [{"name": "echo", "transport": "stdio", "command": "python", "args": ["-m", "echo_mcp"]}]
+        result = await create_subagent(
+            agent_type="worker", config={"mcp_servers": servers}
+        )
+        agent = _state.agents[result["id"]]
+        assert agent["mcp_servers"] == servers
+        # defensive copy — caller mutations must not bleed into stored config
+        assert agent["mcp_servers"] is not servers
+
+    @pytest.mark.asyncio
+    async def test_mcp_servers_defaults_to_empty_list(self):
+        result = await create_subagent(agent_type="worker", config={})
+        agent = _state.agents[result["id"]]
+        assert agent["mcp_servers"] == []
+
 
 # ── teardown_subagent ──────────────────────────────────────────────────────────
 

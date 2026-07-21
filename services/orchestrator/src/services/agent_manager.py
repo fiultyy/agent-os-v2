@@ -130,6 +130,9 @@ async def create_subagent(
         "model": config.get("model", "glm-4-flash"),
         "system_prompt": config.get("system_prompt", ""),
         "tools": list(config.get("tools", [])),
+        # 5B:agent 配置 inline MCP server(透传 build_native_agent,优先于全局 .mcp.json;
+        # run_agent_turn:77 / native_agent.py:99-101 文档承诺此字段)。
+        "mcp_servers": list(config.get("mcp_servers", [])),
         # ── subagent-specific markers ──
         "is_subagent": True,
         "parent_id": parent_id,
