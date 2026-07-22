@@ -23,7 +23,9 @@ class _TD:
 
 
 def _loader(tmp_path) -> SkillLoader:
-    return SkillLoader(user_dir=tmp_path, project_dir=None, builtin_dir=None)
+    # builtin_dir 显式 = tmp_path,避免默认推断 services/skills/ 扫到
+    # ao2-architecture builtin 泄漏污染 fixture(三层都指 tmp,去重后只 my-skill)。
+    return SkillLoader(user_dir=tmp_path, project_dir=tmp_path, builtin_dir=tmp_path)
 
 
 def test_skill_capability_body_strips_frontmatter(tmp_path) -> None:

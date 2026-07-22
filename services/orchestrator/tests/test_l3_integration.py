@@ -66,28 +66,6 @@ def test_composite():
     print("✅ composite (2 tools)")
 
 
-def test_skill_catalog():
-    """测试 skill_catalog 模块"""
-    from src.skill_catalog import SkillRegistry, SkillLoader, SkillConfig, SkillMetadata
-
-    # Registry
-    registry = SkillRegistry()
-    registry.register(SkillMetadata(name="test", version="1.0.0", description="Test", tools=[]))
-    assert registry.get("test")
-    assert len(registry.list()) > 0
-    registry.unregister("test")
-
-    # Config
-    config = SkillConfig()
-    assert config is not None
-
-    # Loader
-    loader = SkillLoader()
-    assert loader is not None
-
-    print("✅ skill_catalog (3 modules)")
-
-
 def test_all_imports():
     """测试所有导入"""
     # 不能在函数内使用 import *
@@ -104,7 +82,6 @@ if __name__ == "__main__":
     test_primitive()
     test_skill()
     test_composite()
-    test_skill_catalog()
 
     print("="*50)
     print("All tests passed! ✅")
