@@ -59,6 +59,11 @@ class ToolBridgeCapability(AbstractCapability[Any]):
     defer_loading: bool = False  # 主路径工具,必须挂(非 recall)
     tool_executor: Any = None  # src.tools.executor.ToolExecutor(None → no tools)
     pitfail_registry: Any = None  # _state.pitfail_registry(None → pitfall no-op)
+    # P2(spec.tools 接通):白/黑名单过滤 registry tools。None=不过滤(全量,向后兼容)。
+    # routes._build_native_session 从 spec.tools(ToolPolicy.allow/deny)透传(空 list→None);
+    # 子代理/chat/workflow 实例化不传→全量。
+    tool_allow: list[str] | None = None
+    tool_deny: list[str] | None = None
 
     def get_instructions(self) -> str:
         # V1:tool 清单不再进 system prompt(ADR L27 — name/desc/schema 各自独立字段
@@ -75,12 +80,32 @@ class ToolBridgeCapability(AbstractCapability[Any]):
         if executor is None or executor.registry is None:
             return ts
         tools = executor.registry.list_tools() or []
-        for t in tools:
-            name = t["name"]
+        # P2(spec.tools):allow 白名单 / deny 黑名单过滤(None=全量,向后兼容)
+        names = ToolBridgeCapability._filter(
+            [t["name"] for t in tools], self.tool_allow, self.tool_deny)
+        by_name = {t["name"]: t for t in tools}
+        for name in names:
+            t = by_name[name]
             desc = t.get("description") or ""
             params = t.get("parameters") or {"type": "object", "properties": {}}
             ts.add_tool(_make_named_tool(executor, self.pitfail_registry, name, desc, params))
         return ts.prefixed("v2")
+
+    @staticmethod
+    def _filter(
+        names: list[str], allow: list[str] | None, deny: list[str] | None,
+    ) -> list[str]:
+        """P2(spec.tools):白/黑名单过滤。allow 非空→只留白名单;deny 非空→剔除;
+        均 None→全量(向后兼容)。routes 侧空 list 已转 None(避免 [] 误当空白名单清空)。
+        """
+        out = []
+        for n in names:
+            if allow is not None and n not in allow:
+                continue
+            if deny and n in deny:
+                continue
+            out.append(n)
+        return out
 
     @staticmethod
     def _record_pitfall(pitfail: Any, tool_name: str, error_msg: str) -> None:

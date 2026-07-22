@@ -400,6 +400,9 @@ async def _build_native_session(
         ToolBridgeCapability(
             tool_executor=_state.tool_executor,
             pitfail_registry=_state.pitfail_registry,
+            # P2:spec.tools 透传(空 allow/deny → None 全量,向后兼容)
+            tool_allow=spec.tools.allow or None,
+            tool_deny=spec.tools.deny or None,
         ),
         GuardrailCapability(guardrail=Guardrail()),
         *skill_caps,
