@@ -526,3 +526,156 @@ def test_workflow_loop_schema_has_design_fields():
     budget_props = props["budget"]["properties"]
     for key in ("request_limit", "input_tokens_limit", "output_tokens_limit", "total_tokens_limit"):
         assert key in budget_props
+
+
+# ─────────────────────────────────────────────────────────────────────
+# F6(review fix):handler 构造 ctx.worktree_manager(isolation='worktree'
+# 真生效)。修前 ctx.worktree_manager 恒 None → engine.py:363 use_worktree
+# 短路 → isolation='worktree' silent no-op。
+# verify:
+# - workflow_run_handler / workflow_loop_handler 构造的 ctx.worktree_manager 非 None
+# - e2e:isolation='worktree' 真触发 acquire(_refs 填入)+ chdir(切到 wt path)+
+#   release(_refs 清空);__aexit__ 兜底未 release 的 worktree
+# ─────────────────────────────────────────────────────────────────────
+def test_run_handler_constructs_ctx_with_worktree_manager():
+    """F6 主断言:workflow_run_handler 构造的 ctx.worktree_manager 非 None。
+
+    修前 handler 未传 worktree_manager 致 ctx.worktree_manager 恒 None,
+    engine.py:363 ``use_worktree = node.isolation=='worktree' and wt_manager is not None``
+    恒短路 False,isolation='worktree' silent no-op。
+    """
+    from harness.workflow_engine import WorktreeManager
+    capture: dict = {}
+    restore = _patch_engine_run(capture=capture)
+    try:
+        run_async(workflow_run_handler(nodes=[{"prompt": "hi"}]))
+    finally:
+        restore()
+    ctx = capture["ctx"]
+    assert ctx.worktree_manager is not None, \
+        "F6: handler must wire ctx.worktree_manager (was always None pre-fix)"
+    assert isinstance(ctx.worktree_manager, WorktreeManager)
+
+
+def test_loop_handler_constructs_ctx_with_worktree_manager():
+    """F6:workflow_loop_handler 同样构造 ctx.worktree_manager 非 None。"""
+    from harness.workflow_engine import WorktreeManager
+    capture: dict = {}
+    restore = _patch_engine_loop(capture=capture)
+    try:
+        run_async(workflow_loop_handler(finder_spec={"prompt": "find"}))
+    finally:
+        restore()
+    ctx = capture["ctx"]
+    assert ctx.worktree_manager is not None, \
+        "F6: workflow_loop_handler must wire ctx.worktree_manager"
+    assert isinstance(ctx.worktree_manager, WorktreeManager)
+
+
+def test_run_handler_worktree_e2e_acquires_chdir_releases(tmp_path, monkeypatch):
+    """F6 e2e:isolation='worktree' 经 handler 真跑 engine → acquire 填 _refs +
+    chdir 切到 wt path(agent.run 记录 cwd)+ release 清 _refs + __aexit__ noop。
+
+    真跑 engine.run(仅 mock build_native_agent + subprocess.run 避 git / LLM 依赖),
+    证明 worktree 分支在 handler 入口不再 silent no-op。wt base=repo root(tmp_path)。
+    """
+    from unittest.mock import patch
+
+    class _FakeRunResult:
+        def __init__(self, output):
+            self.output = output
+
+    class _CwdFakeAgent:
+        """记录 run 时 cwd,验证 isolation='worktree' 切到 wt path。"""
+        async def run(self, task_input, *, usage=None, usage_limits=None):
+            self.run_cwd = Path.cwd()
+            return _FakeRunResult("wt_ok")
+
+    agent = _CwdFakeAgent()
+    monkeypatch.setattr(wf_mod, "build_native_agent", lambda **kw: agent)
+    # 避 handler 落 orch_workflow.db 污染 worktree 根
+    monkeypatch.setattr(v2_workflow, "_build_journal", lambda: None)
+
+    def fake_run(cmd, *a, **kw):
+        if "add" in cmd:
+            Path(cmd[4]).mkdir(parents=True, exist_ok=True)
+        return 0
+
+    # WorktreeManager.base 在 handler 内取 Path.cwd();让 handler 在 tmp_path 下跑需
+    # chdir 到 tmp_path(真 git repo)。git worktree add 要 base 是 git repo。
+    import subprocess as _sp
+    _sp.run(["git", "init", "-q"], cwd=str(tmp_path), check=True,
+            capture_output=True)
+    _sp.run(["git", "config", "user.email", "t@t"], cwd=str(tmp_path),
+            capture_output=True)
+    _sp.run(["git", "config", "user.name", "t"], cwd=str(tmp_path),
+            capture_output=True)
+    # 首个 commit(否则 git worktree add --detach HEAD 无 ref)
+    (tmp_path / "f").write_text("x")
+    _sp.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
+    _sp.run(["git", "commit", "-q", "-m", "init"], cwd=str(tmp_path),
+            capture_output=True)
+
+    monkeypatch.chdir(str(tmp_path))
+    with patch("harness.workflow_engine.worktree.subprocess.run", side_effect=fake_run):
+        result = run_async(workflow_run_handler(
+            nodes=[{"prompt": "pa", "isolation": "worktree"}],
+        ))
+
+    # run 成功 + agent.run 切到了 worktree path(非 tmp_path)
+    assert result["status"] == "success", f"isolation='worktree' run failed: {result}"
+    expected_label = "node"  # WorkflowNodeSpec.label 默认 'node'
+    expected_wt = (tmp_path / ".claude" / "worktrees" / result["output"]["run_id"]
+                   / expected_label)
+    assert agent.run_cwd == expected_wt.resolve(), \
+        f"isolation='worktree' 应切 cwd 到 wt {expected_wt}, got {agent.run_cwd}"
+    # _spawn_agent release 已清 _refs(agent.run 后);cwd 还原到 worktree _chdir 前的
+    # prev(= tmp_path,monkeypatch.chdir 设的 repo root)而非原 session cwd。
+    assert Path.cwd() == tmp_path, "_chdir 退出后应还原到 repo root (prev cwd)"
+
+
+def test_run_handler_aexit_releases_unreleased_worktree(tmp_path, monkeypatch):
+    """F6 __aexit__ 兜底:worktree 未 release(agent.run raise)时 async with 退出
+    清理 _refs,防泄漏残留。模拟 agent.run raise → release 在 finally 内仍调,
+    __aexit__ 兜底 noop(空 _refs);git worktree remove --force 容错。"""
+    from unittest.mock import patch
+
+    class _BoomAgent:
+        async def run(self, task_input, *, usage=None, usage_limits=None):
+            raise RuntimeError("agent boom")
+
+    monkeypatch.setattr(wf_mod, "build_native_agent", lambda **kw: _BoomAgent())
+    monkeypatch.setattr(v2_workflow, "_build_journal", lambda: None)
+
+    rm_calls = []
+
+    def fake_run(cmd, *a, **kw):
+        if "add" in cmd:
+            Path(cmd[4]).mkdir(parents=True, exist_ok=True)
+        if "remove" in cmd:
+            rm_calls.append(list(cmd))
+        return 0
+
+    import subprocess as _sp
+    _sp.run(["git", "init", "-q"], cwd=str(tmp_path), check=True,
+            capture_output=True)
+    _sp.run(["git", "config", "user.email", "t@t"], cwd=str(tmp_path),
+            capture_output=True)
+    _sp.run(["git", "config", "user.name", "t"], cwd=str(tmp_path),
+            capture_output=True)
+    (tmp_path / "f").write_text("x")
+    _sp.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
+    _sp.run(["git", "commit", "-q", "-m", "init"], cwd=str(tmp_path),
+            capture_output=True)
+
+    monkeypatch.chdir(str(tmp_path))
+    with patch("harness.workflow_engine.worktree.subprocess.run", side_effect=fake_run):
+        result = run_async(workflow_run_handler(
+            nodes=[{"prompt": "pa", "isolation": "worktree"}],
+        ))
+
+    # agent.run raise → engine R3 降级 status='error'(单 node 全失败 → overall error),
+    # 但 release 已在 finally 调(git worktree remove --force 记录 1 次)
+    assert result["status"] == "error"
+    assert len(rm_calls) >= 1, \
+        "F6: agent.run raise 时 release(finally)应调 git worktree remove --force"

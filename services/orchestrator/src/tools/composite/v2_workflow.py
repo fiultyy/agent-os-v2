@@ -21,16 +21,24 @@ ctx 构造(ponytail:P0 用模块级默认 session_id / agent_id_prefix):
 - ``concurrency`` / ``run_id``:透传 handler 参数 / 模块级 uuid4。
 - emitter / pitfail / tool_executor:从 ``src.services._state`` 注入(模块级
   单例 ``_engine_for``),避免每 tool call 重建 engine(emitter WS 连接是 module-level)。
+- F5 journal 通电:ctx.journal=_build_journal()(fire-and-forget 降级 None)。
+- F6 worktree 接通:ctx.worktree_manager=WorktreeManager(base=Path.cwd()),整 run
+  经 ``async with wt_manager`` 包(__aexit__ 兜底释放未 release 的 worktree,防泄漏)。
+  修前恒 None 致 engine.py:363 ``use_worktree`` 短路,isolation='worktree' silent no-op。
+  WorktreeManager.__init__ 零 I/O(仅置 base/_refs/sem=None),无 worktree node 时
+  __aexit__ noop(空 _refs),opt-in 隔离场景才 git worktree add/release。
 """
 
 from __future__ import annotations
 
 import logging
 import uuid
+from pathlib import Path
 from typing import Any
 
 from harness.workflow_engine import (
     LoopSpec,
+    WorktreeManager,
     WorkflowContext,
     WorkflowEngine,
     WorkflowNodesSpec,
@@ -220,19 +228,25 @@ async def workflow_run_handler(
     # ── ctx 构造(P0 默认 session_id / agent_id_prefix,见模块 docstring)──
     # F5:journal 通电(此前 ctx.journal 恒 None 致 W-P2-4 双写全 no-op,resume
     # 不可用)。_build_journal fire-and-forget 降级 None 时,engine 侧 no-op,run 不崩。
+    # F6 worktree 接通:isolation='worktree' 真生效(此前 ctx.worktree_manager 恒 None 致
+    # engine.py:363 use_worktree 短路)。base=Path.cwd()=repo root;async with 兜底释放
+    # 未 release 的 worktree(__aexit__ 遍历 _refs,防泄漏残留)。
     run_id = f"wf_{uuid.uuid4().hex[:12]}"
+    wt_manager = WorktreeManager(base=Path.cwd())
     ctx = WorkflowContext(
         session_id="workflow",
         agent_id_prefix="wf",
         run_id=run_id,
         concurrency=concurrency,
         journal=_build_journal(),
+        worktree_manager=wt_manager,
     )
 
-    # ── 薄桥调 engine.run ──
+    # ── 薄桥调 engine.run(async with wt_manager 兜底释放未 release 的 worktree)──
     engine = _build_engine()
     try:
-        result = await engine.run(spec, ctx)
+        async with wt_manager:
+            result = await engine.run(spec, ctx)
     except Exception as exc:  # noqa: BLE001 — R7:engine.run 异常也状态化不冒泡
         logger.warning(
             "workflow_run_handler: engine.run failed (run=%s): %s", run_id, exc,
@@ -283,20 +297,23 @@ async def workflow_loop_handler(
         logger.warning("workflow_loop_handler: invalid loop spec: %s", exc)
         return {"status": "error", "error": "invalid loop spec"}
 
-    # ── ctx 构造(复用 _build_journal F5 通电)──
+    # ── ctx 构造(复用 _build_journal F5 通电 + F6 worktree 接通)──
     run_id = f"wfl_{uuid.uuid4().hex[:12]}"
+    wt_manager = WorktreeManager(base=Path.cwd())
     ctx = WorkflowContext(
         session_id="workflow",
         agent_id_prefix="wf",
         run_id=run_id,
         concurrency=1,  # loop 是单 node 串行(finder 每轮一次),无 fan-out
         journal=_build_journal(),
+        worktree_manager=wt_manager,
     )
 
-    # ── 薄桥调 engine.loop ──
+    # ── 薄桥调 engine.loop(async with wt_manager 兜底释放未 release 的 worktree)──
     engine = _build_engine()
     try:
-        result = await engine.loop(spec, ctx)
+        async with wt_manager:
+            result = await engine.loop(spec, ctx)
     except Exception as exc:  # noqa: BLE001 — R7:engine.loop 异常状态化不冒泡
         logger.warning(
             "workflow_loop_handler: engine.loop failed (run=%s): %s", run_id, exc,
