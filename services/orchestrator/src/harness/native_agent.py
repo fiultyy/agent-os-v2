@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 from typing import Any, Sequence
 
+from pydantic import BaseModel
 from pydantic_ai import Agent
 from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.providers.anthropic import AnthropicProvider
@@ -67,6 +68,7 @@ def build_native_agent(
     model_settings: Any = None,
     model_name: str | None = None,
     mcp_servers: Sequence[dict[str, Any]] | None = None,
+    output_type: type[BaseModel] | None = None,
 ) -> Agent:
     """组装 native in-process Agent。
 
@@ -100,6 +102,11 @@ def build_native_agent(
     经 ``run_agent_turn`` / ``_build_native_session`` 透传)优先;全局 ``.mcp.json``
     fallback 留给后续(见 ``docs/mcp-config-template.md``)。
 
+    output_type(P2 schema-registry):可选 ``type[BaseModel]``,非 None 时透传
+    ``Agent(output_type=...)`` 走 pydantic-ai 结构化输出(``result.output`` 是 BaseModel
+    实例)。``None``(默认)→ str passthrough,现有 6 caller 不传零影响。workflow_engine
+    经 ``resolve_schema(node.schema_ref)`` 解析后透传。
+
     ADR(harness-adr.md 第一层「工程纪律」):默认 prepend EngineeringDisciplineCapability
     (CC 5 条 + context-mgmt,进 stable ``dynamic=False`` 段,模型每轮可见、可 cache)。
     覆盖边界:所有 ``build_native_agent`` 调用方(harness routes / 老 chat / graph 多 agent
@@ -119,6 +126,17 @@ def build_native_agent(
     if mcp_servers:
         ts.extend(build_mcp_toolsets(mcp_servers))
     model = build_model(model_name) if model_name else build_model()
+    # output_type=None 不能直传 Agent(pydantic-ai 视作显式空 schema 抛 UserError);
+    # 省略 → Agent 默认 str passthrough。非 None 才透传走结构化输出。
+    if output_type is not None:
+        return Agent(
+            model,
+            instructions=instructions,
+            capabilities=caps,
+            toolsets=ts,
+            model_settings=model_settings or {},
+            output_type=output_type,
+        )
     return Agent(
         model,
         instructions=instructions,

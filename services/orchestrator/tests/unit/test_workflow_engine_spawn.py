@@ -62,14 +62,17 @@ class _BuildRecorder:
         self.last_capabilities = None
         self.last_instructions = None
         self.last_model_name = None
+        self.last_output_type = None
         self.call_count = 0
 
     def __call__(self, instructions="", capabilities=None, toolsets=None,
-                 model_settings=None, model_name=None, mcp_servers=None):
+                 model_settings=None, model_name=None, mcp_servers=None,
+                 output_type=None):
         self.call_count += 1
         self.last_instructions = instructions
         self.last_capabilities = list(capabilities) if capabilities else []
         self.last_model_name = model_name
+        self.last_output_type = output_type
         return self.fake_agent
 
 
@@ -319,3 +322,94 @@ def test_spawn_agent_real_capability_construction_smoke():
     e = WorkflowEngine(emitter=_EmitterStub(), pitfail_registry="PF", tool_executor="TE")
     assert e.pitfail_registry == "PF"  # param↔field 对齐(major #1 真坑)
 
+
+# ─────────────────────────────────────────────────────────────────────
+# P2 schema-registry wiring:node.schema_ref → resolve_schema → output_type
+# ─────────────────────────────────────────────────────────────────────
+def _recorder_for(fake_agent):
+    rec = _BuildRecorder(fake_agent)
+    orig = wf_mod.build_native_agent
+    wf_mod.build_native_agent = rec
+    return rec, orig
+
+
+def test_spawn_agent_schema_ref_registered_passes_output_type():
+    """schema_ref 命中已注册 schema → build_native_agent 收到 output_type=MyModel,
+    NodeResult.output 是该 model 实例(structured output 透传)。"""
+    from pydantic import BaseModel
+
+    from harness.workflow_engine import _SCHEMA_REGISTRY, register_schema
+
+    class _MyModel(BaseModel):
+        answer: str
+        score: int
+
+    register_schema("my_schema", _MyModel)
+    try:
+        expected = _MyModel(answer="hi", score=7)
+        fake = _FakeAgent(output=expected)
+        rec, orig = _recorder_for(fake)
+        try:
+            e = WorkflowEngine()
+            node = WorkflowNodeSpec.model_validate(
+                {"prompt": "task", "schema_ref": "my_schema"}
+            )
+            result = run_async(e._spawn_agent(node, _ctx()))
+        finally:
+            wf_mod.build_native_agent = orig
+
+        assert rec.last_output_type is _MyModel
+        assert result.status == "success"
+        assert isinstance(result.output, _MyModel)
+        assert result.output.answer == "hi"
+        assert result.output.score == 7
+    finally:
+        _SCHEMA_REGISTRY.pop("my_schema", None)
+
+
+def test_spawn_agent_schema_ref_text_passthrough():
+    """schema_ref='text' → resolve_schema 返 None → output_type=None(str 默认)。"""
+    fake = _FakeAgent(output="plain str")
+    rec, orig = _recorder_for(fake)
+    try:
+        e = WorkflowEngine()
+        node = WorkflowNodeSpec.model_validate({"prompt": "task", "schema_ref": "text"})
+        result = run_async(e._spawn_agent(node, _ctx()))
+    finally:
+        wf_mod.build_native_agent = orig
+
+    assert rec.last_output_type is None
+    assert result.output == "plain str"
+
+
+def test_spawn_agent_schema_ref_none_passthrough():
+    """schema_ref=None(默认)→ output_type=None(str 默认)。"""
+    fake = _FakeAgent(output="plain")
+    rec, orig = _recorder_for(fake)
+    try:
+        e = WorkflowEngine()
+        node = WorkflowNodeSpec.model_validate({"prompt": "task"})
+        result = run_async(e._spawn_agent(node, _ctx()))
+    finally:
+        wf_mod.build_native_agent = orig
+
+    assert rec.last_output_type is None
+    assert result.output == "plain"
+
+
+def test_spawn_agent_schema_ref_unknown_degrades_to_str():
+    """schema_ref 未注册 → resolve_schema 返 None → 降级 str passthrough(不崩)。"""
+    fake = _FakeAgent(output="fallback")
+    rec, orig = _recorder_for(fake)
+    try:
+        e = WorkflowEngine()
+        node = WorkflowNodeSpec.model_validate(
+            {"prompt": "task", "schema_ref": "never_registered"}
+        )
+        result = run_async(e._spawn_agent(node, _ctx()))
+    finally:
+        wf_mod.build_native_agent = orig
+
+    assert rec.last_output_type is None
+    assert result.status == "success"
+    assert result.output == "fallback"

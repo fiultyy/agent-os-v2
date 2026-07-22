@@ -34,6 +34,7 @@ from .engine import (
     _usage_dict,
     register_schema,
     resolve_schema,
+    _SCHEMA_REGISTRY,
 )
 # W-P2-2:nesting 子模块(nested_run / WorkflowNestingError / _WF_CTX)。
 from .nesting import (
@@ -57,6 +58,7 @@ __all__ = [
     "register_schema",
     "resolve_schema",
     "build_native_agent",
+    "_SCHEMA_REGISTRY",
     # P1 specs
     "PipelineSpec",
     "LoopSpec",

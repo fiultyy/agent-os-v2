@@ -338,10 +338,14 @@ class WorkflowEngine:
 
         # R5:不传工程纪律 capability 实例 → 走默认 prepend 分支(native_agent.py:114)。
         # W-P2-1 包化:经包 namespace 解析(让 wf_mod.build_native_agent monkeypatch 生效)。
+        # P2 schema-registry:node.schema_ref → resolve_schema(未注册/None/'text'→None
+        # passthrough 走默认 str;已注册 → BaseModel 子类,Agent(output_type=...) 结构化输出)。
+        output_type = resolve_schema(node.schema_ref)
         agent = _resolve_build_native_agent()(
             instructions="",  # P0 子 agent 走 neutral system;node.prompt 是 task input
             capabilities=capabilities,
             model_name=node.model,
+            output_type=output_type,
         )
 
         # R6:空串占位(逐字照搬 agent_runner.py:116)。
@@ -969,17 +973,22 @@ def _fan_in(
 ) -> tuple[Any, list[str]]:
     """fan_in='list' → 原样 [nr.output for nr in ...](success/error 混杂)。
     fan_in='merge' → success-only dict 字段合并(later-wins;error 聚合 errors list)。
+
+    P2 schema-registry 适配:``output`` 是 ``BaseModel`` 实例(structured output 路径)
+    时按 ``model_dump()`` 字段合并;str / 非 dict output 跳过(不合非 dict 字段)。
     返 (merged_or_list, errors)。
     """
     errors = [nr.error for nr in node_results if nr.status != "success" and nr.error]
     if fan_in == "list":
         return [nr.output for nr in node_results], errors
-    # merge:只合 success node 的 dict output
+    # merge:只合 success node 的 dict output(BaseModel → model_dump 后合并)
     merged: dict = {}
     for nr in node_results:
         if nr.status != "success":
             continue
-        if isinstance(nr.output, dict):
+        if isinstance(nr.output, BaseModel):
+            merged.update(nr.output.model_dump())  # later-wins
+        elif isinstance(nr.output, dict):
             merged.update(nr.output)  # later-wins
     return merged, errors
 
