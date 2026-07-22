@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AO2 System Prompt 架构(用户视角)</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+  :root{
+    --bg:#f7f8fa; --card:#fff; --ink:#1f2328; --mut:#57606a; --acc:#0969da;
+    --acc2:#6f42c1; --line:#d0d7de; --code-bg:#1f2328; --code-ink:#e6edf3;
+    --green:#1a7f37; --red:#cf222e; --amber:#9a6700; --chip:#ddf4ff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    line-height:1.65;font-size:15.5px}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 24px 80px}
+  header.hero{background:linear-gradient(135deg,#0969da 0%,#6f42c1 100%);color:#fff;
+    padding:42px 24px 38px;margin-bottom:8px}
+  header.hero h1{margin:0 0 6px;font-size:27px;letter-spacing:.3px}
+  header.hero .sub{opacity:.92;font-size:15px}
+  header.hero .tldr{margin-top:18px;background:rgba(255,255,255,.12);
+    border-left:3px solid #fff;padding:12px 16px;border-radius:6px;font-size:14.5px}
+  nav.toc{background:var(--card);border:1px solid var(--line);border-radius:10px;
+    padding:14px 20px;margin:20px 0 28px;font-size:14px}
+  nav.toc b{color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.5px}
+  nav.toc a{color:var(--acc);text-decoration:none;margin-right:14px;display:inline-block;padding:2px 0}
+  nav.toc a:hover{text-decoration:underline}
+  h2{font-size:21px;margin:42px 0 6px;padding-bottom:8px;border-bottom:2px solid var(--line)}
+  h2 .n{color:var(--acc);font-variant-numeric:tabular-nums}
+  h3{font-size:17px;margin:26px 0 8px;color:var(--acc2)}
+  .lede{color:var(--mut);margin:0 0 18px;font-size:14.5px}
+  p{margin:10px 0}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;margin:16px 0}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px;
+    box-shadow:0 1px 2px rgba(0,0,0,.04);transition:box-shadow .15s}
+  .card:hover{box-shadow:0 3px 10px rgba(0,0,0,.08)}
+  .card h4{margin:0 0 8px;font-size:15.5px;color:var(--ink);display:flex;align-items:center;gap:8px}
+  .card h4 .ico{font-size:18px}
+  .card .meta{font-size:12.5px;color:var(--mut);margin:6px 0}
+  .card .meta b{color:var(--ink)}
+  .chip{display:inline-block;background:var(--chip);color:var(--acc);padding:1px 8px;border-radius:10px;
+    font-size:11.5px;font-weight:600;margin:0 4px 2px 0}
+  .chip.green{background:#dafbe1;color:var(--green)}
+  .chip.red{background:#ffebe9;color:var(--red)}
+  .chip.amber{background:#fff8c5;color:var(--amber)}
+  .chip.purple{background:#fbefff;color:var(--acc2)}
+  code{background:#eff1f3;padding:1.5px 6px;border-radius:4px;font-size:13px;
+    font-family:"SF Mono",Consolas,Menlo,monospace}
+  pre{background:var(--code-bg);color:var(--code-ink);padding:16px 18px;border-radius:8px;
+    overflow-x:auto;font-size:13px;line-height:1.6;font-family:"SF Mono",Consolas,Menlo,monospace}
+  pre .c{color:#8b949e}
+  pre .k{color:#ff7b72}
+  pre .s{color:#a5d6ff}
+  pre .h{color:#7ee787}
+  table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13.5px;background:var(--card);
+    border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  th{background:#eaeef2;text-align:left;padding:9px 12px;font-weight:600;border-bottom:1px solid var(--line)}
+  td{padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  .mermaid{background:var(--card);text-align:center;padding:18px;border:1px solid var(--line);
+    border-radius:10px;margin:14px 0}
+  details{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 16px;margin:10px 0}
+  details summary{cursor:pointer;font-weight:600;color:var(--acc)}
+  details[open] summary{margin-bottom:10px}
+  .callout{border-left:4px solid var(--acc);background:var(--chip);padding:12px 16px;
+    border-radius:0 8px 8px 0;margin:14px 0;font-size:14px}
+  .callout.warn{border-color:var(--amber);background:#fff8c5}
+  .callout.bad{border-color:var(--red);background:#ffebe9}
+  .callout.good{border-color:var(--green);background:#dafbe1}
+  .kv{display:grid;grid-template-columns:130px 1fr;gap:4px 12px;font-size:13.5px;margin:8px 0}
+  .kv dt{color:var(--mut);font-weight:600}
+  .kv dd{margin:0}
+  footer{margin-top:50px;padding-top:18px;border-top:1px solid var(--line);color:var(--mut);font-size:13px}
+  .src{font-family:monospace;font-size:12px;color:var(--acc);background:var(--chip);
+    padding:1px 6px;border-radius:4px;white-space:nowrap}
+  .why{background:#fffbe6;border:1px dashed var(--amber);border-radius:8px;padding:10px 14px;
+    margin:10px 0;font-size:13.5px}
+  .why b{color:var(--amber)}
+</style>
+</head>
+<body>
+<header class="hero">
+  <h1>🧠 AO2 System Prompt 架构</h1>
+  <div class="sub">agent-os-v2 · 单组装器一处真相源 · claw × Claude Code 取长补短 · 用户视角解读</div>
+  <div class="tldr">
+    <b>一句话:</b>AO2 的 system prompt 不是一坨字符串,而是<b>单组装器</b>(<code>build_native_agent</code>)一处真相源 →
+    <b>stable prefix</b>(工程纪律 CC 5 条 + 用户指令 profile + 调用方 instructions)+ <b>tools 独立字段</b>(v2_ tools + MCP + workflow 工具)+ <b>workflow 编码级编排内核</b>。
+    stable 进 cache、dynamic 裸传、跨运行时收敛、红线 grep 机械守恒。
+  </div>
+</header>
+
+<div class="wrap">
+
+<nav class="toc">
+  <b>目录</b><br>
+  <a href="#why">① 为什么这样设计</a>
+  <a href="#assembler">② 单组装器</a>
+  <a href="#layers">③ 三层结构</a>
+  <a href="#dims">④ 第一层 8 维度</a>
+  <a href="#discipline">⑤ 工程纪律详解</a>
+  <a href="#profile">⑥ 用户指令 Profile</a>
+  <a href="#tools">⑦ Tools 独立字段</a>
+  <a href="#cache">⑧ Cache 落地</a>
+  <a href="#workflow">⑨ Workflow 编排内核</a>
+  <a href="#full">⑩ 实际全貌</a>
+  <a href="#redlines">⑪ 红线总表</a>
+  <a href="#runtimes">⑫ 多运行时</a>
+</nav>
+
+<!-- ① 为什么 -->
+<h2><span class="n">①</span> 为什么是这样:claw × Claude Code 取长补短</h2>
+<p class="lede">底层事实:<b>claw(openclaw)与 Claude Code 对 LLM 是同一种 context 架构</b> —— system + tools[] + messages[] 三件套。差异只在 prompt 组装、cache 策略、内置 tools。AO2 不重发明架构,而是厘清两家强项并取长补短。</p>
+
+<div class="grid">
+  <div class="card">
+    <h4><span class="ico">🦅</span>从 claw 抄</h4>
+    <div class="meta">
+      <span class="chip">boundary 语义层</span>
+      <span class="chip">用户指令进 stable prefix</span>
+      <span class="chip">固定文件顺序(字节稳定)</span>
+      <span class="chip">per-file 截断</span>
+      <span class="chip">组装 hash 缓存</span>
+      <span class="chip">断点反向预算</span>
+    </div>
+    <p style="font-size:13px;color:var(--mut);margin:8px 0 0">强项:prompt 组装工程化、cache 友好、跨轮稳定。</p>
+  </div>
+  <div class="card">
+    <h4><span class="ico">🤖</span>从 Claude Code 抄</h4>
+    <div class="meta">
+      <span class="chip green">5 条软件工程纪律(模型锚定)</span>
+      <span class="chip green">易变首块单独不缓存</span>
+      <span class="chip green">context-mgmt「够信息就动」</span>
+    </div>
+    <p style="font-size:13px;color:var(--mut);margin:8px 0 0">强项:纪律段锚定模型行为,实测 RL 背书。</p>
+  </div>
+  <div class="card">
+    <h4><span class="ico">❌</span>两边都否决</h4>
+    <div class="meta">
+      <span class="chip red">CC messages 末块注入(失 cache)</span>
+      <span class="chip red">CC tools=0 前缀覆盖(不可移植)</span>
+      <span class="chip red">claw 71K 字膨胀(纪律被稀释)</span>
+      <span class="chip red">80 字 micro-manifest(无 RL 背书)</span>
+      <span class="chip red">"不可覆盖"修辞(位置不是隔离)</span>
+    </div>
+    <p style="font-size:13px;color:var(--mut);margin:8px 0 0">弱项:不被采纳,带理由记录。</p>
+  </div>
+</div>
+<div class="why"><b>用户视角:</b> AO2 不是从零造,而是站在两个成熟 harness 肩膀上挑最好的部分。每个决策都有"抄谁 / 否决谁 / 为什么"的出处。</div>
+
+<!-- ② 单组装器 -->
+<h2><span class="n">②</span> 单组装器:一处真相源</h2>
+<p>所有 system prompt 组装收敛到<b>一个入口</b> <code>build_native_agent()</code>。改一处,所有运行时同步生效 —— 避免"主 loop 一套、子代理一套、CLI 又一套"的漂移。</p>
+
+<div class="mermaid">
+flowchart LR
+  subgraph 入口["6 个调用入口(全收敛)"]
+    direction LR
+    R["/h harness routes"]:::entry
+    C["/v1 老 chat"]:::entry
+    G["graph 多agent<br/>agent_factory"]:::entry
+    S["smoke 自测"]:::entry
+    A["run_agent_turn<br/>子代理"]:::entry
+    K["check_r2_cache"]:::entry
+  end
+  B["build_native_agent(...)<br/>单组装器"]:::core
+  AG["pydantic-ai Agent<br/>model + instructions<br/>+ capabilities + toolsets<br/>+ model_settings"]:::out
+  R --> B
+  C --> B
+  G --> B
+  S --> B
+  A --> B
+  K --> B
+  B --> AG
+  classDef core fill:#0969da,color:#fff,stroke:#0969da
+  classDef entry fill:#ddf4ff,color:#0969da
+  classDef out fill:#fbefff,color:#6f42c1
+</div>
+
+<dl class="kv">
+  <dt>文件</dt><dd><span class="src">services/orchestrator/src/harness/native_agent.py:63</span></dd>
+  <dt>签名</dt><dd><code>build_native_agent(instructions, capabilities, toolsets, model_settings, model_name, mcp_servers)</code></dd>
+  <dt>默认能力</dt><dd>自动 prepend <code>EngineeringDisciplineCapability</code>(CC 5 条,除非调用方显式传实例去重)</dd>
+  <dt>model</dt><dd>智谱 glm via anthropic 兼容通道 <code>/api/anthropic</code>(<code>AnthropicModel</code>)</dd>
+</dl>
+
+<!-- ③ 三层结构 -->
+<h2><span class="n">③</span> system prompt 三层结构</h2>
+<p class="lede">分层不是为了好看,是为了<b>cache</b>:稳定的前缀字节不变 → 跨轮 cache 命中;变化的尾部裸传不缓存。</p>
+
+<div class="mermaid">
+flowchart TB
+  subgraph STABLE["🟢 STABLE PREFIX(字节稳定,进 cache)"]
+    direction TB
+    I["调用方 instructions<br/>(harness/chat/graph/子代理 各自的 system)"]:::s
+    D["## Engineering Discipline<br/>CC 5 条 + context-mgmt(默认 prepend)"]:::s
+    P["Profile 用户指令<br/>SOUL/AGENTS/MEMORY/TOOLS/BOOTSTRAP"]:::s
+  end
+  BND["⚡ BOUNDARY<br/>cache_control 断点<br/>(stable 末打 cache_control)"]:::b
+  subgraph DYN["🔴 DYNAMIC SUFFIX(每轮变,裸传不 cache)"]
+    direction TB
+    T["tools[](v2_ tools + MCP + workflow)"]:::d
+    M["messages[](本轮对话历史)"]:::d
+  end
+  STABLE --> BND --> DYN
+  classDef s fill:#dafbe1,color:#1a7f37
+  classDef b fill:#fff8c5,color:#9a6700
+  classDef d fill:#ffebe9,color:#cf222e
+</div>
+
+<div class="callout">provider-agnostic:<b>boundary 是语义层</b>,不是文本标记。stable 末打 <code>cache_control</code>,dynamic 裸传。对各 provider(anthropic / 智谱 glm / openai)都适用 —— 智谱走 anthropic 兼容协议同样吃 cache_control(R2 实测命中)。</div>
+
+<!-- ④ 8 维度 -->
+<h2><span class="n">④</span> 第一层:System Prompt 结构(8 维度全景)</h2>
+<p class="lede">AO2 system prompt 优化的 8 个维度。每维度都有明确决策、抄自哪家、否决什么、落在哪个文件。</p>
+
+<div class="grid">
+
+  <div class="card">
+    <h4><span class="ico">🔧</span>1. 组装</h4>
+    <p><b>单组装器</b>,一处真相源;多入口(主 loop/子代理/CLI)全收敛到 <code>build_native_agent</code>。</p>
+    <div class="meta">
+      <span class="chip purple">抄 claw</span>
+      <span class="chip red">否决 CC 式 system/tools/messages 各自拼</span>
+    </div>
+    <div class="meta"><span class="src">native_agent.py:63</span></div>
+  </div>
+
+  <div class="card">
+    <h4><span class="ico">🥪</span>2. 分层</h4>
+    <p><code>stable prefix</code> + <code>boundary 标记</code> + <code>dynamic suffix</code>。stable 可 cache,dynamic 裸传。</p>
+    <div class="meta">
+      <span class="chip purple">抄 claw</span>
+      <span class="chip red">否决无分层单块</span>
+    </div>
+    <div class="meta"><span class="src">capabilities/_stable_cache.py</span></div>
+  </div>
+
+  <div class="card">
+    <h4><span class="ico">⚡</span>3. cache 策略</h4>
+    <p>boundary = provider-agnostic 语义层。stable 末 <code>cache_control</code>,dynamic 裸传;断点反向预算(上限 4)。</p>
+    <div class="meta">
+      <span class="chip purple">claw 语义层 + CC 易变首块不缓存</span>
+      <span class="chip red">否决 CacheStrategy 抽象 / fast path / tools=0 覆盖</span>
+    </div>
+    <div class="meta"><span class="src">routes.py:384</span> ModelSettings</div>
+  </div>
+
+  <div class="card">
+    <h4><span class="ico">📐</span>4. 工程纪律</h4>
+    <p>CC 5 条 + context-mgmt 作 <b>stable 基线纪律段</b>,默认 prepend,子代理也覆盖。</p>
+    <div class="meta">
+      <span class="chip green">抄 CC(内容)+ claw(机制)</span>
+      <span class="chip red">否决 micro-manifest / "不可覆盖"修辞</span>
+    </div>
+    <div class="meta"><span class="src">engineering_discipline_capability.py</span></div>
+  </div>
+
+  <div class="card">
+    <h4><span class="ico">📁</span>5. 用户指令位置</h4>
+    <p>注入 <b>stable prefix</b>(跨轮 cache 命中)。固定文件名 + 固定顺序 + per-file 截断(保前段核心)。</p>
+    <div class="meta">
+      <span class="chip purple">抄 claw</span>
+      <span class="chip red">否决 CC messages 末块注入 / 砍 8 文件→1</span>
+    </div>
+    <div class="meta"><span class="src">agent/profile_registry.py</span></div>
+  </div>
+
+  <div class="card">
+    <h4><span class="ico">🛠️</span>6. tools</h4>
+    <p><b>独立字段</b>(tools[]),不进 system 字符串。ToolBridge 每 tool 强 schema,v2_ prefix 隔离命名空间。</p>
+    <div class="meta">
+      <span class="chip">共识</span>
+      <span class="chip red">否决 channel 条件注入(破坏轨迹回放)</span>
+    </div>
+    <div class="meta"><span class="src">tool_bridge_capability.py:83</span></div>
+  </div>
+
+  <div class="card">
+    <h4><span class="ico">🛤️</span>7. 多运行时路径</h4>
+    <p>嵌入式 loop / 子代理(minimal)共享同一组装器;ACP 类后端(claw/CC)让渡 prompt 层。</p>
+    <div class="meta">
+      <span class="chip purple">抄 claw(共享组装器)</span>
+      <span class="chip amber">承认"主组装器 + 让渡",不假装单一真相源</span>
+    </div>
+    <div class="meta"><span class="src">harness/{claude,openclaw}.py</span></div>
+  </div>
+
+  <div class="card">
+    <h4><span class="ico">🚀</span>8. 组装优化</h4>
+    <p>进程内 <b>stable prefix hash 缓存</b>(sha256 key,LRU 32),免每轮重拼。</p>
+    <div class="meta">
+      <span class="chip purple">抄 claw</span>
+    </div>
+    <div class="meta"><span class="src">capabilities/_stable_cache.py</span></div>
+  </div>
+
+</div>
+
+<!-- ⑤ 工程纪律详解 -->
+<h2><span class="n">⑤</span> 工程纪律详解:CC 5 条 + context-mgmt</h2>
+<p class="lede">这是 AO2 system prompt 里<b>所有 provider 都受益</b>的部分(即使无 cache)。抄自 Claude Code system prompt,作 stable 基线段默认注入。</p>
+
+<pre><span class="c">## Engineering Discipline</span>
+
+<span class="c">Baseline rules for every turn in this harness:</span>
+
+<span class="k">1.</span> <span class="h">Tools over shell.</span> Prefer the purpose-built tool when one fits;
+   fall back to shell only when no tool covers the task.
+<span class="k">2.</span> <span class="h">Parallelize independent calls.</span> Make independent tool calls in the
+   same response instead of sequentially.
+<span class="k">3.</span> <span class="h">Reference code precisely.</span> Cite `file_path:line_number` so locations
+   are verifiable and clickable.
+<span class="k">4.</span> <span class="h">Match surrounding style.</span> Naming, idiom, comment density — code that
+   reads like its neighbors.
+<span class="k">5.</span> <span class="h">Report faithfully.</span> If a check failed, show the output; if a step
+   was skipped, say so. No false success, no hedging.
+
+<span class="c">When you have enough information to act, act. Don't re-derive established</span>
+<span class="c">facts or narrate options you won't pursue; if weighing a choice, give a</span>
+<span class="c">recommendation rather than an exhaustive survey.</span></pre>
+
+<div class="grid">
+  <div class="card"><h4>① Tools over shell</h4><p style="font-size:13px">优先用专门工具(grep/read/edit),shell 是兜底。让模型行为可预测、可审计。</p></div>
+  <div class="card"><h4>② Parallelize</h4><p style="font-size:13px">独立调用同一轮并发,而非串行。省 wall-clock。</p></div>
+  <div class="card"><h4>③ file_path:line_number</h4><p style="font-size:13px">引用代码精确到行,可点击可核实。杜绝"大概在那个文件"。</p></div>
+  <div class="card"><h4>④ Match style</h4><p style="font-size:13px">新代码读起来像邻居(命名/习惯/注释密度)。融入而非突兀。</p></div>
+  <div class="card"><h4>⑤ Report faithfully</h4><p style="font-size:13px">测试失败就报失败输出,跳步就说跳步。不假成功不绕弯。</p></div>
+  <div class="card"><h4>+ context-mgmt</h4><p style="font-size:13px">够信息就动,不重新推导已定事实,权衡时给推荐而非穷举。</p></div>
+</div>
+
+<details>
+<summary>A/B 旋钮(glm 等非 Claude 模型有效性无 ab,留 opt-out)</summary>
+<p style="font-size:13.5px">CC 5 条对 Claude 实测有效,但 glm(中文)无对照。AO2 提供 3 个旋钮做 A/B 后再固化:</p>
+<ul style="font-size:13.5px">
+  <li><code>EngineeringDisciplineCapability(enabled=False)</code> — 关段</li>
+  <li><code>EngineeringDisciplineCapability(discipline_text="自定义")</code> — 换文本</li>
+  <li>env <code>AO2_DISCIPLINE_DISABLED=1</code> — 进程级关(组装层读一次)</li>
+</ul>
+<div class="callout warn"><b>位置诚实标注:</b> 纪律段是 <code>position=outermost</code>(capability-tier 内居首),<b>非</b> instructions 绝对首段。pydantic-ai 永远把 base instructions 放最前。不宣称"绝对首段"。</div>
+</details>
+
+<!-- ⑥ Profile -->
+<h2><span class="n">⑥</span> 用户指令 Profile:5 文件分层 + 截断</h2>
+<p class="lede">用户的 workspace 文件注入 stable prefix,跨轮 cache 命中。固定文件名 + 固定顺序 + per-file 截断(保前段核心不被裁)。</p>
+
+<table>
+<thead><tr><th>文件</th><th>Layer</th><th>source</th><th>priority</th><th>角色(用户视角)</th></tr></thead>
+<tbody>
+<tr><td><code>SOUL.md</code></td><td><span class="chip purple">L0</span></td><td>soul_md</td><td>100</td><td>🧬 agent 灵魂 / 最核心身份(最高优先级,绝不能裁)</td></tr>
+<tr><td><code>AGENTS.md</code></td><td><span class="chip purple">L1+L2</span></td><td>_split</td><td>—</td><td>👤 Agent Identity(L1)+ 📋 Operational Guidelines(L2),按 header 拆双段</td></tr>
+<tr><td><code>MEMORY.md</code></td><td><span class="chip purple">L3</span></td><td>memory_md</td><td>70</td><td>💾 跨会话记忆索引(一行一条 hook)</td></tr>
+<tr><td><code>TOOLS.md</code></td><td><span class="chip purple">L4</span></td><td>tools_md</td><td>60</td><td>🔧 工具使用约定</td></tr>
+<tr><td><code>BOOTSTRAP.md</code></td><td><span class="chip purple">L4</span></td><td>bootstrap_md</td><td>55</td><td>🚀 启动/引导指令</td></tr>
+</tbody>
+</table>
+
+<div class="callout good"><b>per-file 截断:</b> 每文件读后按 <code>AO2_PROFILE_FILE_MAX_CHARS</code>(默认 8192)截断,保前段核心。单文件膨胀不会挤掉别的文件(否决"砍 8 文件→1"正是为此)。<span class="src">profile_registry.py:32</span></div>
+
+<div class="why"><b>为什么不学 CC 注入 messages 末块?</b> CC 把用户指令放 messages 末块 → 只有末块 cache → 每轮变。AO2 放 stable prefix → 整段跨轮命中 → 省 token 省 latency。这是结构性优势。</div>
+
+<!-- ⑥b Capability 接线 + Skill 注入 -->
+<h2><span class="n">⑥b</span> Capability 接线全景 + Skill 注入</h2>
+<p class="lede">pydantic-ai 2.0 把每个能力捆成 <code>AbstractCapability</code>(<b>tools + instructions + hooks + settings 四件套</b>),经 <code>build_native_agent(capabilities=...)</code> 挂到 native Agent。<b>主路径 /h 注入 8 类</b>(routes.py:343-389)。</p>
+
+<h3>Capability 注入链(主路径 /h)</h3>
+<div class="mermaid">
+flowchart TB
+  subgraph CAPS["/h routes.py:343-389 caps 组装"]
+    direction TB
+    C1["ObserveCapability<br/>(tick 闭环)"]:::cap
+    C2["MemoryWriterCapability<br/>(写侧 自动沉淀)"]:::cap
+    C3["ToolBridgeCapability<br/>(v2_ 工具桥)"]:::cap
+    C4["GuardrailCapability<br/>(安全护栏)"]:::cap
+    C5["*skill_caps<br/>(N 个 SkillCapability)"]:::cap
+    C6["MemoryCapability 条件<br/>(recall 读侧)"]:::cap
+    C7["make_profile_capabilities<br/>(AGENTS L1+L2)"]:::cap
+  end
+  C8["EngineeringDisciplineCapability<br/>(build_native_agent 默认 prepend)"]:::def
+  BNA["build_native_agent(capabilities=caps)"]:::core
+  AGENT["pydantic-ai Agent<br/>in-process run 四件套全生效"]:::out
+  CAPS --> BNA
+  C8 --> BNA
+  BNA --> AGENT
+  classDef cap fill:#ddf4ff,color:#0969da
+  classDef def fill:#dafbe1,color:#1a7f37
+  classDef core fill:#0969da,color:#fff
+  classDef out fill:#fbefff,color:#6f42c1
+</div>
+
+<table>
+<thead><tr><th>Capability</th><th>四件套</th><th>file:line</th></tr></thead>
+<tbody>
+<tr><td><code>ObserveCapability</code></td><td>hook(tick_started/completed)</td><td>routes.py:347</td></tr>
+<tr><td><code>MemoryWriterCapability</code></td><td>hook(写侧,fan-in 落库)</td><td>routes.py:350</td></tr>
+<tr><td><code>ToolBridgeCapability</code></td><td>tools(v2_ 强 schema)</td><td>routes.py:359</td></tr>
+<tr><td><code>GuardrailCapability</code></td><td>hook(双向护栏)</td><td>routes.py:363</td></tr>
+<tr><td><code>SkillCapability</code> ×N</td><td><b>instructions</b>(SKILL.md 正文)+ hook(env 校验)</td><td>routes.py:364</td></tr>
+<tr><td><code>MemoryCapability</code></td><td>tools(experience/kg,条件)</td><td>routes.py:368</td></tr>
+<tr><td><code>ProfileCapability</code></td><td>instructions(L1+L2)</td><td>routes.py:373</td></tr>
+<tr><td><code>EngineeringDisciplineCapability</code></td><td>instructions(CC 5 条)</td><td>native_agent.py:114</td></tr>
+</tbody>
+</table>
+
+<h3>Skill 注入链(SKILL.md → system prompt)</h3>
+<div class="mermaid">
+flowchart LR
+  S["src/skills/*/SKILL.md<br/>+ skill.yaml"]:::file
+  L["SkillLoader.scan()<br/>(skill_loader.py)"]:::load
+  M["make_skill_capabilities()<br/>(skill_capability.py:64)<br/>每个 skill 一个 SkillCapability"]:::make
+  CAPS2["caps 列表<br/>*skill_caps"]:::cap
+  BNA2["build_native_agent"]:::core
+  GI["get_instructions()<br/>返 SKILL.md 正文(去 frontmatter)<br/>→ system prompt stable 段"]:::out
+  HK["before_tool_execute<br/>requires.env 校验<br/>(缺 → ModelRetry)"]:::out
+  S --> L --> M --> CAPS2 --> BNA2 --> GI
+  BNA2 --> HK
+  classDef file fill:#fff8c5,color:#9a6700
+  classDef load fill:#ddf4ff,color:#0969da
+  classDef make fill:#dafbe1,color:#1a7f37
+  classDef cap fill:#ddf4ff,color:#0969da
+  classDef core fill:#0969da,color:#fff
+  classDef out fill:#fbefff,color:#6f42c1
+</div>
+
+<div class="callout good"><b>✅ defer 已修(渐进按需加载):</b> <code>defer_loading=True</code>。旧 docstring 称"glm-5.2 不调 load meta-tool → eager"是<b>误判</b> —— pydantic-ai 官方 defer(<code>defer_loading=True</code>+<code>id</code> → 自动 <code>DeferredCapabilityLoader</code>:catalog 索引进 dynamic prefix + 显式 <code>load_capability</code> tool)在 glm 下<b>实测工作</b>(2026-07-22 e2e:强/弱 prompt 都调 load_capability + 端到端 SKILL.md→scan→load→正文 CHERRY-77)。索引是 stable dynamic instruction,跨轮 byte-identical 保 cache prefix。</div>
+
+<div class="callout good"><b>✅ ao2-architecture 内置 defer skill(agent self-aware):</b> <code>services/skills/ao2-architecture/SKILL.md</code> 作 builtin,内容 = 你正在看的这份架构说明(组装器/三层/8 capability/调整旋钮/红线)。agent 初始可 <code>load_capability('ao2-architecture')</code> 了解自身技能与调整方式(e2e:glm load 后正确答出 <code>build_native_agent</code> 组装器)。</div>
+
+<!-- ⑦ tools -->
+<h2><span class="n">⑦</span> Tools 独立字段:v2_ 前缀 + MCP + workflow</h2>
+<p>tools 是独立字段(tools[]),<b>不进 system 字符串</b>。模型直接从 tools[] 读清单。</p>
+
+<div class="grid">
+  <div class="card">
+    <h4>ToolBridge(v2 内置工具)</h4>
+    <p style="font-size:13px">把 v2 ToolRegistry 每个 tool 注册为 pydantic-ai <code>Tool</code>(强 schema,<code>Tool.from_schema</code>),<code>.prefixed("v2")</code> 命名空间隔离(防跨 toolset 重名)。</p>
+    <div class="meta"><span class="src">tool_bridge_capability.py:68-83</span></div>
+    <div class="meta">模型见 <code>v2_file_read</code> / <code>v2_workflow_run</code> / ...</div>
+  </div>
+  <div class="card">
+    <h4>MCP(外部 server)</h4>
+    <p style="font-size:13px">三传输:<code>stdio</code>(本地进程)/ <code>sse</code> / <code>streamable_http</code>(远程)。每 server <code>.prefixed(name)</code> 防重名。配置兼容 Claude Desktop 格式 + 本仓库 list 格式。</p>
+    <div class="meta"><span class="src">harness/mcp_config.py</span></div>
+  </div>
+  <div class="card">
+    <h4>workflow(编码级编排)</h4>
+    <p style="font-size:13px"><code>v2_workflow_run</code>(fan-out)+ <code>v2_workflow_loop</code>(loop-until-dry)。让 agent 在 turn 内发起多子 agent 编排。详见 <a href="#workflow">⑨</a>。</p>
+    <div class="meta"><span class="src">tools/composite/v2_workflow.py</span></div>
+  </div>
+</div>
+<div class="callout bad"><b>否决 channel 条件注入:</b> 不按运行时(channel)动态加减工具。原因:破坏轨迹回放(同一 prompt 不同 channel 工具集不同 → 无法复现)。</div>
+
+<!-- ⑧ cache -->
+<h2><span class="n">⑧</span> Cache 落地:boundary 语义层</h2>
+<p>stable prefix 末打 <code>cache_control</code>,跨轮命中。实际配置:</p>
+<pre>model_settings = {
+  <span class="s">"anthropic_cache_instructions"</span>: <span class="s">"5m"</span>,      <span class="c"># stable prefix(instructions + 纪律 + profile)缓存 5 分钟</span>
+  <span class="s">"anthropic_cache_tool_definitions"</span>: <span class="s">"5m"</span>, <span class="c"># tools[] 定义缓存</span>
+}
+<span class="c"># 落地:routes.py:384(R2 实测 cache_read 命中)</span></pre>
+
+<div class="callout warn"><b>现实校准:</b> 智谱 glm 走 anthropic 兼容协议 <code>/api/anthropic</code>,<code>cache_control</code> 同理生效(R2 实测 <code>cache_read</code> 命中,非 <code>cacheRead=0</code> 旧误判)。对纯无 cache provider,整套 cache 优化收益为零 —— <b>但工程纪律段对所有 provider 都受益</b>。这是为何纪律段是交付重点。</div>
+
+<!-- ⑨ workflow -->
+<h2><span class="n">⑨</span> 第二层:Workflow 编码级编排内核</h2>
+<p class="lede">让 AO2 native agent 在单个 turn 内 fan-out 多子 agent、loop-until-dry、嵌套、跨进程 resume。是 ADR 第二层,W 全集(P0+P1+P2)已落地。</p>
+
+<div class="mermaid">
+flowchart TB
+  AGENT["主路径 native Agent<br/>ToolBridge → v2_workflow_run / v2_workflow_loop"]:::entry
+  BRIDGE["v2_workflow.py<br/>薄桥(handler + JSON schema)"]:::bridge
+  subgraph ENG["workflow_engine/ 包(内核)"]
+    direction TB
+    E["engine.py<br/>run / pipeline / loop / budget / schema"]:::core
+    J["journal.py<br/>SQLite 事件溯源 + resume"]:::p2
+    N["nesting.py<br/>ContextVar 一层嵌套"]:::p2
+    W["worktree.py<br/>git worktree 隔离"]:::p2
+  end
+  AGENT --> BRIDGE --> E
+  E --> J
+  E --> N
+  E --> W
+  E --> BNA["build_native_agent<br/>(agent() 原语底座)"]::::out
+  classDef entry fill:#ddf4ff,color:#0969da
+  classDef bridge fill:#fff8c5,color:#9a6700
+  classDef core fill:#0969da,color:#fff
+  classDef p2 fill:#fbefff,color:#6f42c1
+  classDef out fill:#dafbe1,color:#1a7f37
+</div>
+
+<table>
+<thead><tr><th>原语</th><th>Tier</th><th>复用</th><th>语义</th></tr></thead>
+<tbody>
+<tr><td><code>agent()</code></td><td><span class="chip">P0</span></td><td>build_native_agent</td><td>子 agent 执行单元(经唯一 chokepoint)</td></tr>
+<tr><td><code>parallel()</code></td><td><span class="chip">P0</span></td><td>asyncio.gather(return_exceptions=True)</td><td>并发 fan-out(BARRIER,单失败不 abort sibling)</td></tr>
+<tr><td><code>schema</code></td><td><span class="chip">P0</span></td><td>pydantic-ai Agent(output_type=)</td><td>强制结构化输出</td></tr>
+<tr><td><code>pipeline()</code></td><td><span class="chip amber">P1</span></td><td>asyncio.Queue</td><td>无 barrier 阶段链(wall-clock=单 item 链)</td></tr>
+<tr><td><code>budget</code></td><td><span class="chip amber">P1</span></td><td>RunUsage + UsageLimits</td><td>token 硬上限(防 runaway)</td></tr>
+<tr><td><code>loop()</code></td><td><span class="chip amber">P1</span></td><td>while + seen + dry counter</td><td>loop-until-dry(连续 2 轮无新结果 break)</td></tr>
+<tr><td>嵌套 workflow</td><td><span class="chip purple">P2</span></td><td>ContextVar</td><td>一层限制(共享父 budget/concurrency/abort)</td></tr>
+<tr><td>worktree 隔离</td><td><span class="chip purple">P2</span></td><td>git worktree + os.chdir</td><td>per-agent opt-in(并发改文件冲突时)</td></tr>
+<tr><td>journal resume</td><td><span class="chip purple">P2</span></td><td>SQLite WAL + 事件溯源</td><td>跨进程 resume(完成 agent 走 cache 不重跑)</td></tr>
+</tbody>
+</table>
+<div class="meta"><b>工具暴露:</b> <code>v2_workflow_run</code>(fan-out N 子 agent)+ <code>v2_workflow_loop</code>(finder loop)。register 名无 v2_ 前缀,ToolBridge 自动加成。<span class="src">docs/specs/workflow-kernel-design.md</span></div>
+
+<!-- ⑩ 实际全貌 -->
+<h2><span class="n">⑩</span> system prompt 实际拼出来长什么样</h2>
+<p class="lede">一个 /h 主 turn 实际发给智谱 glm 的 system prompt 结构(简化):</p>
+<pre><span class="c"># ===== STABLE PREFIX(跨轮 cache 命中)=====</span>
+
+<span class="c"># ① 调用方 instructions(/h harness 的 system)</span>
+You are an agent-os-v2 harness native agent. ...
+
+<span class="c"># ② Engineering Discipline(默认 prepend,CC 5 条)</span>
+## Engineering Discipline
+1. Tools over shell. ...
+2. Parallelize independent calls. ...
+3. Reference code precisely. Cite `file_path:line_number` ...
+4. Match surrounding style. ...
+5. Report faithfully. ...
+When you have enough information to act, act. ...
+
+<span class="c"># ③ Profile 用户指令(per-file 截断,fixed order)</span>
+<span class="c"># [SOUL.md → L0] [AGENTS.md → L1+L2] [MEMORY.md → L3] [TOOLS.md → L4] [BOOTSTRAP.md → L4]</span>
+
+<span class="c"># ===== ⚡ BOUNDARY:cache_control 打断点 =====</span>
+
+<span class="c"># ===== DYNAMIC SUFFIX(每轮变,裸传)=====</span>
+<span class="c"># tools[]: v2_file_read, v2_workflow_run, v2_workflow_loop, mcp_*, ...</span>
+<span class="c"># messages[]: 本轮对话历史</span></pre>
+<div class="callout">stable prefix 三段(instructions + 纪律 + profile)字节稳定 → 跨轮 cache 命中 → 省 token。dynamic(tools/messages)每轮变,裸传不缓存。这是分层的全部价值。</div>
+
+<!-- ⑪ 红线 -->
+<h2><span class="n">⑪</span> 红线总表(机械可验)</h2>
+<p class="lede">这些红线用 <b>grep 命令机械守恒</b> —— 不信声明,CI 可验。</p>
+<table>
+<thead><tr><th>红线</th><th>要求</th><th>验证(grep 必须空)</th></tr></thead>
+<tbody>
+<tr><td><b>R1</b></td><td>子 agent 零 memory 落库(fan-in 单点)</td><td><code>grep 'memory_event_bus|_trigger_ingest|memory_service' workflow_engine/</code></td></tr>
+<tr><td><b>R2</b></td><td>不碰主路径线性图</td><td><code>grep '_build_execution_graph|_node_llm|trigger_turn' workflow_engine/</code></td></tr>
+<tr><td><b>R5</b></td><td>不实例化 EngineeringDiscipline(走默认 prepend)</td><td><code>grep 'EngineeringDisciplineCapability' workflow_engine/</code></td></tr>
+<tr><td><b>R3</b></td><td>emit fire-and-forget,异常不 abort 主路径</td><td>create_task 不 await + try/except 双兜底</td></tr>
+<tr><td><b>R4</b></td><td>observe EventType enum 冻结,workflow 事件 wire tick_completed</td><td>真实语义塞 data.flow_event</td></tr>
+<tr><td><b>R6</b></td><td>子 agent input 非空(空串占位)</td><td>智谱/Anthropic 通道 400 code 1214</td></tr>
+<tr><td><b>R7</b></td><td>pitfall 语义鸿沟(execute 返 status 非 raise)</td><td>gather return_exceptions 显式转 NodeResult</td></tr>
+</tbody>
+</table>
+
+<!-- ⑫ 多运行时 -->
+<h2><span class="n">⑫</span> 多运行时路径</h2>
+<div class="grid">
+  <div class="card">
+    <h4>嵌入式 loop(主路径)</h4>
+    <p style="font-size:13px">/h/agent-os-v2 → native Agent(智谱 glm)→ <code>build_native_agent</code> 组装。<b>2.0 Capability/defer/event-stream 全生效</b>(这是 native 路径才有的)。</p>
+  </div>
+  <div class="card">
+    <h4>子代理(minimal)</h4>
+    <p style="font-size:13px"><code>run_agent_turn</code> → <code>build_native_agent</code>(收敛同一组装器)。临时态,<b>不挂 MemoryWriterCapability</b>(R1,记忆 fan-in 后单点落库)。</p>
+  </div>
+  <div class="card">
+    <h4>ACP 类后端(让渡)</h4>
+    <p style="font-size:13px">claw(openclaw)/ claude-code 是黑盒子进程/远程 gateway。2.0 三件套管不到,<b>让渡 prompt 层</b>,纪律靠 cwd/AGENTS.md 文件协议。承认"主组装器 + 让渡",不假装单一真相源。</p>
+  </div>
+</div>
+
+<footer>
+  <b>来源</b>:
+  <code>~/harness-adr.md</code>(第一层 8 维度 + 第二层 ADR)·
+  <code>docs/specs/workflow-kernel-design.md</code>(workflow 内核 design)·
+  <code>services/orchestrator/src/harness/</code>(实现,每节标 file:line)·
+  <code>~/ca-compare-cc-vs-claw.html</code>(claw×CC 七节对照取证)<br>
+  <b>生成</b>:2026-07-22 · worktree <code>harness-prompt-opt</code> · 第一层 11 commit + 第二层 19 commit
+</footer>
+
+</div>
+<script>
+  mermaid.initialize({startOnLoad:true,theme:'default',flowchart:{curve:'basis',useMaxWidth:true}});
+</script>
+</body>
+</html>

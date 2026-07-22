@@ -1,12 +1,18 @@
 """P6 SkillCapability / make_skill_capabilities — SKILL.md → defer-able Capability.
 
 ADR: docs/adr/pydantic-ai-v2-adoption.md。把 v2 SkillLoader 扫出的 SkillEntry 包成
-2.0 Capability(defer_loading=False, eager):SKILL.md 正文常驻 system prompt。
-原 defer 设计(模型按需 load_skill 注入正文)在 glm-5.2 实测失效(glm 不调 load meta-tool),
-eager 让正文直接可见。当前 skill 数少(1 个 ~222 tokens),R2 cache 缓解;skill 增多时重评 defer。
+2.0 Capability(**defer_loading=True**,渐进按需加载)。
 
-替代 skill_executor 的 Stage1(catalog)/Stage2(按需读全文)自管逻辑:2.0 框架的
-load_capability 即 Stage2(载入 body + 激活),catalog 即 Stage1。
+**glm defer 实测通过(2026-07-22 e2e 3 场景验证)**:旧 docstring 称"glm-5.2 不调 load
+meta-tool → eager 降级"是误判 —— pydantic-ai 官方 defer(`defer_loading=True` + `id` →
+框架自动注入 `DeferredCapabilityLoader`:catalog 索引进 dynamic prefix + 显式
+`load_capability` tool)在 glm 下**强/弱 prompt 都调 load_capability,正文按需载入**。
+故改回 defer(渐进按需),正文不常驻 system,省 token + 保 cache prefix 稳定(catalog
+是 stable dynamic instruction,跨轮 byte-identical)。
+
+机制:catalog(Stage1 = 索引 prefix,模型可见 skill 名+描述)→ 模型调
+`load_capability(id)`(Stage2 = 载入 SKILL.md 正文 instructions + 激活)。替代
+skill_executor 的自管 Stage1/Stage2 逻辑。
 
 requires.env 校验接 before_tool_execute(缺 env → ModelRetry 弹回模型);requires.tools
 校验需知当前 toolset,P6 暂只校验 env。
@@ -44,7 +50,7 @@ class SkillCapability(AbstractCapability[None]):
 
     id: str = "skill"
     description: str = ""
-    defer_loading: bool = False  # eager(glm-5.2 不调 load_skill meta-tool)
+    defer_loading: bool = True  # 渐进按需加载(glm defer e2e 验证通过,见模块 docstring)
     skill: Any = None  # SkillEntry
 
     def get_instructions(self) -> str:
@@ -70,7 +76,7 @@ def make_skill_capabilities(loader: SkillLoader) -> list[SkillCapability]:
         caps.append(SkillCapability(
             id=entry.name,
             description=entry.description or f"skill {entry.name}",
-            defer_loading=False,
+            defer_loading=True,
             skill=entry,
         ))
     return caps

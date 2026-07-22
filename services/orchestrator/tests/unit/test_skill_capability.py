@@ -1,4 +1,4 @@
-"""P6 SkillCapability 单测:eager(defer_loading=False)+ body(去 frontmatter)+ requires.env 校验 + factory。
+"""P6 SkillCapability 单测:defer(defer_loading=True,glm 调 load_capability e2e 验证)+ body(去 frontmatter)+ requires.env 校验 + factory。
 
 用 tmp_path 写 SKILL.md + SkillLoader(user_dir=tmp_path)scan + make_skill_capabilities。
 """
@@ -36,7 +36,7 @@ def test_skill_capability_body_strips_frontmatter(tmp_path) -> None:
     cap = make_skill_capabilities(_loader(tmp_path))[0]
     assert cap.id == "my-skill"
     assert cap.description == "test skill"
-    assert cap.defer_loading is False  # eager:glm-5.2 不调 load_skill,正文常驻 prompt
+    assert cap.defer_loading is True  # defer:glm 调 load_capability(e2e 3 场景验证),渐进按需加载
     body = cap.get_instructions()
     assert "Do the thing step by step." in body
     assert "name: my-skill" not in body          # frontmatter 已去
