@@ -8,9 +8,10 @@ code_write - 写入代码文件
 """
 
 import shutil
-from pathlib import Path
 from typing import Dict, Any, Optional
 from datetime import datetime
+
+from src.tools.cwd_scope import _resolve
 
 
 def code_write(
@@ -60,7 +61,7 @@ def code_write(
     }
     
     try:
-        p = Path(path).expanduser().resolve()
+        p = _resolve(path)
         
         # 确保父目录存在
         p.parent.mkdir(parents=True, exist_ok=True)

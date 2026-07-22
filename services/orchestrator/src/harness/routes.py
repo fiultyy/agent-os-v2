@@ -310,19 +310,25 @@ def _get_memory_tools() -> tuple | None:
 
 async def _build_native_session(
     session_id: str, messages: list | None = None,
+    agent_id: str | None = None,
 ) -> Dict[str, Any]:
     """agent-os-v2 native in-process session:pydantic-ai Agent + ObserveEmitter + 消息历史。
 
     ADR pydantic-ai-v2-adoption P8:native turn 走 /h/agent-os-v2。capabilities 注入
     ObserveCapability(真 emitter→observe)+ GuardrailCapability(护 native tool)。
-    memory(P3 recall,defer_loading)+ skill 已通电;profile YAGNI(native 用扁平
-    instructions=system_prompt,分层 ProfileRegistry 未装配,ADR)。
+    memory(P3 recall,defer_loading)+ skill 已通电。
+
+    P1(决策 3/§8):取 spec(agent_id → AgentRegistry,缺失/registry None 降级合成 native
+    fallback)+ per-agent profile(make_profile_capabilities 读 spec.id)+ spec.skills 过滤
+    + cwd_scope(resolve_cwd_scope,repo root 相对)+ MultiCwdScopeCapability(动态 cwd 清单
+    + set_active_cwd 工具)。返 dict 含 cwd_scope/spec_id 供 turn 前恢复 _active_cwd(§7.3)。
     """
     from .native_agent import HARNESS_TYPE, build_native_agent
     from .capabilities import (
         GuardrailCapability,
         MemoryCapability,
         MemoryWriterCapability,
+        MultiCwdScopeCapability,
         ObserveCapability,
         ToolBridgeCapability,
         make_profile_capabilities,
@@ -332,6 +338,35 @@ async def _build_native_session(
     from src.services import _state
     from src.skills.skill_loader import SkillLoader
     from src.tools.guardrail import Guardrail
+    from src.agent.agent_spec import normalize_agent_id
+
+    registry = _state.agent_registry
+    # spec 解析:agent_id 命中 → 其 spec;否则 default;registry None → 合成 native fallback。
+    # normalize_agent_id 幂等(spec.id 已 normalized,再过一次安全)。
+    if registry is not None and agent_id:
+        spec = registry.get(agent_id) or registry.default()
+    elif registry is not None:
+        spec = registry.default()
+    else:
+        from src.agent.agent_spec import AgentSpec
+        spec = AgentSpec(id="native", default=True, cwds=[])
+    spec_id = normalize_agent_id(spec.id)
+    session_key = _key("agent-os-v2", session_id)
+    # cwd_scope:registry 有 → resolve_cwd_scope(repo root 相对);None → 单 workspace 退化。
+    repo_root = os.getenv("AO2_REPO_ROOT", os.getcwd())
+    if registry is not None:
+        cwd_scope = registry.resolve_cwd_scope(spec, repo_root=repo_root)
+        default_cwd = next(
+            (e.path_abs for e in cwd_scope if e.default), cwd_scope[0].path_abs
+        )
+    else:
+        # 无 registry:workspace 派生退化(同 resolve_cwd_scope 空 cwds 分支语义)
+        ws_abs = os.path.join(
+            os.path.expanduser(os.getenv("AO2_STATE_DIR", "~/.agent-os")),
+            "agents", spec_id, "workspace")
+        from src.agent.agent_registry import ResolvedCwd
+        cwd_scope = [ResolvedCwd(path_abs=ws_abs, label=spec_id, default=True)]
+        default_cwd = ws_abs
 
     harness_id = f"native_{session_id[:8]}"
     emitter = ObserveEmitter(HARNESS_TYPE, harness_id=harness_id, session_id=session_id)
@@ -340,9 +375,15 @@ async def _build_native_session(
     except Exception:
         logger.warning("native emitter connect failed (%s)", harness_id)
     try:
-        skill_caps = make_skill_capabilities(SkillLoader())  # 扫 SKILL.md(defer 披露)
+        all_skills = make_skill_capabilities(SkillLoader())  # 扫 SKILL.md(defer 披露)
     except Exception:
-        skill_caps = []  # 扫描失败不阻塞 native(P6 孤岛通电 best-effort)
+        all_skills = []  # 扫描失败不阻塞 native(P6 孤岛通电 best-effort)
+    # §8.3:按 spec.skills 过滤(空 spec.skills → 全保留,向后兼容;native seed=[ao2-architecture])
+    if spec.skills:
+        wanted = set(spec.skills)
+        skill_caps = [c for c in all_skills if c.id in wanted]
+    else:
+        skill_caps = all_skills
     caps = [
         ObserveCapability(emitter=emitter, harness_id=harness_id, session_id=session_id),
         # P5 MemoryWriter(写侧,自动沉淀):每轮 tool_result + 用户轮结束四件套。
@@ -368,17 +409,21 @@ async def _build_native_session(
     mt = _get_memory_tools()
     if mt is not None:
         caps.append(MemoryCapability(experience_tool=mt[0], kg_tool=mt[1]))
-    # ADR-1: native profile 分层 capa 化(AGENTS.md L1+L2 → system prompt)。
+    # ADR-1 + P1(决策 3): per-agent profile(读 spec.id 各自 workspace 身份文件)。
     # _state.profile_registry None(env/启动失败降级)→ make_profile_capabilities 返 []。
     caps.extend(make_profile_capabilities(
-        _state.profile_registry.get("native") if _state.profile_registry else None
+        _state.profile_registry.get(spec_id) if _state.profile_registry else None
     ))
+    # P1 §6:动态层多 cwd 清单 + set_active_cwd 工具(append 末尾,清单靠近 user)。
+    caps.append(MultiCwdScopeCapability(cwd_scope=cwd_scope, session_key=session_key))
     # ADR-2: R2 cache_control 透传(照搬 check_r2_cache 已验证字段;智谱 /api/anthropic
     # instructions + tool defs 5m TTL 命中)。5B:全局 .mcp.json fallback(AO2_MCP_CONFIG
     # 或 cwd .mcp.json)→ MCPToolset 进 toolsets;agent 配置 mcp_servers 优先的语义在
     # run_agent_turn(子代理)侧,session 侧只有全局源。
     from .mcp_config import load_global_mcp_servers
     global_mcp = load_global_mcp_servers()
+    # §8.2:spec.model 透传(None → build_native_agent 读 ANTHROPIC_MODEL env)。
+    # effort 属 model_settings,本期不接(spec.effort → model_settings 留 P2)。
     agent = build_native_agent(
         capabilities=caps,
         model_settings={
@@ -386,11 +431,16 @@ async def _build_native_session(
             "anthropic_cache_tool_definitions": "5m",
         },
         mcp_servers=global_mcp or None,
+        model_name=spec.model or None,
     )
+    # §7.3:session 创建即初始化 active_cwd(default cwd),供首 turn 相对路径基准。
+    from src.tools.cwd_scope import set_session_active_cwd
+    set_session_active_cwd(session_key, default_cwd)
     return {
         "agent": agent, "emitter": emitter, "messages": messages or [],
         "session_id": session_id, "harness_type": "agent-os-v2",
         "native_sid": session_id,
+        "cwd_scope": cwd_scope, "spec_id": spec_id,
     }
 
 
@@ -406,8 +456,14 @@ async def create_session(
         key = _key(harness_type, session_id)
         if key in _sessions:
             return {"session_id": session_id, "type": harness_type, "status": "exists"}
-        _sessions[key] = await _build_native_session(session_id)
-        _store.create(session_id, "agent-os-v2", native_sid=session_id)
+        # §8.1:传 agent_id → _build_native_session 取对应 spec(per-agent profile/skills/cwd)。
+        rec = await _build_native_session(session_id, agent_id=req.agent_id)
+        _sessions[key] = rec
+        # §D6:spec.id 落库 agent_id 列(restore/续聊按此重建同 spec session)。
+        _store.create(
+            session_id, "agent-os-v2",
+            native_sid=session_id, agent_id=rec["spec_id"],
+        )
         return {"session_id": session_id, "type": harness_type, "status": "created"}
     if harness_type == "claw":
         # claw gateway session_key 必须是 claw 格式 agent:<agent>:<conv>;或che session_id = claw key
@@ -502,12 +558,29 @@ async def trigger_turn(
         rec = _sessions.get(_key(harness_type, session_id))
         if rec is None:
             # store 有但内存无(restore 孤儿)→ 重建 native agent + 回填持久化 message_history
-            if _store.get(harness_type, session_id) is None:
+            row = _store.get(harness_type, session_id)
+            if row is None:
                 raise HTTPException(status_code=404, detail="session not found")
+            # §8.5:从 store 取 agent_id 重建对应 spec 的 session(续聊保留 per-agent 配置)
             rec = await _build_native_session(
-                session_id, messages=_load_native_messages(session_id)
+                session_id, messages=_load_native_messages(session_id),
+                agent_id=row.get("agent_id"),
             )
             _sessions[_key(harness_type, session_id)] = rec
+        # §7.3:turn 前从 session 持久恢复 _active_cwd(跨 run/跨 turn 保活激活 cwd)。
+        from pathlib import Path
+        from src.tools.cwd_scope import _active_cwd, get_session_active_cwd
+        session_key = _key(harness_type, session_id)
+        stored = get_session_active_cwd(session_key)
+        if stored:
+            _active_cwd.set(Path(stored))
+        else:
+            # fallback:spec 的 default cwd(rec['cwd_scope'] 首个 default 项)
+            scope = rec.get("cwd_scope") or []
+            default_cwd = next((e.path_abs for e in scope if e.default),
+                               scope[0].path_abs if scope else None)
+            if default_cwd:
+                _active_cwd.set(Path(default_cwd))
         # in-process Agent run:ObserveCapability 自动推 observe,guardrail 自动护
         result = await rec["agent"].run(req.message, message_history=rec["messages"])
         rec["messages"] = result.all_messages()
@@ -824,9 +897,11 @@ async def restore_all_sessions() -> Dict[str, int]:
                 }
                 restored["claw"] += 1
             elif ht == "agent-os-v2":
-                # native in-process agent 重建:从 store 回填 message_history(重启续聊)
+                # native in-process agent 重建:从 store 取 agent_id 重建对应 spec +
+                # 回填 message_history(重启续聊保留 per-agent 配置,§8.5)
                 _sessions[key] = await _build_native_session(
-                    ext, messages=_load_native_messages(ext)
+                    ext, messages=_load_native_messages(ext),
+                    agent_id=r.get("agent_id"),
                 )
                 restored["agent-os-v2"] += 1
         except Exception as e:

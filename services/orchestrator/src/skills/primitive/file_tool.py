@@ -14,6 +14,8 @@ import shutil
 from pathlib import Path
 from typing import Dict, Any, Optional
 
+from src.tools.cwd_scope import _resolve
+
 logger = logging.getLogger(__name__)
 
 
@@ -48,7 +50,9 @@ def _safe_path(path: str, base: Optional[str] = None) -> Path:
         except ValueError:
             raise ValueError(f"Path '{path}' is outside base directory '{base}'")
     else:
-        p = raw.resolve()
+        # 相对路径基准从进程 cwd → _active_cwd(P1 多 cwd);绝对路径经 _resolve 直通等价原行为。
+        # _resolve 再 expanduser 幂等(raw 已 expanduser)。
+        p = _resolve(str(raw))
 
     return p
 

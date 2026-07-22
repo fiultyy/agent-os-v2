@@ -71,6 +71,10 @@ class OrchSessionStore:
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.executescript(SESSION_SCHEMA)
         self._ensure_column("messages", "TEXT")
+        # P1(agent 持久化 §8.1):agent_id 在 SESSION_SCHEMA DDL(新 db 即有),
+        # 但 CREATE TABLE IF NOT EXISTS 不改现有表——老 orch_sessions.db 需 ALTER
+        # migration,否则 create() INSERT agent_id 会 OperationalError(no such column)。
+        self._ensure_column("agent_id", "TEXT")
         self._conn.commit()
 
     def _ensure_column(self, column: str, ddl: str) -> None:

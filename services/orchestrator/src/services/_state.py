@@ -68,10 +68,14 @@ tool_executor: Any = None
 communication_bus: Any = None
 concurrency_controller: Any = None
 
-# ── Profile (ADR-1) ────────────────────────────────────────────────
-# ProfileRegistry:engine.py 启动装配(load_from_files 加载 AGENTS.md L1+L2)。
-# routes._build_native_session 经 make_profile_capabilities 注入 native Agent。
-# None = 未装配(启动失败降级),make_profile_capabilities(None) 返 [](None-safe)。
+# ── Profile (ADR-1) + AgentRegistry (P1 决策 3) ──────────────────────
+# AgentRegistry:engine.py 启动 load agents.yaml(缺失/坏降级单 native)。下游
+# (routes/T6+)经此取 per-agent spec + resolve_workspace/resolve_cwd_scope。
+# ProfileRegistry:engine.py 启动 load_all(registry) per-agent 加载各 workspace
+# 身份文件。routes._build_native_session 经 make_profile_capabilities 注入 native
+# Agent 为 LayerCapability。None = 未装配(启动失败降级),make_profile_capabilities
+# (None) 返 [](None-safe)。
+agent_registry: Any = None
 profile_registry: Any = None
 
 # NOT-WIRED (deferred): ConditionalSpawner 实例装配块已从 engine.py 移除 ——

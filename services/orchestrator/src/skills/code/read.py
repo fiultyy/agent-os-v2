@@ -7,8 +7,9 @@ code_read - 读取代码文件
 - 语法错误检测（基础）
 """
 
-from pathlib import Path
 from typing import Dict, Any, Optional
+
+from src.tools.cwd_scope import _resolve
 
 
 # 代码语言映射
@@ -91,7 +92,7 @@ def code_read(
     }
     
     try:
-        p = Path(path).expanduser().resolve()
+        p = _resolve(path)
         
         if not p.exists():
             result["error"] = f"File not found: {path}"

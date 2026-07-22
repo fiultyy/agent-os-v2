@@ -310,17 +310,32 @@ class TestMetaAgentNodeRealExecute:
         assert node._completion_event.is_set()
 
     @pytest.mark.asyncio
-    async def test_real_turn_no_memory_calls_r1(self):
+    async def test_real_turn_no_memory_calls_r1(self, monkeypatch):
         """R1 red-line: run_agent_turn must perform ZERO memory calls.
 
         3B 后 run_agent_turn 经 build_native_agent + agent.run(不再直调 llm.chat)。
         patch build_model(TestModel)免真 API;断言 result.output 经组装器返回,且
-        memory_event_bus/memory_service/write_queue 全程 None(R1 守恒:子代理不沉淀记忆)。
+        memory_event_bus.emit 零调用(R1 守恒:子代理不沉淀记忆)。
+
+        注:_state.memory_event_bus 在 engine.py:278 模块级装配(任何 import src.engine
+        后非 None,如 test_engine_workflow_register),故不能 assert ``is None``(全套
+        必 fail)。改用 monkeypatch 注入 emit spy + 断言 not awaited —— 更准确验证 R1
+        (子代理不触发 memory 副作用),且隔离 engine 装配污染(根治预存全套 flaky)。
         """
+        from unittest.mock import AsyncMock, MagicMock
+
         from pydantic_ai.models.test import TestModel
 
         from src.services import _state
         from src.agent.meta.agent_runner import run_agent_turn
+
+        # R1 真验证:memory_event_bus.emit 不被调用。monkeypatch 隔离 engine 模块级
+        # 装配的 bus(全套 import engine 后非 None),注入 emit spy。
+        bus_spy = MagicMock()
+        bus_spy.emit = AsyncMock()
+        monkeypatch.setattr(_state, "memory_event_bus", bus_spy)
+        monkeypatch.setattr(_state, "memory_service", None)
+        monkeypatch.setattr(_state, "write_queue", None)
 
         _state.agents["sub-r1"] = {
             "id": "sub-r1",
@@ -336,10 +351,8 @@ class TestMetaAgentNodeRealExecute:
                 out = await run_agent_turn("sub-r1", "hello", "sess")
             assert out == "resp-from-subagent"
 
-            # R1: ZERO memory side-effect entry points wired(子代理不沉淀记忆)。
-            assert _state.memory_event_bus is None
-            assert _state.memory_service is None
-            assert _state.write_queue is None
+            # R1: ZERO memory emit(子代理不沉淀记忆)。
+            bus_spy.emit.assert_not_awaited()
         finally:
             _state.agents.pop("sub-r1", None)
 

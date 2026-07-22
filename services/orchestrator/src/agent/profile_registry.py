@@ -4,18 +4,26 @@ Supports:
 - In-memory registration of AgentBaseProfile instances
 - Loading profiles from workspace files (SOUL.md → L0, AGENTS.md → L1+L2)
 - Profile switching at runtime
+- load_all(AgentRegistry): per-agent profile 加载(决策 3)
 
-NOT-WIRED (deferred): profile 系统零生产接线 —— ProfileRegistry 仅被
-test_profile.py 实例化,list_profiles/load_from_files/save_to_file/load_from_file
-等 API 仅 test 引用。architect.py/taskspec.py 有 profile_registry 引用但未实例化。
-保留作为 defer 子系统待接线决策。
+WIRED:engine.py 启动 load AgentRegistry → ProfileRegistry.load_all(registry)
+per-agent 加载各 workspace 身份文件;routes._build_native_session 经
+make_profile_capabilities 注入 native Agent 为 LayerCapability。失败降级 None
+(不阻塞启动)。
 """
+from __future__ import annotations
+
 import json
 import logging
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+from .agent_spec import normalize_agent_id
 from .profile import AgentBaseProfile, LayerProfile
+
+if TYPE_CHECKING:  # 单向引用(agent_registry 不 import profile_registry,无环)
+    from .agent_registry import AgentRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +150,26 @@ class ProfileRegistry:
                              basename, agent_id, len(content), layer)
 
         return profile
+
+    def load_all(self, registry: "AgentRegistry") -> None:
+        """Per-agent profile 加载(决策 3 / 设计文档 §6.1)。
+
+        遍历 registry 所有 spec,对每个调 load_from_files(normalize_agent_id(spec.id),
+        resolve_workspace(spec)) 并 register。workspace 文件缺失由 load_from_files 静默
+        skip(既有行为);单个 agent 加载异常 warning 后跳过,不 raise(不阻塞整体启动)。
+        """
+        for spec_id, spec in registry._agents.items():
+            try:
+                workspace_path = str(registry.resolve_workspace(spec))
+                profile = self.load_from_files(
+                    agent_id=normalize_agent_id(spec_id), workspace_path=workspace_path,
+                )
+                self.register(profile)
+            except Exception:
+                logger.warning(
+                    "load_all: skip agent %s (workspace/profile load failed)",
+                    spec_id, exc_info=True,
+                )
 
     def _read_truncated(self, path: Path) -> str:
         """read + strip + per-file 截断保前段(ADR L26),超额追加 [truncated] 标记。"""

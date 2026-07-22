@@ -317,6 +317,9 @@ def _mock_native_rec(response: str = "ok") -> dict:
     return {
         "agent": agent, "emitter": emitter, "messages": [],
         "session_id": "s", "harness_type": "agent-os-v2", "native_sid": "s",
+        # P1(T8):_build_native_session 返 dict 新增 cwd_scope/spec_id(create_session
+        # 落库 agent_id + trigger_turn turn 前恢复 _active_cwd 依赖)。mock 给 default 值。
+        "cwd_scope": [], "spec_id": "native",
     }
 
 
@@ -518,4 +521,225 @@ def test_emit_native_usage_none_emitter_noop():
     from src.harness.routes import _emit_native_usage
     # usage=None + emitter=None:getattr 兜底 + 早返,不崩
     asyncio.run(_emit_native_usage(None, "s1", None))
+
+
+# ── P1 T8:per-agent spec / cwd_scope / MultiCwdScopeCapability 注入 / active_cwd ──
+
+def _wire_lightweight_native(monkeypatch, agent_registry=None):
+    """禁重依赖(emitter 连接 / skill 扫描 / mcp / memory / tool_executor),让
+    _build_native_session 真 build 一 Agent 验 caps/cwd_scope 注入。"""
+    import src.services._state as _st
+    from src.harness import routes as r
+
+    async def _noop(*a, **kw):
+        return None
+    monkeypatch.setattr("src.harness.emit.ObserveEmitter.connect", _noop)
+    monkeypatch.setattr(r, "_get_memory_tools", lambda: None)
+    # skill 扫描返空(避免读真 SKILL.md + 让 spec.skills 过滤测不被全量污染)
+    monkeypatch.setattr("src.harness.capabilities.skill_capability.make_skill_capabilities",
+                        lambda loader: [])
+    monkeypatch.setattr("src.harness.routes.load_global_mcp_servers",
+                        lambda: None, raising=False)
+    # ToolBridge executor/pitfail None-safe(返空 toolset,no-op)
+    monkeypatch.setattr(_st, "tool_executor", None)
+    monkeypatch.setattr(_st, "pitfail_registry", None)
+    monkeypatch.setattr(_st, "memory_event_bus", None)
+    monkeypatch.setattr(_st, "knowledge_graph", None)
+    monkeypatch.setattr(_st, "profile_registry", None)
+    monkeypatch.setattr(_st, "agent_registry", agent_registry)
+
+
+def test_build_native_session_per_agent_cwd_scope_and_capability(monkeypatch, tmp_path):
+    """两 agent(native 多 cwd + 另一单 cwd)→ _build_native_session 返的 cwd_scope
+    对应各自 spec;agent caps 含 MultiCwdScopeCapability 且指令含各自 cwd 清单。"""
+    import asyncio
+    from src.agent.agent_registry import AgentRegistry
+    from src.agent.agent_spec import AgentSpec, CwdEntry
+    from src.harness import routes as r
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    spec_native = AgentSpec(
+        id="native", default=True,
+        cwds=[
+            CwdEntry(path="services/orchestrator", label="orch", default=True),
+            CwdEntry(path="apps/tui-rs", label="tui"),
+        ],
+    )
+    spec_single = AgentSpec(id="other", cwds=[CwdEntry(path="apps/x", label="x", default=True)])
+    reg = AgentRegistry()
+    reg._agents = {"native": spec_native, "other": spec_single}
+    reg._default_id = "native"
+    monkeypatch.setenv("AO2_REPO_ROOT", str(repo))
+    _wire_lightweight_native(monkeypatch, agent_registry=reg)
+
+    rec_native = asyncio.run(r._build_native_session("snat", agent_id="native"))
+    rec_other = asyncio.run(r._build_native_session("soth", agent_id="other"))
+
+    # cwd_scope 长度 + label 对应各自 spec
+    labels_native = [e.label for e in rec_native["cwd_scope"]]
+    labels_other = [e.label for e in rec_other["cwd_scope"]]
+    assert labels_native == ["orch", "tui"], labels_native
+    assert labels_other == ["x"], labels_other
+    assert rec_native["spec_id"] == "native"
+    assert rec_other["spec_id"] == "other"
+
+    # agent caps 含 MultiCwdScopeCapability,指令含各自 cwd 清单(绝对路径)
+    instr_native = "\n".join(rec_native["agent"]._cap_instructions)
+    instr_other = "\n".join(rec_other["agent"]._cap_instructions)
+    assert "Multi-CWD Scope" in instr_native
+    assert str((repo / "services/orchestrator").resolve()) in instr_native
+    assert str((repo / "apps/tui-rs").resolve()) in instr_native
+    assert str((repo / "apps/x").resolve()) in instr_other
+    assert str((repo / "services/orchestrator").resolve()) not in instr_other
+
+
+def test_build_native_session_skills_filtered_by_spec(monkeypatch, tmp_path):
+    """spec.skills 非空 → 只保留匹配的 SkillCapability;空 → 全保留(向后兼容)。"""
+    import asyncio
+    from src.agent.agent_registry import AgentRegistry
+    from src.agent.agent_spec import AgentSpec
+    from src.harness import routes as r
+    from src.harness.capabilities.skill_capability import SkillCapability
+
+    repo = tmp_path / "repo"; repo.mkdir()
+    monkeypatch.setenv("AO2_REPO_ROOT", str(repo))
+    spec = AgentSpec(id="native", default=True, cwds=[], skills=["ao2-architecture", "absent-skill"])
+
+    # 真 make_skill_capabilities 产 3 个(含 ao2-architecture + 两个无关)
+    def fake_make(loader):
+        return [
+            SkillCapability(id="ao2-architecture", skill=None),
+            SkillCapability(id="other-a", skill=None),
+            SkillCapability(id="other-b", skill=None),
+        ]
+    monkeypatch.setattr("src.harness.capabilities.skill_capability.make_skill_capabilities",
+                        fake_make)
+    _wire_lightweight_native(monkeypatch, agent_registry=None)
+    # 手装 registry(skill 过滤分支走 spec.skills)
+    import src.services._state as _st
+    reg = AgentRegistry(); reg._agents = {"native": spec}; reg._default_id = "native"
+    monkeypatch.setattr(_st, "agent_registry", reg)
+
+    # capture caps passed to build_native_agent(Agent 不暴露 capabilities list)
+    captured_caps = {}
+    import src.harness.routes as _rr
+    real_build = _rr.build_native_agent if hasattr(_rr, "build_native_agent") else None
+
+    def spy_build(*a, **kw):
+        captured_caps["caps"] = list(kw.get("capabilities") or [])
+        from unittest.mock import MagicMock
+        ag = MagicMock()
+        ag._cap_instructions = []
+        ag.model_settings = kw.get("model_settings") or {}
+        return ag
+    # build_native_agent 在 _build_native_session 内惰性 import,patch 模块属性
+    import src.harness.native_agent as _na
+    monkeypatch.setattr(_na, "build_native_agent", spy_build)
+
+    rec = asyncio.run(r._build_native_session("sfilt", agent_id="native"))
+    skill_ids = sorted(c.id for c in captured_caps.get("caps", [])
+                       if isinstance(c, SkillCapability))
+    # spec.skills=[ao2-architecture, absent-skill] → 只保留命中的 ao2-architecture
+    assert skill_ids == ["ao2-architecture"], skill_ids
+
+
+def test_resolve_relative_uses_active_cwd_absolute_passthrough(monkeypatch, tmp_path):
+    """set_active_cwd(label) 后相对路径 _resolve 走新 cwd;绝对路径直通不变。"""
+    from pathlib import Path
+    from src.tools.cwd_scope import _resolve, _active_cwd, set_session_active_cwd, _SESSION_CWD
+
+    cwd_a = tmp_path / "a"; cwd_a.mkdir()
+    cwd_b = tmp_path / "b"; cwd_b.mkdir()
+    (cwd_a / "rel.txt").write_text("FROM-A")
+    (cwd_b / "rel.txt").write_text("FROM-B")
+    abs_file = cwd_a / "abs.txt"; abs_file.write_text("ABS")
+
+    # 清 session 持久 dict 避免跨测污染
+    _SESSION_CWD.pop("test:rel", None)
+    # 激活 cwd_a → 相对 rel.txt 读到 FROM-A
+    _active_cwd.set(Path(str(cwd_a)))
+    assert _resolve("rel.txt").read_text() == "FROM-A"
+    # 切到 cwd_b → 相对 rel.txt 读到 FROM-B
+    set_session_active_cwd("test:rel", str(cwd_b))
+    assert _resolve("rel.txt").read_text() == "FROM-B"
+    # 绝对路径直通(不受 active_cwd 影响)
+    assert _resolve(str(abs_file)).read_text() == "ABS"
+    _SESSION_CWD.pop("test:rel", None)
+
+
+def test_create_native_session_persists_agent_id(monkeypatch, tmp_path):
+    """create_session 传 agent_id → _store 落库 agent_id 列 == normalize_agent_id(spec.id)。"""
+    import asyncio
+    from src.agent.agent_registry import AgentRegistry
+    from src.agent.agent_spec import AgentSpec, CwdEntry
+    from src.harness import routes as r
+    from src.harness.session_store import OrchSessionStore
+
+    repo = tmp_path / "repo"; repo.mkdir()
+    spec = AgentSpec(id="other-agent", cwds=[CwdEntry(path="x", label="x", default=True)])
+    reg = AgentRegistry(); reg._agents = {"other-agent": spec}; reg._default_id = "other-agent"
+    monkeypatch.setenv("AO2_REPO_ROOT", str(repo))
+    store = OrchSessionStore(str(tmp_path / "t.db"))
+    monkeypatch.setattr(r, "_store", store)
+    monkeypatch.setattr(r, "_sessions", {})
+
+    # 真 _build_native_session(mock 重依赖)
+    _wire_lightweight_native(monkeypatch, agent_registry=reg)
+
+    res = asyncio.run(r.create_session("agent-os-v2", r.CreateSessionReq(agent_id="other-agent")))
+    sid = res["session_id"]
+    row = store.get("agent-os-v2", sid)
+    assert row is not None
+    assert row["agent_id"] == "other-agent"  # normalize_agent_id 幂等
+
+
+def test_trigger_turn_restore_rebuilds_same_spec_session(monkeypatch, tmp_path):
+    """store 有 agent_id、_sessions 无(restore 孤儿)→ trigger_turn 从 store 取 agent_id
+    重建同 spec session(续聊保留 per-agent cwd_scope + active_cwd)。"""
+    import asyncio
+    from pathlib import Path
+    from src.agent.agent_registry import AgentRegistry
+    from src.agent.agent_spec import AgentSpec, CwdEntry
+    from src.harness import routes as r
+    from src.harness.session_store import OrchSessionStore
+    from src.tools.cwd_scope import _SESSION_CWD
+
+    repo = tmp_path / "repo"; repo.mkdir()
+    spec = AgentSpec(id="native", default=True,
+                     cwds=[CwdEntry(path="svc/o", label="orch", default=True)])
+    reg = AgentRegistry(); reg._agents = {"native": spec}; reg._default_id = "native"
+    monkeypatch.setenv("AO2_REPO_ROOT", str(repo))
+    store = OrchSessionStore(str(tmp_path / "t2.db"))
+    monkeypatch.setattr(r, "_store", store)
+    monkeypatch.setattr(r, "_sessions", {})
+    _wire_lightweight_native(monkeypatch, agent_registry=reg)
+
+    # store 有 agent-os-v2 记录(含 agent_id),内存无 → 走 restore 分支
+    store.create("restore-sid", "agent-os-v2", native_sid="restore-sid", agent_id="native")
+    # agent.run mock 成(避免真 LLM 调用)
+    captured = {}
+
+    async def fake_run(msg, message_history=None):
+        captured["msg"] = msg
+        from pydantic_ai.messages import ModelResponse, TextPart
+        from unittest.mock import MagicMock
+        result = MagicMock()
+        result.output = "rebuilt-ok"
+        result.all_messages = MagicMock(return_value=[ModelResponse(parts=[TextPart(content="rebuilt-ok")])])
+        result.usage = MagicMock(input_tokens=0, output_tokens=0, cache_read_tokens=0)
+        return result
+
+    rec = asyncio.run(r._build_native_session("restore-sid", agent_id="native"))
+    rec["agent"].run = fake_run
+    monkeypatch.setattr(r, "_build_native_session", AsyncMock(return_value=rec))
+
+    res = asyncio.run(r.trigger_turn("agent-os-v2", "restore-sid", r.TurnReq(message="hi")))
+    assert res["status"] == "completed"
+    assert res["response"] == "rebuilt-ok"
+    # restore 用了 store 的 agent_id(native)重建 → cwd_scope 对应 spec
+    rebuilt = r._sessions[r._key("agent-os-v2", "restore-sid")]
+    assert [e.label for e in rebuilt["cwd_scope"]] == ["orch"]
+    assert rebuilt["spec_id"] == "native"
+    _SESSION_CWD.pop("agent-os-v2:restore-sid", None)
 

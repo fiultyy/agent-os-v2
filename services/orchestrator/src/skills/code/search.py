@@ -13,6 +13,8 @@ import re
 from pathlib import Path
 from typing import Dict, Any, Optional
 
+from src.tools.cwd_scope import _resolve, _active_cwd
+
 
 def code_search(
     query: str,
@@ -72,7 +74,7 @@ def code_search(
         return result
     
     try:
-        search_path = Path(path).expanduser().resolve() if path else Path.cwd()
+        search_path = _resolve(path) if path else (_active_cwd.get() or Path.cwd())
         
         if not search_path.exists():
             result["error"] = f"Path not found: {search_path}"

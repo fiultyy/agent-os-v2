@@ -85,19 +85,26 @@ _state.active_forgetting = ActiveForgetting(_state.memory_service)
 _state.context_manager = ContextManager(_state.memory_service)
 _state.context_compiler = ContextCompiler(_state.context_manager)
 
-# ADR-1: Profile 分层 Capability 化 — ProfileRegistry 装 _state,启动 load AGENTS.md
-# (L1 identity + L2 guidelines;L0 SOUL.md 缺静默跳过)。routes._build_native_session
-# 经 make_profile_capabilities 注入 native Agent。失败降级 None(不阻塞启动)。
+# ADR-1 + P1(决策 3):Profile 分层 Capability 化 — AgentRegistry load agents.yaml
+# → ProfileRegistry.load_all(registry) per-agent 加载各 workspace 身份文件(AGENTS.md
+# L1+L2 / SOUL.md L0 缺静默跳过)。routes._build_native_session 经 make_profile_capabilities
+# 注入 native Agent。失败降级 None(不阻塞启动);agents.yaml 缺失 AgentRegistry 自降级单 native。
 try:
+    from src.agent.agent_registry import AgentRegistry
     from src.agent.profile_registry import ProfileRegistry
-    _state.profile_registry = ProfileRegistry()
-    _state.profile_registry.load_from_files(
-        agent_id="native", workspace_path="/home/yy/projects/agent-os-v2",
+    _state.agent_registry = AgentRegistry.load(
+        path=os.getenv("AO2_AGENTS_CONFIG") or os.path.join(os.getcwd(), "agents.yaml"),
     )
-    logger.info("ProfileRegistry wired (native profile loaded)")
+    _state.profile_registry = ProfileRegistry()
+    _state.profile_registry.load_all(_state.agent_registry)
+    logger.info(
+        "ProfileRegistry wired (agents=%s)",
+        sorted(_state.agent_registry._agents.keys()),
+    )
 except Exception:
     logger.warning("ProfileRegistry init failed — degrading to None", exc_info=True)
     _state.profile_registry = None
+    _state.agent_registry = None
 
 # ── Tool register (L2 通电):清单制注册已实现的 primitive+skill 工具 ─────
 # composite(browser_flow_execute / code_review_run)显式跳过 —— 它们重依赖
