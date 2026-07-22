@@ -382,9 +382,10 @@ CREATE INDEX IF NOT EXISTS idx_wf_event_run ON workflow_event(run_id, seq);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_wf_event_key ON workflow_event(run_id, key, type);
 ```
 
-> **连接策略**:与 `OrchSessionStore` 同 db 文件(`data/orch_sessions.db`),
-> 经 `_ensure_column` 风格 migration 加两张表;复用 `start.py` 的 `pysqlite3`
-> monkey-patch(不另起 patch 路径)。`WAL + busy_timeout=5000` 兜底单 loop 竞争。
+> **连接策略**:**独立 db 文件**(`data/orch_workflow.db`,避 OrchSessionStore 锁竞争 — RK9),
+> 经 `CREATE TABLE IF NOT EXISTS` executescript 加两张表(非 `_ensure_column` migration);
+> 复用 `start.py` 的 `pysqlite3` monkey-patch(不另起 patch 路径)。`WAL + busy_timeout=5000` 兜底单 loop 竞争。
+> (订正:旧版本误写"同 orch_sessions.db + _ensure_column",与 journal.py 实现矛盾,2026-07-22 review 订正)
 
 ### 6.2 事件类型(append-only)
 

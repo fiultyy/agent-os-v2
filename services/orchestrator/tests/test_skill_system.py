@@ -71,7 +71,7 @@ exposure:
             bare_dir = Path(td) / "no-skill"
             bare_dir.mkdir()
             (bare_dir / "README.md").write_text("no skill here", encoding="utf-8")
-            loader = SkillLoader(user_dir=Path(td))
+            loader = SkillLoader(user_dir=Path(td), builtin_dir=Path("/nonexistent"))
             results = loader.scan()
         assert results == []
 
@@ -88,7 +88,7 @@ exposure:
             (Path(td) / "good-skill" / "SKILL.md").write_text(
                 self._make_skill_md("good-skill", "Good"), encoding="utf-8",
             )
-            loader = SkillLoader(user_dir=Path(td))
+            loader = SkillLoader(user_dir=Path(td), builtin_dir=Path("/nonexistent"))
             results = loader.scan()
         names = {r.name for r in results}
         assert "good-skill" in names
@@ -144,7 +144,7 @@ exposure:
                                     visible=False, user_invocable=True),
                 encoding="utf-8",
             )
-            loader = SkillLoader(user_dir=Path(td))
+            loader = SkillLoader(user_dir=Path(td), builtin_dir=Path("/nonexistent"))
             results = loader.scan()
 
         assert len(results) == 1
@@ -162,7 +162,7 @@ exposure:
                                     env_vars=["OPENAI_API_KEY"]),
                 encoding="utf-8",
             )
-            loader = SkillLoader(user_dir=Path(td))
+            loader = SkillLoader(user_dir=Path(td), builtin_dir=Path("/nonexistent"))
             results = loader.scan()
 
         assert len(results) == 1
@@ -194,7 +194,7 @@ exposure:
   user_invocable: false
 ---
 """, encoding="utf-8")
-            loader = SkillLoader(user_dir=Path(td))
+            loader = SkillLoader(user_dir=Path(td), builtin_dir=Path("/nonexistent"))
             catalog = SkillCatalog(loader)
             catalog.reload()
 
@@ -246,7 +246,7 @@ exposure:
 ---
 """, encoding="utf-8")
 
-            loader = SkillLoader(user_dir=Path(td))
+            loader = SkillLoader(user_dir=Path(td), builtin_dir=Path("/nonexistent"))
             catalog = SkillCatalog(loader)
             catalog.reload()
 
@@ -274,7 +274,7 @@ exposure:
   user_invocable: false
 ---
 """, encoding="utf-8")
-            loader = SkillLoader(user_dir=Path(td))
+            loader = SkillLoader(user_dir=Path(td), builtin_dir=Path("/nonexistent"))
             catalog = SkillCatalog(loader)
             catalog.reload()
 
@@ -307,7 +307,7 @@ exposure:
 Usage: blah blah
 """
             (skill_dir / "SKILL.md").write_text(body, encoding="utf-8")
-            loader = SkillLoader(user_dir=Path(td))
+            loader = SkillLoader(user_dir=Path(td), builtin_dir=Path("/nonexistent"))
             catalog = SkillCatalog(loader)
             catalog.reload()
 
@@ -343,7 +343,7 @@ exposure:
   user_invocable: false
 ---
 """, encoding="utf-8")
-            loader = SkillLoader(user_dir=Path(td))
+            loader = SkillLoader(user_dir=Path(td), builtin_dir=Path("/nonexistent"))
             catalog = SkillCatalog(loader)
             catalog.reload()
             v1 = catalog.version
@@ -421,7 +421,7 @@ exposure:
                 self._make_skill_md("weather", "Get weather forecasts"),
                 encoding="utf-8",
             )
-            loader = SkillLoader(user_dir=Path(td))
+            loader = SkillLoader(user_dir=Path(td), builtin_dir=Path("/nonexistent"))
             catalog = SkillCatalog(loader)
             catalog.reload()
             executor = SkillExecutor(
@@ -449,7 +449,7 @@ exposure:
             v1_content = self._make_skill_md("memo", "Version 1")
             (sd / "SKILL.md").write_text(v1_content, encoding="utf-8")
 
-            loader = SkillLoader(user_dir=Path(td))
+            loader = SkillLoader(user_dir=Path(td), builtin_dir=Path("/nonexistent"))
             catalog = SkillCatalog(loader)
             catalog.reload()
             executor = SkillExecutor(catalog)
@@ -492,7 +492,7 @@ exposure:
                                     env_vars=["OPENAI_API_KEY"]),
                 encoding="utf-8",
             )
-            loader = SkillLoader(user_dir=Path(td))
+            loader = SkillLoader(user_dir=Path(td), builtin_dir=Path("/nonexistent"))
             catalog = SkillCatalog(loader)
             catalog.reload()
             # No tools provided → dependencies unsatisfied
@@ -521,7 +521,7 @@ exposure:
                                     env_vars=["NONEXISTENT_ENV_VAR_XYZ"]),
                 encoding="utf-8",
             )
-            loader = SkillLoader(user_dir=Path(td))
+            loader = SkillLoader(user_dir=Path(td), builtin_dir=Path("/nonexistent"))
             catalog = SkillCatalog(loader)
             catalog.reload()
             executor = SkillExecutor(catalog, available_tools={})
@@ -541,7 +541,7 @@ exposure:
             (sd / "SKILL.md").write_text(
                 self._make_skill_md("cache-test"), encoding="utf-8",
             )
-            loader = SkillLoader(user_dir=Path(td))
+            loader = SkillLoader(user_dir=Path(td), builtin_dir=Path("/nonexistent"))
             catalog = SkillCatalog(loader)
             catalog.reload()
             executor = SkillExecutor(catalog)
@@ -566,7 +566,7 @@ exposure:
                 self._make_skill_md("noexec", "No executor test"),
                 encoding="utf-8",
             )
-            loader = SkillLoader(user_dir=Path(td))
+            loader = SkillLoader(user_dir=Path(td), builtin_dir=Path("/nonexistent"))
             catalog = SkillCatalog(loader)
             catalog.reload()
             executor = SkillExecutor(catalog)
