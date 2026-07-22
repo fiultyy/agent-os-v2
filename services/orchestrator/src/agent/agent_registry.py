@@ -91,7 +91,14 @@ class AgentRegistry:
         env_cfg = os.getenv("AO2_AGENTS_CONFIG")
         if env_cfg:
             candidates.append(Path(env_cfg).expanduser())
-        repo_root = os.getenv("AO2_REPO_ROOT", str(Path.cwd()))
+        # repo root:AO2_REPO_ROOT > git root(上溯 .git,worktree 兼容文件指针)> cwd。
+        # 避开 cwd 依赖:start.sh cwd=repo 根,Makefile dev-orch cwd=services/orchestrator,
+        # 两者 git root 都是 repo 根 → agents.yaml 放 repo 根规范位置都能找到。
+        repo_root = os.getenv("AO2_REPO_ROOT")
+        if not repo_root:
+            cwd = Path.cwd()
+            repo_root = str(next(
+                (d for d in [cwd, *cwd.parents] if (d / ".git").exists()), cwd))
         candidates.append(Path(repo_root) / "agents.yaml")
         candidates.append(Path(_state_dir()) / "agents.yaml")
         seen: set[str] = set()
