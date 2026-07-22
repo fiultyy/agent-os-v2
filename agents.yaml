@@ -26,3 +26,10 @@ agents:
         label: tui-rs
     skills: [ao2-architecture]
     effort: medium
+  - id: main
+    name: 全能助理(claw main 迁移)
+    model: glm-4.7
+    workspace: /home/yy/projects/agent-os-v2/agents/main/workspace  # repo 内 trackable(clone 即有 instruction);绝对路径同 native 风格
+    cwds: []  # 单 cwd 退化(workspace 基准);用户助理无多服务 cwd 需求
+    skills: [ao2-architecture]
+    effort: medium
