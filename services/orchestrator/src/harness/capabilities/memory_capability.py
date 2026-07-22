@@ -2,9 +2,17 @@
 
 ADR: docs/adr/pydantic-ai-v2-adoption.md。把 v2 的 ExperienceTool + KGMemoryTool(各自
 单入口 execute(operation, params))包成 2.0 FunctionToolset 的两个 dispatch tool,
-挂 MemoryCapability(defer_loading=False, eager)。原 defer 设计假设模型 load_capability,
-但 glm-5.2 实测不调任何 meta-tool(load_capability/search_tools)→ defer tool 永不暴露。
-eager 让 tool 常驻 wire 当普通 tool(glm 会调,实测证)。R2 cache 缓解 tool_defs token。
+挂 MemoryCapability(**defer_loading=False, eager**)。
+
+eager 是有意选择,不依赖"模型不调 meta-tool"(旧 docstring 那行已废,见下)。memory tool
+是几乎每轮对话都用的高频能力(workspace 经验 + KG 召回),defer 反而要每轮多一次
+load_capability 往返;常驻 wire 省往返 + 让 R2 cache 缓解 tool_defs token。memory tool
+本身的 system 提示(get_instructions)是 stable,跨轮 byte-identical,不破坏 cache prefix。
+
+注:glm-5.2 **会**调显式 meta-tool(同仓 skill_capability 的 defer e2e 2026-07-22 3 场景
+已证:framework 自动注入的 `load_capability` 在 glm 下强/弱 prompt 都调,正文按需载入)。
+故 MemoryCapability 若日后改 defer_loading=True,glm 也能调 load_capability 拉起 memory。
+当前 eager 非"glm 不能 defer",而是"memory 高频,defer 无收益"。
 
 recall 策略(unified/weighted/keyword/kg/semantic)在 ExperienceTool/KGMemoryTool 内部,
 对 model 透明。依赖(ExperienceKG/KGQueryInterface)由调用方注入。
@@ -25,7 +33,7 @@ class MemoryCapability(AbstractCapability[Any]):
 
     id: str = "memory"
     description: str = "Workspace experience + knowledge-graph recall"
-    defer_loading: bool = False  # eager(glm-5.2 不调 load_capability meta-tool,eager 让 tool 常驻 wire)
+    defer_loading: bool = False  # eager(memory 高频用,defer 无收益;非"glm 不能 defer",见模块 docstring)
     experience_tool: Any = None  # src.memory.tools.experience_tool.ExperienceTool
     kg_tool: Any = None  # src.memory.tools.kg_memory_tool.KGMemoryTool
 
