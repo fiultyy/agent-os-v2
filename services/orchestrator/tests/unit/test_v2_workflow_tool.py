@@ -597,7 +597,7 @@ def test_run_handler_worktree_e2e_acquires_chdir_releases(tmp_path, monkeypatch)
     monkeypatch.setattr(v2_workflow, "_build_journal", lambda: None)
 
     def fake_run(cmd, *a, **kw):
-        if "add" in cmd:
+        if "worktree" in cmd and "add" in cmd:
             Path(cmd[4]).mkdir(parents=True, exist_ok=True)
         return 0
 
@@ -650,7 +650,7 @@ def test_run_handler_aexit_releases_unreleased_worktree(tmp_path, monkeypatch):
     rm_calls = []
 
     def fake_run(cmd, *a, **kw):
-        if "add" in cmd:
+        if "worktree" in cmd and "add" in cmd:
             Path(cmd[4]).mkdir(parents=True, exist_ok=True)
         if "remove" in cmd:
             rm_calls.append(list(cmd))

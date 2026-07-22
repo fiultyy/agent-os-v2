@@ -50,7 +50,7 @@ def test_acquire_calls_git_worktree_add_when_missing(tmp_path):
     def fake_run(cmd, *a, **kw):
         calls.append(list(cmd))
         # 模拟 git worktree add 创建目录(acquire 的 wt.exists() 检查后续调用跳过 add)
-        if "add" in cmd:
+        if "worktree" in cmd and "add" in cmd:
             # cmd = ['git', 'worktree', 'add', '--detach', str(wt), base_ref]
             wt_path = Path(cmd[4])
             wt_path.mkdir(parents=True, exist_ok=True)
@@ -76,7 +76,7 @@ def test_acquire_idempotent_when_wt_exists(tmp_path):
 
     def fake_run(cmd, *a, **kw):
         calls.append(list(cmd))
-        if "add" in cmd:
+        if "worktree" in cmd and "add" in cmd:
             Path(cmd[4]).mkdir(parents=True, exist_ok=True)
         return 0
 
@@ -93,7 +93,7 @@ def test_release_calls_git_worktree_remove(tmp_path):
 
     def fake_run(cmd, *a, **kw):
         calls.append(list(cmd))
-        if "add" in cmd:
+        if "worktree" in cmd and "add" in cmd:
             Path(cmd[4]).mkdir(parents=True, exist_ok=True)
         return 0
 
@@ -117,7 +117,7 @@ def test_release_keep_true_skips_remove(tmp_path):
 
     def fake_run(cmd, *a, **kw):
         calls.append(list(cmd))
-        if "add" in cmd:
+        if "worktree" in cmd and "add" in cmd:
             Path(cmd[4]).mkdir(parents=True, exist_ok=True)
         return 0
 
@@ -143,7 +143,7 @@ def test_aexit_releases_all_unreleased_worktrees(tmp_path):
 
     def fake_run(cmd, *a, **kw):
         calls.append(list(cmd))
-        if "add" in cmd:
+        if "worktree" in cmd and "add" in cmd:
             Path(cmd[4]).mkdir(parents=True, exist_ok=True)
         return 0
 
@@ -208,7 +208,7 @@ def test_wt_semaphore_serializes_concurrent_worktree_nodes():
 
         async def task(task_id):
             def fake_run(cmd, *a, **kw):
-                if "add" in cmd:
+                if "worktree" in cmd and "add" in cmd:
                     Path(cmd[4]).mkdir(parents=True, exist_ok=True)
                 return 0
             with patch("harness.workflow_engine.worktree.subprocess.run", side_effect=fake_run):
@@ -355,7 +355,7 @@ def test_optin_worktree_acquires_and_changes_cwd(tmp_path):
         )
 
         def fake_run(cmd, *a, **kw):
-            if "add" in cmd:
+            if "worktree" in cmd and "add" in cmd:
                 Path(cmd[4]).mkdir(parents=True, exist_ok=True)
             return 0
 

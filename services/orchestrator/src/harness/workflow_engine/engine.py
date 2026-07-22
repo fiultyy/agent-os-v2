@@ -183,7 +183,6 @@ class WorkflowContext:
     total_usage: RunUsage = field(default_factory=RunUsage)
     seen: set[str] = field(default_factory=set)
     dry_counter: int = 0
-    depth: int = 0
     abort: Optional[asyncio.Event] = None
     budget_tripped: bool = False               # budget 触达显式标记(与 abort 正交)
     budget_lock: Optional[asyncio.Lock] = None # budget 串行互斥锁

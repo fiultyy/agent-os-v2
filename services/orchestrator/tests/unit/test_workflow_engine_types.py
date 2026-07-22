@@ -66,7 +66,6 @@ def test_context_defaults():
 
     ctx = WorkflowContext(session_id="s", agent_id_prefix="a", run_id="r")
     assert ctx.concurrency == 8
-    assert ctx.depth == 0
     assert ctx.dry_counter == 0
     assert isinstance(ctx.total_usage, RunUsage)
     assert ctx.abort is None

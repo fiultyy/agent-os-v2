@@ -17,7 +17,7 @@
 ctx 构造(ponytail:P0 用模块级默认 session_id / agent_id_prefix):
 - ``session_id`` / ``agent_id_prefix``:handler 签名无 request ctx,P0 默认
   ``"workflow"`` / ``"wf"``(主 agent 经 ToolBridge dispatch 无法透传 turn-level
-  session_id;P2 journal 通电后从 _WF_CTX 取真 session,见 design §7)。
+  session_id;P2 journal 通电后从 ctx 取真 session)。
 - ``concurrency`` / ``run_id``:透传 handler 参数 / 模块级 uuid4。
 - emitter / pitfail / tool_executor:从 ``src.services._state`` 注入(模块级
   单例 ``_engine_for``),避免每 tool call 重建 engine(emitter WS 连接是 module-level)。
