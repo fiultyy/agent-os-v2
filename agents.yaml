@@ -16,6 +16,13 @@ agents:
     name: 原生 harness 迭代专员
     model: glm-4.7
     workspace: /home/yy/projects/agent-os-v2
-    cwds: []
+    cwds:
+      - path: services/orchestrator
+        label: orchestrator
+        default: true
+      - path: services/observe
+        label: observe
+      - path: apps/tui-rs
+        label: tui-rs
     skills: [ao2-architecture]
     effort: medium
