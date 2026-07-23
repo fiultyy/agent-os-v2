@@ -353,6 +353,25 @@ pub fn fork_session(ht: &str, source: &str, first_msg: &str) -> Option<(String, 
     let forked = v.get("forked").and_then(|x| x.as_bool()).unwrap_or(true);
     Some((new_sid, forked))
 }
+/// ADR-O6:POST /h/{type}/sessions/{id}/turn/cancel {tick_id} → 协作式中断异步 turn。
+/// Ok(()) = 后端 200(cancelled);Err(msg) = 404(tick 不在/已结束)或 orche 不可达/超时。
+/// timeout 防 orche 慢时 TUI 帧冻结(与 fetch_orch_sessions/merge_orche 一致)。
+pub fn cancel_turn(ht: &str, sid: &str, tick_id: &str) -> Result<(), String> {
+    let url = format!("{}/h/{}/sessions/{}/turn/cancel", ORCH, ht, sid);
+    match ureq::post(&url)
+        .timeout(std::time::Duration::from_secs(3))
+        .send_json(serde_json::json!({ "tick_id": tick_id }))
+    {
+        Ok(r) if r.status() == 200 => Ok(()),
+        Ok(r) => Err(format!("HTTP {}", r.status())),
+        // 404 = tick_id 已结束/不存在(ADR-O6 显式);其余 = 连接/超时类。
+        Err(e) => Err(if e.kind() == ureq::ErrorKind::HTTP {
+            "tick 不在(已结束?)".into()
+        } else {
+            "orche 不可达/超时".into()
+        }),
+    }
+}
 /// POST /h/{type}/sessions/{id}/archive {prompt?} → summary turn 文本。失败 None。
 pub fn archive_session(ht: &str, sid: &str, prompt: Option<&str>) -> Option<String> {
     let body = match prompt {
