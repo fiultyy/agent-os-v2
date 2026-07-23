@@ -41,8 +41,9 @@ CREATE TABLE IF NOT EXISTS orch_sessions (
     agent_id      TEXT,                  -- claw agent key(claude 为 NULL)
     created_at    TEXT NOT NULL,
     last_turn_at  TEXT,
-    messages      TEXT                   -- native agent-os-v2: ModelMessage JSON(重启续聊;
+    messages      TEXT,                  -- native agent-os-v2: ModelMessage JSON(重启续聊;
                                          -- claw/claude-code 为 NULL,真相在原生 transcript)
+    parent_session_id TEXT               -- F1:native fork lineage(源 session_id;非 fork 为 NULL)
 );
 
 CREATE INDEX IF NOT EXISTS idx_orch_harness ON orch_sessions(harness_type, last_turn_at);
@@ -75,6 +76,9 @@ class OrchSessionStore:
         # 但 CREATE TABLE IF NOT EXISTS 不改现有表——老 orch_sessions.db 需 ALTER
         # migration,否则 create() INSERT agent_id 会 OperationalError(no such column)。
         self._ensure_column("agent_id", "TEXT")
+        # F1:parent_session_id(native fork lineage)。SESSION_SCHEMA DDL 新 db 即有,
+        # 老 db 需 ALTER(CREATE TABLE IF NOT EXISTS 不改现有表)。
+        self._ensure_column("parent_session_id", "TEXT")
         self._conn.commit()
 
     def _ensure_column(self, column: str, ddl: str) -> None:
@@ -97,14 +101,19 @@ class OrchSessionStore:
         native_sid: Optional[str] = None,
         cwd: Optional[str] = None,
         agent_id: Optional[str] = None,
+        parent_session_id: Optional[str] = None,
     ) -> None:
-        """Register a session. INSERT OR IGNORE — re-create on restart is a no-op."""
+        """Register a session. INSERT OR IGNORE — re-create on restart is a no-op.
+
+        parent_session_id(F1):native fork 时写源 session_id;非 fork / cc / claw 不传(老行 NULL)。
+        INSERT OR IGNORE 下,重复 create(restart)不会覆盖既有 parent_session_id。
+        """
         now = datetime.now(timezone.utc).isoformat()
         self._conn.execute(
             """INSERT OR IGNORE INTO orch_sessions
-               (ext_id, harness_type, native_sid, cwd, agent_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (ext_id, harness_type, native_sid, cwd, agent_id, now),
+               (ext_id, harness_type, native_sid, cwd, agent_id, parent_session_id, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (ext_id, harness_type, native_sid, cwd, agent_id, parent_session_id, now),
         )
         self._conn.commit()
 

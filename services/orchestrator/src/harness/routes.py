@@ -21,8 +21,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import copy
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -822,10 +823,17 @@ async def list_cc_cwds() -> Dict[str, Any]:
 
 # ── fork (branch a session's context into a new session) ──────────────
 
+class ForkTarget(BaseModel):
+    """F1:fan-out 单分支声明。first_message = 该分支的探路方向/种子消息。"""
+    first_message: str
+
+
 class ForkReq(BaseModel):
     source_session_id: str
     first_message: str
     new_session_id: Optional[str] = None  # cc only (new sid comes from stream)
+    # F1(ADR-S3):native fan-out。空 → 回退单 first_message(向后兼容 cc/claw)。
+    targets: List[ForkTarget] = []
 
 
 @router.post("/{harness_type}/sessions/fork")
@@ -834,6 +842,48 @@ async def fork_session(
 ) -> Dict[str, Any]:
     _validate_type(harness_type)
     source = req.source_session_id
+
+    # F1(ADR-S2):native fork = 深拷贝源 ModelMessages + 继承源 agent_id + parent lineage。
+    # 必须在 _ensure_client 之前:native rec 无 "client" 键(_ensure_client 取 rec["client"]),
+    # 走 cc/claw 路径恒 KeyError/404。1→N fan-out 只此分支(ADR-S3:cc 保持 1:1 不动)。
+    if harness_type == "agent-os-v2":
+        rec = _sessions.get(_key(harness_type, source))
+        if rec is None:
+            # store 有、内存无(restore 孤儿)→ 重建一次取 messages + agent_id
+            row = _store.get(harness_type, source)
+            if row is None:
+                raise HTTPException(status_code=404, detail="source session not found")
+            rec = await _build_native_session(
+                source, messages=_load_native_messages(source),
+                agent_id=row.get("agent_id"),
+            )
+            _sessions[_key(harness_type, source)] = rec
+        src_agent_id = rec.get("spec_id")
+        src_messages = rec.get("messages") or []
+
+        # fan-out targets:空 → 单 first_message(向后兼容);非空 → 每 target 一 fork(同父克隆)。
+        targets = req.targets or [ForkTarget(first_message=req.first_message)]
+        forks: List[Dict[str, Any]] = []
+        for tgt in targets:
+            new_sid = str(uuid.uuid4().hex[:12])
+            # 深拷贝:新 list + 拷 message 对象(非浅引用;改新 session 不影响源)。
+            # pydantic-ai ModelMessage 为 pydantic 模型,deepcopy 安全。
+            cloned = copy.deepcopy(src_messages)
+            new_rec = await _build_native_session(
+                new_sid, messages=cloned, agent_id=src_agent_id,
+            )
+            _sessions[_key(harness_type, new_sid)] = new_rec
+            _store.create(
+                new_sid, "agent-os-v2",
+                native_sid=new_sid, agent_id=src_agent_id,
+                parent_session_id=source,
+            )
+            forks.append({
+                "new_session_id": new_sid, "source": source,
+                "direction": tgt.first_message, "forked": True,
+            })
+        return {"forks": forks, "source": source, "forked": True}
+
     client = await _ensure_client(harness_type, source)
     if client is None:
         raise HTTPException(status_code=404, detail="source session not found")
