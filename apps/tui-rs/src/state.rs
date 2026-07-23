@@ -134,6 +134,164 @@ fn merge_orche_session_meta(sg: &mut SessionsGrouped, orch_type: &str) {
         }
     }
 }
+// ═══ ADR-O1/O2:Orchestrate tab · fork 谱系树 ═════════════════════════
+// lineage 走 observe GET /sessions?harness_type=agent-os-v2(返 parent_session_id + agent_id,
+// orche list_sessions 缺字段 defer)。客户端按 parent_session_id 建树。
+
+/// fork 树节点状态符号(●active/✓done/⠋running/○idle,User Stories §4)。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NodeState {
+    Active,
+    Done,
+    Running,
+    Idle,
+}
+impl NodeState {
+    pub fn glyph(self) -> &'static str {
+        match self {
+            NodeState::Active => "●",
+            NodeState::Done => "✓",
+            NodeState::Running => "⠋",
+            NodeState::Idle => "○",
+        }
+    }
+    pub fn from_event(event_type: &str, status: &str) -> Self {
+        match (event_type, status) {
+            ("tick_started", _) => NodeState::Running,
+            ("tick_completed", "cancelled") => NodeState::Idle,
+            ("tick_completed", _) => NodeState::Done,
+            ("branch_created", _) => NodeState::Active,
+            _ => NodeState::Idle,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ForkNode {
+    pub session_id: String,
+    pub agent_id: String,
+    pub harness_type: String,
+    pub parent: Option<String>,
+    pub state: NodeState,
+    /// 子节点 session_id(fork fan-out)。
+    pub children: Vec<String>,
+}
+
+/// 光标选中投影(render footer / 原语入参)。User Stories §4 产出。
+#[derive(Clone, Debug)]
+pub struct Selection {
+    pub session_id: String,
+    pub agent_id: String,
+    pub state: NodeState,
+    pub parent: Option<String>,
+}
+impl Selection {
+    pub fn from_node(n: &ForkNode) -> Self {
+        Self {
+            session_id: n.session_id.clone(),
+            agent_id: n.agent_id.clone(),
+            state: n.state,
+            parent: n.parent.clone(),
+        }
+    }
+}
+
+/// fork 谱系树:扁平 node map + root session_id 列表(无 parent 的节点)。
+/// ponytail: 全量拉取客户端建树(ADR-O2);session 过千加 observe parent 索引或 /children。
+#[derive(Clone, Debug, Default)]
+pub struct ForkTree {
+    pub nodes: std::collections::HashMap<String, ForkNode>,
+    pub roots: Vec<String>,
+}
+
+impl ForkTree {
+    /// DFS 后序扁平序(j/k 跨层级光标用)。根优先 → 子树递归。
+    pub fn flat_order(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for r in &self.roots {
+            self.dfs(r, &mut out);
+        }
+        out
+    }
+    fn dfs(&self, sid: &str, out: &mut Vec<String>) {
+        out.push(sid.to_string());
+        if let Some(n) = self.nodes.get(sid) {
+            for c in &n.children {
+                self.dfs(c, out);
+            }
+        }
+    }
+    /// 每节点在 DFS 序里的深度(根=0);render 缩进 + anchor x 坐标用。
+    pub fn depth(&self, sid: &str) -> usize {
+        let mut d = 0;
+        let mut cur = self.nodes.get(sid).and_then(|n| n.parent.clone());
+        while let Some(p) = cur {
+            d += 1;
+            cur = self.nodes.get(&p).and_then(|n| n.parent.clone());
+        }
+        d
+    }
+}
+
+/// observe GET /sessions?harness_type=agent-os-v2 → ForkTree(客户端按 parent 建树)。
+/// 离线/失败返空树(与 fetch_sessions 容忍一致)。R5:只读 GET,不引 memory/ingest。
+#[derive(Deserialize)]
+struct OrchSession {
+    session_id: String,
+    #[serde(default)]
+    harness_type: String,
+    #[serde(default)]
+    agent_id: String,
+    #[serde(default)]
+    parent_session_id: String,
+}
+#[derive(Deserialize)]
+struct OrchSessionsResp { sessions: Vec<OrchSession> }
+
+fn fetch_orch_sessions() -> Vec<OrchSession> {
+    ureq::get(&format!("{}/sessions", OBSERVE))
+        .query("harness_type", "agent-os-v2")
+        .call().ok()
+        .and_then(|r| r.into_json::<OrchSessionsResp>().ok())
+        .map(|r| r.sessions)
+        .unwrap_or_default()
+}
+
+/// 建 fork 树:遍历 observe sessions,parent 非空 → 挂父 children;空 → root。
+fn build_fork_tree(sessions: Vec<OrchSession>) -> ForkTree {
+    let mut tree = ForkTree::default();
+    // 先建所有节点(暂无 children)。
+    for s in &sessions {
+        let parent = if s.parent_session_id.is_empty() { None } else { Some(s.parent_session_id.clone()) };
+        tree.nodes.insert(s.session_id.clone(), ForkNode {
+            session_id: s.session_id.clone(),
+            agent_id: s.agent_id.clone(),
+            harness_type: s.harness_type.clone(),
+            parent,
+            state: NodeState::Idle,
+            children: vec![],
+        });
+    }
+    // 填 children + roots。parent 指向不存在的节点(孤儿)按 root 处理。
+    for s in &sessions {
+        match &tree.nodes.get(&s.session_id).and_then(|n| n.parent.clone()) {
+            Some(p) if tree.nodes.contains_key(p) => {
+                if let Some(pn) = tree.nodes.get_mut(p) {
+                    if !pn.children.contains(&s.session_id) {
+                        pn.children.push(s.session_id.clone());
+                    }
+                }
+            }
+            _ => {
+                if !tree.roots.contains(&s.session_id) {
+                    tree.roots.push(s.session_id.clone());
+                }
+            }
+        }
+    }
+    tree
+}
+
 // ── IT2 节点 C session 管理辅助(接节点 B 后端端点)──────────────────
 // 不可达 graceful:返 None / 默认 / false,不 panic。
 
@@ -483,6 +641,8 @@ pub enum Panel {
     Flows,
     Observe,
     Control,
+    /// ADR-O1:第4 tab,与 Flows 物理隔离(fork 谱系树 ≠ workflow flow DAG)。
+    Orchestrate,
 }
 impl Panel {
     pub fn label(self) -> &'static str {
@@ -490,13 +650,15 @@ impl Panel {
             Panel::Flows => "FLOWS ◐ 编排 DAG",
             Panel::Observe => "OBSERVE ☰ 纵向堆叠",
             Panel::Control => "CONTROL ⌘ orchestrator",
+            Panel::Orchestrate => "ORCHESTRATE ⾢ fork 谱系树",
         }
     }
     pub fn next(self) -> Self {
         match self {
             Panel::Flows => Panel::Observe,
             Panel::Observe => Panel::Control,
-            Panel::Control => Panel::Flows,
+            Panel::Control => Panel::Orchestrate,
+            Panel::Orchestrate => Panel::Flows,
         }
     }
 }
@@ -563,6 +725,8 @@ pub enum FocusTarget {
     ObserveSession,
     /// Flows tab flow 列表索引。
     FlowsFlow(usize),
+    /// ADR-O1 Orchestrate tab:fork 树扁平序(DFS 后序)节点索引。
+    OrchestrateNode(usize),
 }
 
 /// Control tab 按钮总数(trigger/spawn/refresh/rawexec + flow create Chain/Branch/DAG + run)。
@@ -578,6 +742,7 @@ impl FocusTarget {
                 Panel::Control => FocusTarget::ControlSession(0), // F3:大纲首(左大纲主)
                 Panel::Observe => FocusTarget::ObserveSession,
                 Panel::Flows => FocusTarget::FlowsFlow(0),
+                Panel::Orchestrate => FocusTarget::OrchestrateNode(0),
             },
             FocusTarget::ControlSession(_) if panel == Panel::Control => FocusTarget::ControlButton(0), // F3:大纲 → 输入栏按钮
             _ => FocusTarget::TabBar,
@@ -609,6 +774,12 @@ pub struct App {
     pub flows: Vec<TrackedFlow>,
     /// flow panel cursor(选哪个 tracked flow 看 DAG)。turn_msg 在 control mode 复用作 flow 首节点 message。
     pub flow_cursor: usize,
+    /// ADR-O1/O2 Orchestrate tab:fork 谱系树(observe GET /sessions 客户端建树)。
+    pub fork_tree: ForkTree,
+    /// Orchestrate tab 光标(fork_tree.nodes DFS 序索引)。j/k 跨层级移动。
+    pub orch_cursor: usize,
+    /// Orchestrate tab 当前选中(光标节点投影;render footer / 原语用)。
+    pub orch_selection: Option<Selection>,
     /// 顶栏 TabBar(ADR-1:Home/Flows/Observe/Control 4 tab)。
     pub tabbar: TabBar,
     /// 鼠标光标(ADR-2:帧末黑底黄字高亮)。
@@ -770,16 +941,21 @@ impl App {
             instances: HashMap::new(),
             flows: vec![],
             flow_cursor: 0,
+            fork_tree: ForkTree::default(),
+            orch_cursor: 0,
+            orch_selection: None,
             tabbar: {
                 let mut t = TabBar::new(vec![
                     "Flows".to_string(),
                     "Observe".to_string(),
                     "Control".to_string(),
+                    "Orchestrate".to_string(),
                 ])
                 .colors(vec![
                     crate::theme::DARK.accent2,
                     crate::theme::DARK.accent,
                     crate::theme::DARK.done,
+                    crate::theme::DARK.accent2,
                 ]);
                 t.active = 2; // 默认主 tab Control
                 t
@@ -1085,6 +1261,79 @@ impl App {
     /// 当前 tracked flow 的状态节点(给 render 查 node 状态)。
     pub fn current_flow(&self) -> Option<&TrackedFlow> {
         self.flows.get(self.flow_cursor)
+    }
+
+    // ── ADR-O1/O2 Orchestrate tab · fork 谱系树 ──────────────────
+
+    /// 拉 observe fork sessions + 建树 + 刷新选中投影。进 tab(4 键)/refresh 调。
+    pub fn fetch_orch_tree(&mut self) {
+        self.fork_tree = build_fork_tree(fetch_orch_sessions());
+        self.orch_cursor = self.orch_cursor.min(self.orch_node_count().saturating_sub(1));
+        self.sync_orch_selection();
+    }
+
+    /// DFS 序节点数(光标 cap)。
+    pub fn orch_node_count(&self) -> usize {
+        self.fork_tree.flat_order().len()
+    }
+
+    /// 光标投影到 orch_selection(render footer / 原语入参)。
+    pub fn sync_orch_selection(&mut self) {
+        let order = self.fork_tree.flat_order();
+        self.orch_selection = order.get(self.orch_cursor)
+            .and_then(|sid| self.fork_tree.nodes.get(sid))
+            .map(Selection::from_node);
+    }
+
+    /// j/Down:Orchestrate 光标下移(DFS 序跨层级)。
+    pub fn orch_cursor_down(&mut self) {
+        let n = self.orch_node_count();
+        if n == 0 { return; }
+        if self.orch_cursor + 1 < n {
+            self.orch_cursor += 1;
+        }
+        self.focus = FocusTarget::OrchestrateNode(self.orch_cursor);
+        self.sync_orch_selection();
+    }
+
+    /// k/Up:Orchestrate 光标上移(DFS 序跨层级)。
+    pub fn orch_cursor_up(&mut self) {
+        if self.orch_cursor > 0 {
+            self.orch_cursor -= 1;
+        }
+        self.focus = FocusTarget::OrchestrateNode(self.orch_cursor);
+        self.sync_orch_selection();
+    }
+
+    /// 鼠标/ClickMap 选中:DFS 序 idx → orch_cursor + selection。
+    pub fn orch_select_idx(&mut self, idx: usize) {
+        if idx < self.orch_node_count() {
+            self.orch_cursor = idx;
+            self.focus = FocusTarget::OrchestrateNode(idx);
+            self.sync_orch_selection();
+        }
+    }
+
+    /// branch_created / tick_started / tick_completed → 更新 fork 树节点状态。
+    /// drain_ws agent-os-v2 事件分支调。session_id 匹配树节点;不在树则刷新整树(新 fork)。
+    pub fn apply_orch_tree_event(&mut self, session_id: &str, ev: &ObserveEvent) {
+        let status = ev.data.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        let new_state = NodeState::from_event(&ev.event_type, status);
+        let in_tree = self.fork_tree.nodes.contains_key(session_id);
+        if in_tree {
+            // branch_created 可能引入新子节点:刷新整树(observe 已 update parent)。
+            if ev.event_type == "branch_created" {
+                self.fetch_orch_tree();
+                return;
+            }
+            if let Some(n) = self.fork_tree.nodes.get_mut(session_id) {
+                n.state = new_state;
+            }
+            self.sync_orch_selection();
+        } else {
+            // 未知 session(fork 子节点首次出现)→ 刷新整树补节点。
+            self.fetch_orch_tree();
+        }
     }
 
     // ── 弹窗栈操作 ──────────────────────────────────────────────
@@ -1854,6 +2103,15 @@ impl App {
                         }
                     }
                 }
+                // ADR-O1 Orchestrate:ClickMap 选中 fork 树节点(id 700+ = DFS idx)。
+                if self.panel == Panel::Orchestrate {
+                    if let Some(id) = self.clickmap.hit(m.column, m.row) {
+                        if *id >= 700 {
+                            self.orch_select_idx(*id - 700);
+                            return;
+                        }
+                    }
+                }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 // textarea 划选拖动(selection 已开始)
@@ -1882,12 +2140,13 @@ impl App {
         }
     }
 
-    /// 把 tabbar.active 同步到 self.panel(0=Flows,1=Observe,2=Control)。
+    /// 把 tabbar.active 同步到 self.panel(0=Flows,1=Observe,2=Control,3=Orchestrate)。
     pub fn sync_panel_from_tab(&mut self) {
         self.panel = match self.tabbar.active {
             0 => Panel::Flows,
             1 => Panel::Observe,
-            _ => Panel::Control,
+            2 => Panel::Control,
+            _ => Panel::Orchestrate,
         };
     }
     /// 把 self.panel 同步到 tabbar.active(render 前确保一致)。
@@ -1896,6 +2155,7 @@ impl App {
             Panel::Flows => 0,
             Panel::Observe => 1,
             Panel::Control => 2,
+            Panel::Orchestrate => 3,
         };
         self.tabbar.select(idx);
     }
@@ -2434,11 +2694,18 @@ impl App {
                 self.sync_tab_from_panel();
                 false
             }
-            KeyCode::Char('3') | KeyCode::Char('4') => {
+            KeyCode::Char('3') => {
                 self.panel = Panel::Control;
                 self.sync_tab_from_panel();
                 // ADR-3:进入 Control 时预检 orche health(非阻塞,失败默认 false)。
                 self.orche_online = fetch_orche_health();
+                false
+            }
+            KeyCode::Char('4') => {
+                // ADR-O1:第4 tab Orchestrate。进入即拉 observe fork 树(ADR-O2)。
+                self.panel = Panel::Orchestrate;
+                self.sync_tab_from_panel();
+                self.fetch_orch_tree();
                 false
             }
             KeyCode::Char('c') => {
@@ -2456,6 +2723,9 @@ impl App {
                 } else if self.panel == Panel::Observe {
                     self.observe_scroll.scroll_down(1);
                     self.focus = FocusTarget::ObserveSession;
+                } else if self.panel == Panel::Orchestrate {
+                    // ADR-O1:Orchestrate j/k 跨层级 DFS 序移动光标。
+                    self.orch_cursor_down();
                 } else if self.panel == Panel::Control {
                     // F3:Control 方向键——大纲区(ControlSession)切 cursor;输入栏(ControlButton)切按钮。
                     match self.focus {
@@ -2475,6 +2745,8 @@ impl App {
                 } else if self.panel == Panel::Observe {
                     self.observe_scroll.scroll_up(1);
                     self.focus = FocusTarget::ObserveSession;
+                } else if self.panel == Panel::Orchestrate {
+                    self.orch_cursor_up();
                 } else if self.panel == Panel::Control {
                     // F3:Control 方向键——大纲区(ControlSession)切 cursor;输入栏(ControlButton)切按钮。
                     match self.focus {
@@ -2632,6 +2904,14 @@ impl App {
                         }
                     }
                     // 累积 turn 事件(同 fetch_events 效果:events[key].push + 实例去重计数)。
+                    // ADR-O1:Orchestrate tab 实时刷新——agent-os-v2 fork/tick 事件转发给 fork 树。
+                    if self.panel == Panel::Orchestrate
+                        && key.starts_with("agent-os-v2/")
+                        && matches!(ev.event_type.as_str(), "branch_created" | "tick_started" | "tick_completed")
+                    {
+                        let sid = key.strip_prefix("agent-os-v2/").unwrap_or("");
+                        self.apply_orch_tree_event(sid, &ev);
+                    }
                     let evs = self.events.entry(key.clone()).or_default();
                     // IT7:去重——REST fetch_events(替换)+ WS drain_ws(追加)时序重叠时,
                     // 同 event_id 事件会重复。非空 event_id 已存在则 skip(continue)。
@@ -2763,6 +3043,106 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ═══ ADR-O1/O2 fork 谱系树:build_fork_tree + DFS 序 + depth + NodeState ═══
+    // 非平凡逻辑:observe sessions(含 parent_session_id)→ 客户端建树;drift 即 break。
+
+    #[test]
+    fn build_fork_tree_links_children_and_roots() {
+        let sessions = vec![
+            OrchSession { session_id: "root".into(), harness_type: "agent-os-v2".into(), agent_id: "native".into(), parent_session_id: String::new() },
+            OrchSession { session_id: "c1".into(), harness_type: "agent-os-v2".into(), agent_id: "a".into(), parent_session_id: "root".into() },
+            OrchSession { session_id: "c2".into(), harness_type: "agent-os-v2".into(), agent_id: "b".into(), parent_session_id: "root".into() },
+            // 孤儿(parent 指向不存在的 session)→ 当 root 处理。
+            OrchSession { session_id: "orphan".into(), harness_type: "agent-os-v2".into(), agent_id: "o".into(), parent_session_id: "ghost".into() },
+        ];
+        let tree = build_fork_tree(sessions);
+        assert_eq!(tree.nodes.get("root").unwrap().children, vec!["c1", "c2"]);
+        assert!(tree.nodes.get("c1").unwrap().parent.as_deref() == Some("root"));
+        // 根 + 孤儿(root 顺序:root 先入)。
+        assert!(tree.roots.contains(&"root".to_string()));
+        assert!(tree.roots.contains(&"orphan".to_string()));
+    }
+
+    #[test]
+    fn fork_tree_dfs_order_and_depth() {
+        // root → c1 → gc;root → c2。
+        let sessions = vec![
+            OrchSession { session_id: "root".into(), harness_type: "agent-os-v2".into(), agent_id: "n".into(), parent_session_id: String::new() },
+            OrchSession { session_id: "c1".into(), harness_type: "agent-os-v2".into(), agent_id: "a".into(), parent_session_id: "root".into() },
+            OrchSession { session_id: "gc".into(), harness_type: "agent-os-v2".into(), agent_id: "g".into(), parent_session_id: "c1".into() },
+            OrchSession { session_id: "c2".into(), harness_type: "agent-os-v2".into(), agent_id: "b".into(), parent_session_id: "root".into() },
+        ];
+        let tree = build_fork_tree(sessions);
+        // DFS(root → c1 → gc → c2):父先于子。
+        let order = tree.flat_order();
+        assert_eq!(order, vec!["root", "c1", "gc", "c2"]);
+        assert_eq!(tree.depth("root"), 0);
+        assert_eq!(tree.depth("c1"), 1);
+        assert_eq!(tree.depth("gc"), 2);
+        assert_eq!(tree.depth("c2"), 1);
+    }
+
+    #[test]
+    fn node_state_maps_from_event() {
+        assert_eq!(NodeState::from_event("tick_started", ""), NodeState::Running);
+        assert_eq!(NodeState::from_event("tick_completed", "success"), NodeState::Done);
+        assert_eq!(NodeState::from_event("tick_completed", "cancelled"), NodeState::Idle);
+        assert_eq!(NodeState::from_event("branch_created", ""), NodeState::Active);
+        assert_eq!(NodeState::from_event("unknown", ""), NodeState::Idle);
+        // glyph 覆盖 4 态(防退化成单一符号)。
+        let glyphs: Vec<&str> = [NodeState::Active, NodeState::Done, NodeState::Running, NodeState::Idle]
+            .iter().map(|s| s.glyph()).collect();
+        assert_eq!(glyphs, vec!["●", "✓", "⠋", "○"]);
+    }
+
+    #[test]
+    fn apply_orch_tree_event_updates_node_state() {
+        // 建空 app + 注入一棵树 → 模拟 tick_started/tick_completed WS 事件刷状态。
+        let mut app = App::new(crate::kitty::detect());
+        let sessions = vec![
+            OrchSession { session_id: "root".into(), harness_type: "agent-os-v2".into(), agent_id: "native".into(), parent_session_id: String::new() },
+            OrchSession { session_id: "c1".into(), harness_type: "agent-os-v2".into(), agent_id: "a".into(), parent_session_id: "root".into() },
+        ];
+        app.fork_tree = build_fork_tree(sessions);
+        app.panel = Panel::Orchestrate;
+        app.orch_cursor = 1; // c1
+        app.sync_orch_selection();
+
+        // tick_started(c1)→ Running。
+        let ev_started = ObserveEvent { event_type: "tick_started".into(), tick_id: "t1".into(), harness_id: "h".into(), data: HashMap::new(), event_id: "e1".into() };
+        app.apply_orch_tree_event("c1", &ev_started);
+        assert_eq!(app.fork_tree.nodes.get("c1").unwrap().state, NodeState::Running);
+
+        // tick_completed(c1)→ Done。
+        let mut data = HashMap::new();
+        data.insert("status".into(), serde_json::json!("success"));
+        let ev_done = ObserveEvent { event_type: "tick_completed".into(), tick_id: "t2".into(), harness_id: "h".into(), data, event_id: "e2".into() };
+        app.apply_orch_tree_event("c1", &ev_done);
+        assert_eq!(app.fork_tree.nodes.get("c1").unwrap().state, NodeState::Done);
+        // 选中投影同步(光标在 c1)。
+        assert_eq!(app.orch_selection.as_ref().unwrap().state, NodeState::Done);
+    }
+
+    #[test]
+    fn orch_cursor_navigation_clamps() {
+        let mut app = App::new(crate::kitty::detect());
+        let sessions = vec![
+            OrchSession { session_id: "root".into(), harness_type: "agent-os-v2".into(), agent_id: "n".into(), parent_session_id: String::new() },
+            OrchSession { session_id: "c1".into(), harness_type: "agent-os-v2".into(), agent_id: "a".into(), parent_session_id: "root".into() },
+        ];
+        app.fork_tree = build_fork_tree(sessions);
+        app.panel = Panel::Orchestrate;
+        app.orch_cursor = 0;
+        app.orch_cursor_down(); // → 1
+        assert_eq!(app.orch_cursor, 1);
+        app.orch_cursor_down(); // clamp(只有 2 节点)
+        assert_eq!(app.orch_cursor, 1);
+        app.orch_cursor_up(); // → 0
+        assert_eq!(app.orch_cursor, 0);
+        app.orch_cursor_up(); // clamp
+        assert_eq!(app.orch_cursor, 0);
+    }
 
     #[test]
     fn flow_status_parses_orchestrator_payload() {
