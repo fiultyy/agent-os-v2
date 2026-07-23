@@ -282,6 +282,121 @@ pub fn draw_flow(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(lines), area);
 }
 
+/// ADR-O1/O3:Orchestrate tab fork 谱系树渲染。
+/// observe GET /sessions 客户端建树(ADR-O2)→ anchor.rs AnchorGraph 画 parent→child Braille 连线
+/// + 节点状态符号(●active/✓done/⠋running/○idle)+ agent_id label + 光标高亮 + ClickMap 选中。
+pub fn draw_orchestrate(f: &mut Frame, area: Rect, app: &mut App) {
+    use crate::components::anchor::AnchorGraph;
+    use crate::state::NodeState;
+
+    let mut lines: Vec<Line> = vec![
+        Line::from(Span::styled(
+            " orchestrate · fork 谱系树(observe lineage → client build tree)".to_string(),
+            Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+    ];
+
+    let order = app.fork_tree.flat_order();
+    if order.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " (无 fork session · 在 control tab 触发 fork 或等 observe :8002 上线后按 r 刷新)".to_string(),
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            " 符号: ● active · ✓ done · ⠋ running · ○ idle   ·  j/k 跨层级 · Enter 看事件流".to_string(),
+            Style::default().fg(Color::Cyan),
+        )));
+        f.render_widget(Paragraph::new(lines), area);
+        return;
+    }
+
+    // header:节点数 + 光标投影。
+    let sel = app.orch_selection.clone();
+    let header = match &sel {
+        Some(s) => format!(
+            " [{}] 节点 · 选中 {} {} (agent: {} · parent: {})",
+            order.len(),
+            s.state.glyph(),
+            trunc(&s.session_id, 24),
+            if s.agent_id.is_empty() { "-" } else { &s.agent_id },
+            s.parent.as_deref().map(|p| trunc(p, 16)).unwrap_or_else(|| "root".into()),
+        ),
+        None => format!(" [{}] 节点 · (无选中)", order.len()),
+    };
+    lines.push(Line::from(Span::styled(header, Style::default().fg(Color::Yellow))));
+    lines.push(Line::raw(""));
+
+    // ── AnchorGraph:parent→child Braille 连线(ADR-O3)──────────────────
+    // 布局:DFS 序每节点一行(y),x = depth * step。世界坐标对齐行/列便于 Braille 连线。
+    let step = 6.0_f64;
+    let max_depth = order.iter()
+        .map(|sid| app.fork_tree.depth(sid))
+        .max().unwrap_or(0);
+    let x_max = ((max_depth + 1) as f64) * step;
+    let y_max = order.len() as f64;
+    let mut graph = AnchorGraph::new([0.0, x_max], [0.0, y_max]);
+    // id = DFS 序行号(1-based,Braille y 反转:画布 y 向上,用 y_max-row 倒置)。
+    // anchor.rs 的 anchor/edge builder 消耗 self,这里直接 push 进 Vec 字段。
+    use crate::components::anchor::{Anchor, Connection};
+    for (row, sid) in order.iter().enumerate() {
+        let depth = app.fork_tree.depth(sid);
+        let x = (depth as f64) * step + 1.0;
+        let y = y_max - (row as f64) - 0.5; // 倒置:第 0 行在顶
+        graph.anchors.push(Anchor { id: (row + 1) as u32, x, y });
+        if let Some(node) = app.fork_tree.nodes.get(sid) {
+            if let Some(p) = &node.parent {
+                if let Some(prow) = order.iter().position(|s| s == p.as_str()) {
+                    graph.connections.push(Connection {
+                        from: (prow + 1) as u32, to: (row + 1) as u32,
+                        color: Color::DarkGray, label: None,
+                    });
+                }
+            }
+        }
+    }
+
+    // 画布区(连线)占上半,text 列表(符号+label+光标)占下半。
+    let [canvas_area, list_area] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length((order.len() as u16 + 2).min(area.height / 2 + 4)), Constraint::Min(0)])
+        .areas(area);
+    f.render_widget(graph.canvas(), canvas_area);
+
+    // ── text 列表:状态符号 + agent_id label + 缩进 + 光标高亮 ──────────
+    // ClickMap 注册每行 1xN rect(id 700+ = DFS idx),鼠标点击选中。
+    // 不 clear:顶层 draw() 已 clear(保留 999/998 quit/info 持久注册)。
+    let list_x = list_area.x;
+    for (row, sid) in order.iter().enumerate() {
+        let node = match app.fork_tree.nodes.get(sid) { Some(n) => n, None => continue };
+        let depth = app.fork_tree.depth(sid);
+        let indent = "  ".repeat(depth);
+        let glyph = node.state.glyph();
+        let glyph_color = match node.state {
+            NodeState::Active => Color::Green,
+            NodeState::Done => DARK.done,
+            NodeState::Running => Color::Yellow,
+            NodeState::Idle => Color::DarkGray,
+        };
+        let agent = if node.agent_id.is_empty() { "-".to_string() } else { node.agent_id.clone() };
+        let is_cur = row == app.orch_cursor;
+        let marker = if is_cur { "▶ " } else { "  " };
+        let line = Line::from(vec![
+            Span::raw(format!("{}{} ", marker, indent)),
+            Span::styled(format!("{} ", glyph), Style::default().fg(glyph_color).add_modifier(Modifier::BOLD)),
+            Span::styled(agent.clone(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  {}", trunc(&node.session_id, 30)), Style::default().fg(if is_cur { Color::Yellow } else { Color::DarkGray })),
+        ]);
+        lines.push(line);
+        // ClickMap:每行 register 1-cell 高 rect。
+        let y = list_area.y + (lines.len() as u16).saturating_sub(1);
+        app.clickmap.register(Rect::new(list_x, y, list_area.width, 1), 700 + row);
+    }
+
+    f.render_widget(Paragraph::new(lines), list_area);
+}
+
 /// flow 选择条:[cur+1/N] flow_xxxx · status · nodes M/edges K。
 fn flow_selector_line(app: &App) -> Line<'static> {
     let n = app.flows.len();
@@ -1129,6 +1244,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Panel::Flows => draw_flow(f, chunks[1], app),
         Panel::Observe => draw_stack(f, chunks[1], app),
         Panel::Control => draw_control(f, chunks[1], app),
+        Panel::Orchestrate => draw_orchestrate(f, chunks[1], app),
     }
 
     // 底栏 hint。

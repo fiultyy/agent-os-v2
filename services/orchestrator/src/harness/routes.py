@@ -151,6 +151,11 @@ class TurnReq(BaseModel):
     async_run: bool = False
 
 
+class CancelTurnReq(BaseModel):
+    # ADR-O6:协作式中断异步 turn。tick_id = trigger_turn(async_run=True) 返的 tick_id。
+    tick_id: str
+
+
 class SwitchReq(BaseModel):
     type: str
     id: str
@@ -691,6 +696,46 @@ async def trigger_turn(
         _store.touch(session_id)
         return {"session_id": session_id, "status": result["status"],
                 "tick_id": result["tick_id"]}
+
+
+@router.post("/{harness_type}/sessions/{session_id}/turn/cancel")
+async def cancel_turn(
+    harness_type: str, session_id: str, req: CancelTurnReq,
+) -> Dict[str, Any]:
+    """ADR-O6:协作式中断异步 turn(止损跑飞的 _async_turn_tasks)。
+
+    tick_id = trigger_turn(async_run=True) 返回值。cancel() 后:
+    1) task.cancel()(asyncio 协作式;能否干净打断 GLM httpx 请求不定,见 ADR-O6 scope limit)
+    2) emit tick_completed(status=cancelled) 经 observe WS(TUI 树节点刷新为取消态)
+    3) 从 _async_turn_tasks 移除(显式 pop;add_done_callback 的 pop 是幂等兜底)
+
+    tick_id 不在 registry → 404 JSON(已结束/从未存在)。
+    不碰 workflow_engine.py(R1);observe 侧只经 emitter.emit,不引 memory(R5)。
+    """
+    _validate_type(harness_type)
+    task = _async_turn_tasks.get(req.tick_id)
+    if task is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"tick_id": req.tick_id, "error": "tick not found (already done or never started)"},
+        )
+    task.cancel()
+    _async_turn_tasks.pop(req.tick_id, None)
+    # emit tick_completed(cancelled) — 复用 native session 的 emitter(fire-and-forget)。
+    # ponytail:emitter 从 _sessions rec 取;无 rec(None/已删)则跳过 emit,task 已取消仍是真。
+    rec = _sessions.get(_key(harness_type, session_id))
+    emitter = rec.get("emitter") if rec else None
+    if emitter is not None:
+        from .events import tick_completed as _tick_completed
+        harness_id = (rec.get("harness_id") if rec else None) or f"native_{session_id[:8]}"
+        try:
+            await emitter.emit(_tick_completed(
+                harness_type, harness_id, session_id, req.tick_id,
+                status="cancelled", response="cancelled by user",
+            ))
+        except Exception:
+            logger.warning("cancel tick_completed emit failed (%s/%s)", session_id, req.tick_id)
+    return {"session_id": session_id, "tick_id": req.tick_id, "status": "cancelled"}
 
 
 @router.post("/{harness_type}/sessions/{session_id}/reconnect")

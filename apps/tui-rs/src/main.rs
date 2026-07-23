@@ -46,6 +46,10 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> i
     // 主 loop 检测新 flow_id → subscribe('flow',flow_id)。业务方法不改(ADR-3),
     // 订阅在主 loop 侧驱动。终态 flow 保留 WS(收历史,保守;ponytail: 不主动 unsubscribe)。
     let mut sub_flows: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // ADR-O1:Orchestrate fork 树根 session WS 订阅(收 branch_created/tick_* 刷节点状态)。
+    // ponytail: 只订根(fork 子节点的 branch_created 经根 emit;tick 事件按 session 订阅需更多 key,
+    // defer 全树订阅)。session 过千改 observe parent 索引(ADR-O2)。
+    let mut sub_orch_roots: std::collections::HashSet<String> = std::collections::HashSet::new();
     loop {
         terminal.draw(|f| render::draw(f, &mut app))?;
         // pending(spinner)期间缩 poll 80ms → spinner ~12fps 流畅;idle 用 base_poll 省 CPU。
@@ -91,6 +95,13 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> i
                 if !sub_flows.contains(&tf.flow_id) {
                     mgr.subscribe("flow", &tf.flow_id);
                     sub_flows.insert(tf.flow_id.clone());
+                }
+            }
+            // ADR-O1:Orchestrate fork 树根 session 订阅(agent-os-v2 WS,刷节点状态)。
+            for root in &app.fork_tree.roots {
+                if !sub_orch_roots.contains(root) {
+                    mgr.subscribe("agent-os-v2", root);
+                    sub_orch_roots.insert(root.clone());
                 }
             }
         }
@@ -160,6 +171,32 @@ fn demo_tracked_flow() -> state::TrackedFlow {
     nodes.insert("B".into(), state::FlowNodeState { id: "B".into(), status: "running".into(), response: String::new(), status_code: String::new() });
     let status = state::FlowStatus { flow_id: "flow_demo00000".into(), status: "running".into(), nodes };
     state::TrackedFlow { flow_id: "flow_demo00000".to_string(), def, status: Some(status) }
+}
+
+/// ADR-O1:为 --dump 植入演示 fork 谱系树(root native → 2 children,状态混合),
+/// 让 Orchestrate tab 渲染真实 Braille 树(不依赖 observe 在线)。
+fn seed_demo_fork_tree(app: &mut state::App) {
+    use state::{ForkNode, ForkTree, NodeState};
+    use std::collections::HashMap;
+    let mut nodes = HashMap::new();
+    let root = "sess-root-native".to_string();
+    let c1 = "sess-fork-explore-a".to_string();
+    let c2 = "sess-fork-explore-b".to_string();
+    nodes.insert(root.clone(), ForkNode {
+        session_id: root.clone(), agent_id: "native".into(), harness_type: "agent-os-v2".into(),
+        parent: None, state: NodeState::Active, children: vec![c1.clone(), c2.clone()],
+    });
+    nodes.insert(c1.clone(), ForkNode {
+        session_id: c1.clone(), agent_id: "explore-a".into(), harness_type: "agent-os-v2".into(),
+        parent: Some(root.clone()), state: NodeState::Running, children: vec![],
+    });
+    nodes.insert(c2.clone(), ForkNode {
+        session_id: c2.clone(), agent_id: "explore-b".into(), harness_type: "agent-os-v2".into(),
+        parent: Some(root.clone()), state: NodeState::Done, children: vec![],
+    });
+    app.fork_tree = ForkTree { nodes, roots: vec![root] };
+    app.orch_cursor = 0;
+    app.sync_orch_selection();
 }
 
 fn run_dump() {
@@ -248,9 +285,15 @@ fn run_dump() {
     let h = 38u16;
     let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
 
-    // 1. base panels(4 tab:Home/Flows/Observe/Control,分层 layer 0)。
-    for (idx, panel) in [state::Panel::Flows, state::Panel::Observe, state::Panel::Control].iter().enumerate() {
+    // 1. base panels(5 tab:Flows/Observe/Control/Orchestrate,分层 layer 0)。
+    for (idx, panel) in [
+        state::Panel::Flows, state::Panel::Observe, state::Panel::Control, state::Panel::Orchestrate,
+    ].iter().enumerate() {
         app.panel = *panel;
+        if *panel == state::Panel::Orchestrate {
+            // ADR-O1:植入演示 fork 谱系树(root native → 2 children,状态混合)。
+            seed_demo_fork_tree(&mut app);
+        }
         terminal.draw(|f| render::draw(f, &mut app)).unwrap();
         println!("═══ ratatui · {} 视图(layer 0 base panel)═══", panel.label());
         print_buffer(&terminal);
