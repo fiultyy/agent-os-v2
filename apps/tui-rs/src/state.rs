@@ -1492,7 +1492,7 @@ impl App {
     fn run_ctx_action(&mut self, a: CtxAction) {
         use CtxAction::*;
         match a {
-            Turn => self.do_turn(),
+            Turn => self.do_turn(false),
             Spawn => self.do_spawn(),
             Reconnect => self.do_reconnect_or_refresh(),
             Fork => self.do_fork(),
@@ -2006,7 +2006,7 @@ impl App {
     /// 触发 Control 按钮 id(0-7)动作(鼠标点击 + 键盘 Enter 共用,F1 修复)。
     fn trigger_control_button(&mut self, id: usize) {
         match id {
-            0 => { self.do_turn(); self.mark_action("trigger"); }
+            0 => { self.do_turn(false); self.mark_action("trigger"); }
             1 => { self.do_spawn(); self.mark_action("spawn"); }
             2 => {
                 // 对齐 r 键:claw→重连+刷新,cc→无状态提示,无 cursor→刷新兜底
@@ -2559,7 +2559,7 @@ impl App {
                     let msg = self.textarea.text().to_string();
                     self.push_history(&msg);
                     self.turn_msg = msg;
-                    self.do_turn();
+                    self.do_turn(false);
                     self.textarea.clear();
                     self.paste_burst.clear_after_explicit_paste();
                     self.mark_action("trigger");
@@ -2861,7 +2861,7 @@ impl App {
                 false
             }
             KeyCode::Char('t') => {
-                self.do_turn();
+                self.do_turn(false);
                 self.mark_action("trigger");
                 false
             }
@@ -4261,7 +4261,7 @@ mod tests {
         app.control_chat_scroll.offset = 0;
         app.chat_follow_tail = false;
         app.turn_msg.clear();
-        app.do_turn();
+        app.do_turn(false);
         assert!(app.chat_follow_tail, "do_turn sets tail=true");
         assert_eq!(app.control_chat_scroll.offset, 39, "scroll_to_bottom locks to total-1");
     }
