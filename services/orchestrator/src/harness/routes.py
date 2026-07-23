@@ -84,6 +84,12 @@ _sessions: Dict[str, Dict[str, Any]] = {}
 from .session_store import OrchSessionStore
 _store = OrchSessionStore()
 
+# F2(ADR-S4):native 异步 turn background tasks。持有引用防 GC(asyncio 不强引用
+# create_task 产出 → 局部 task 出作用域被回收,coroutine 静默取消)。done 回调清引用
+# 防无界增长。镜像 cc ClaudeClient._turn_tasks 形态,模块级因 native session 无 client
+# 对象可附(task 闭包 rec/emitter,不属任何 client)。
+_async_turn_tasks: Dict[str, asyncio.Task] = {}
+
 
 def _key(harness_type: str, session_id: str) -> str:
     return f"{harness_type}:{session_id}"
@@ -139,6 +145,10 @@ class TurnReq(BaseModel):
     agent_id: Optional[str] = None   # claw agentId override
     thinking: Optional[str] = None   # claw thinking param
     resume: bool = False             # claude --resume path
+    # F2(ADR-S4):native 异步 turn(fire-and-forget)。True → asyncio.create_task 包
+    # agent.run,HTTP 立返 {status: started, tick_id};observe tick 事件流报进度。
+    # 默认 False = 现有同步 {status: completed, response}(不破现有调用方/TUI/测试)。
+    async_run: bool = False
 
 
 class SwitchReq(BaseModel):
@@ -474,6 +484,23 @@ async def _build_native_session(
     }
 
 
+async def _run_native_turn_async(rec: Dict[str, Any], session_id: str, message: str) -> None:
+    """F2:background runner for async native turns.
+
+    复用同步路径的全部副作用(ObserveCapability tick lifecycle / messages 持久化 /
+    usage emit),仅异步化。异常仅 log(已 started 的 HTTP 响应无法回传错误;observe
+    tick_completed(status=error) 由 ObserveCapability 异常分支自动闭环)。
+    """
+    try:
+        result = await rec["agent"].run(message, message_history=rec["messages"])
+        rec["messages"] = result.all_messages()
+        _store.touch(session_id)
+        _persist_native_messages(session_id, rec["messages"])
+        await _emit_native_usage(rec.get("emitter"), session_id, result.usage)
+    except Exception:
+        logger.exception("async native turn failed (session=%s)", session_id)
+
+
 # ── routes ────────────────────────────────────────────────────────────
 
 @router.post("/{harness_type}/sessions")
@@ -612,6 +639,17 @@ async def trigger_turn(
             if default_cwd:
                 _active_cwd.set(Path(default_cwd))
         # in-process Agent run:ObserveCapability 自动推 observe,guardrail 自动护
+        if req.async_run:
+            # F2(ADR-S4):异步 fire-and-forget。create_task 包整 turn → HTTP 立返
+            # started;observe tick_started→tick_completed 事件流报进度(ObserveCapability
+            # 自动 emit,与同步路径同生命周期)。镜像 cc ClaudeClient.turn。
+            tick_id = str(uuid.uuid4())
+            task = asyncio.create_task(
+                _run_native_turn_async(rec, session_id, req.message)
+            )
+            _async_turn_tasks[tick_id] = task
+            task.add_done_callback(lambda t, k=tick_id: _async_turn_tasks.pop(k, None))
+            return {"session_id": session_id, "status": "started", "tick_id": tick_id}
         result = await rec["agent"].run(req.message, message_history=rec["messages"])
         rec["messages"] = result.all_messages()
         _store.touch(session_id)
