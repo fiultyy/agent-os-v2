@@ -218,10 +218,33 @@ if _SKILL_TOOLS_AVAILABLE:
     _n_prim = _bulk_register(_tool_registry, _PRIMITIVE_TOOLS)
     _n_skill = _bulk_register(_tool_registry, _SKILL_TOOLS)
     _n_wf = _bulk_register(_tool_registry, _WORKFLOW_TOOLS)
+
+    # A2A-as-tool(ADR-2 B 形态):a2a_call 工具薄桥。register 名 **a2a_call**(无
+    # v2_ 前缀,RK11)— ToolBridge ``.prefixed("v2")`` 运行时自动加 v2_ 前缀。a2a
+    # 依赖 LocalTransport + agent_registry,二者零网络/纯进程内,无条件挂(与
+    # primitive/skill 同级可见);target 解析在 handler 内 lazy read _state,故注册
+    # 不依赖 registry 已就绪。COMPOSITE 层(委派兄弟 agent,与 workflow_run 同类)。
+    _n_a2a = 0
+    try:
+        from src.a2a.tool import A2A_CALL_SCHEMA, a2a_call_handler
+        _tool_registry.register(
+            "a2a_call", a2a_call_handler,
+            description=(
+                "A2A internal-mesh call — send a message to a sibling agent "
+                "(in-process, zero network) and return its response text. "
+                "Resolve target by agent id; unknown target returns an error."
+            ),
+            parameters=A2A_CALL_SCHEMA, layer=ToolLayer.COMPOSITE,
+        )
+        _n_a2a = 1
+    except ImportError as _a2a_import_err:
+        logger.warning("a2a_call tool unavailable: %s", _a2a_import_err)
+
     logger.info(
-        "tool register: primitive=%d skill=%d workflow=%d total=%d | list_tools=%d catalog.count=%d "
+        "tool register: primitive=%d skill=%d workflow=%d a2a=%d total=%d | list_tools=%d catalog.count=%d "
         "(composite skipped: browser_flow/code_review)",
-        _n_prim, _n_skill, _n_wf, _n_prim + _n_skill + _n_wf,
+        _n_prim, _n_skill, _n_wf, _n_a2a,
+        _n_prim + _n_skill + _n_wf + _n_a2a,
         len(_tool_registry.list_tools()), _tool_registry.get_catalog().count(),
     )
 
