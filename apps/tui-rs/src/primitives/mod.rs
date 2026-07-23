@@ -12,6 +12,7 @@ use crate::state::{App, Selection};
 
 mod async_turn;
 mod cancel;
+mod compare;
 mod fork;
 mod open_events;
 
@@ -30,13 +31,14 @@ pub trait OrchestratePrimitive {
     fn invoke(&self, sel: &Selection, app: &mut App);
 }
 
-/// 注册表构造:返回首批四原语。W-C 各填自己文件后,此函数不再改动。
+/// 注册表构造:返回五原语(首批四 + compare bonus C)。各原语填自己文件后,此函数不再改动。
 pub fn all() -> Vec<Box<dyn OrchestratePrimitive>> {
     vec![
         fork::make(),
         async_turn::make(),
         open_events::make(),
         cancel::make(),
+        compare::make(),
     ]
 }
 

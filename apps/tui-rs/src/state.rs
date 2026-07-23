@@ -363,13 +363,13 @@ pub fn cancel_turn(ht: &str, sid: &str, tick_id: &str) -> Result<(), String> {
         .send_json(serde_json::json!({ "tick_id": tick_id }))
     {
         Ok(r) if r.status() == 200 => Ok(()),
-        Ok(r) => Err(format!("HTTP {}", r.status())),
-        // 404 = tick_id 已结束/不存在(ADR-O6 显式);其余 = 连接/超时类。
-        Err(e) => Err(if e.kind() == ureq::ErrorKind::HTTP {
-            "tick 不在(已结束?)".into()
-        } else {
-            "orche 不可达/超时".into()
+        Ok(r) => Err(format!("orche HTTP {}", r.status())),
+        // 4xx/5xx 细分:404=tick 已结束/不存在,其他 4xx/5xx 透传 status,非 HTTP=连接/超时类。
+        Err(ureq::Error::Status(code, _)) => Err(match code {
+            404 => "tick 不在(已结束?)".into(),
+            c => format!("orche HTTP {}", c),
         }),
+        Err(_) => Err("orche 不可达/超时".into()),
     }
 }
 /// POST /h/{type}/sessions/{id}/archive {prompt?} → summary turn 文本。失败 None。
@@ -3243,14 +3243,40 @@ mod tests {
     }
 
     #[test]
-    fn orch_primitive_registry_has_four_primitives() {
-        // ADR-O4:首批四原语注册(fork/async-turn/open-events/cancel)。
-        // W-C 四文件皆填真实 impl。
+    fn orch_primitive_registry_has_five_primitives() {
+        // ADR-O4:五原语注册(fork/async-turn/open-events/cancel + compare bonus C)。
         let app = App::new(crate::kitty::detect());
         let ids: Vec<&str> = app.primitives.iter().map(|p| p.id()).collect();
-        assert_eq!(ids, vec!["fork", "async-turn", "open-events", "cancel"]);
+        assert_eq!(ids, vec!["fork", "async-turn", "open-events", "cancel", "compare"]);
         let keys: Vec<char> = app.primitives.iter().map(|p| p.key()).collect();
-        assert_eq!(keys, vec!['f', 't', '\n', 'x']);
+        assert_eq!(keys, vec!['f', 't', '\n', 'x', 'c']);
+    }
+
+    #[test]
+    fn orch_enter_routes_to_observe_open_events() {
+        // T3(skeptic 补):Orchestrate tab Enter → open-events 原语 → panel=Observe +
+        // focus=ObserveSession + cursor 同步到选中 session_id。
+        // flat 必须含选中 sid(focus_new_session 按 sid 找 flat 索引 + set_cursor_session)。
+        let mut app = App::new(crate::kitty::detect());
+        app.fork_tree = build_fork_tree(vec![
+            OrchSession { session_id: "root".into(), harness_type: "agent-os-v2".into(), agent_id: "n".into(), parent_session_id: String::new() },
+        ]);
+        app.flat = vec![Session {
+            harness_type: "agent-os-v2".into(), session_id: "root".into(),
+            harness_id: "h1".into(), cwd: None, running: false,
+        }];
+        app.panel = Panel::Orchestrate;
+        app.orch_cursor = 0;
+        app.sync_orch_selection();
+        // 预置:选中 root。
+        assert_eq!(app.orch_selection.as_ref().unwrap().session_id, "root");
+        // Enter 经 handle_base_key 的 Orchestrate 分支 → dispatch '\n' → open-events 原语。
+        app.handle_base_key(&KeyEvent::new(KeyCode::Enter, crossterm::event::KeyModifiers::empty()));
+        // 真断言三连:panel / focus / cursor session_id 对齐。
+        assert_eq!(app.panel, Panel::Observe, "Enter should route to Observe panel");
+        assert_eq!(app.focus, FocusTarget::ObserveSession, "focus should be ObserveSession");
+        assert_eq!(app.flat.get(app.cursor).map(|s| s.session_id.as_str()), Some("root"),
+            "cursor should align to selected session_id");
     }
 
     #[test]
