@@ -3224,19 +3224,20 @@ mod tests {
     }
 
     #[test]
-    fn orch_primitive_registry_has_four_shells() {
-        // ADR-O4:W-B 预建四空壳(fork/async_turn/open_events/cancel),mod.rs all() 列四 make()。
+    fn orch_primitive_registry_has_four_primitives() {
+        // ADR-O4:首批四原语注册(fork/async-turn/open-events/cancel)。
+        // W-C 四文件皆填真实 impl。
         let app = App::new(crate::kitty::detect());
         let ids: Vec<&str> = app.primitives.iter().map(|p| p.id()).collect();
-        assert_eq!(ids, vec!["fork", "async_turn", "open_events", "cancel"]);
+        assert_eq!(ids, vec!["fork", "async-turn", "open-events", "cancel"]);
         let keys: Vec<char> = app.primitives.iter().map(|p| p.key()).collect();
-        assert_eq!(keys, vec!['f', 'a', 'o', 'x']);
+        assert_eq!(keys, vec!['f', 't', '\n', 'x']);
     }
 
     #[test]
-    fn orch_primitive_shells_disabled_and_dispatch_consumes() {
-        // 四空壳 enabled 恒 false(W-B 占位)。dispatch 命中 bound key → 消费(true,no-op);
-        // 命中未绑 key(如 'q')→ 不消费(false,交回导航)。
+    fn orch_primitive_enabled_and_dispatch_consumes() {
+        // 有选中(idle root):fork/async-turn/open-events enabled,cancel disabled(非 Running)。
+        // dispatch 命中 bound key → 消费(true);命中未绑 key('q')→ 不消费(false,交回导航)。
         let mut app = App::new(crate::kitty::detect());
         let sessions = vec![
             OrchSession { session_id: "root".into(), harness_type: "agent-os-v2".into(), agent_id: "n".into(), parent_session_id: String::new() },
@@ -3245,12 +3246,10 @@ mod tests {
         app.panel = Panel::Orchestrate;
         app.sync_orch_selection();
         let sel = app.orch_selection.clone().unwrap();
-        // 四空壳均 disabled。
-        for p in &app.primitives {
-            assert!(!p.enabled(&sel), "placeholder {} should be disabled", p.id());
-        }
-        // 命中 bound key(灰显)→ 消费 true(no-op,不回退全局)。
-        assert!(app.dispatch_orchestrate_primitive('f'));
+        // enabled 断言(不 dispatch 真实原语免触发网络/fork 副作用)。
+        let enabled: Vec<&str> = app.primitives.iter().filter(|p| p.enabled(&sel)).map(|p| p.id()).collect();
+        assert_eq!(enabled, vec!["fork", "async-turn", "open-events"], "real primitives enabled on selection");
+        // cancel disabled(非 Running)→ dispatch 'x' 消费 true(no-op 灰显)。
         assert!(app.dispatch_orchestrate_primitive('x'));
         // 未绑 key('q')→ 不消费 false。
         assert!(!app.dispatch_orchestrate_primitive('q'));
@@ -3261,18 +3260,20 @@ mod tests {
 
     #[test]
     fn orch_primitive_hint_derives_from_registry() {
-        // footer hint 从 registry 派生:disabled 显 (label),enabled 显 key=label。
-        // W-B 四空壳均 disabled → 全 (label) 形式。
+        // footer hint 从 registry 派生:enabled 显 key=label,disabled 显 (label)。
+        // 有选中(idle root):fork/async/events enabled,cancel 非 Running disabled。
         let mut app = App::new(crate::kitty::detect());
         app.fork_tree = build_fork_tree(vec![
             OrchSession { session_id: "r".into(), harness_type: "agent-os-v2".into(), agent_id: "n".into(), parent_session_id: String::new() },
         ]);
         app.sync_orch_selection();
         let hint = app.orch_primitive_hint();
-        assert!(hint.contains("(fork)"), "hint={} should gray-out disabled fork", hint);
-        assert!(hint.contains("(cancel)"), "hint={}", hint);
-        // 确认 key 不出现在 disabled 段(disabled 显 (label) 不含 key=)。
-        assert!(!hint.contains("f=fork"), "disabled should not show key: hint={}", hint);
+        // enabled 原语显 key=label。
+        assert!(hint.contains("f=fork"), "enabled fork should show key=label: hint={}", hint);
+        assert!(hint.contains("t=async"), "enabled async-turn should show t=async: hint={}", hint);
+        // cancel 非 Running disabled → 显 (cancel),不含 key=。
+        assert!(hint.contains("(cancel)"), "disabled cancel grayed: hint={}", hint);
+        assert!(!hint.contains("x=cancel"), "disabled should not show key: hint={}", hint);
     }
 
     #[test]
