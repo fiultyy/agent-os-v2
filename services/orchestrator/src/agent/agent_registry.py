@@ -11,6 +11,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from a2a.card import AgentCard, spec_to_card
+
 from .agent_spec import (
     AgentSpec,
     AgentsConfig,
@@ -172,3 +174,16 @@ class AgentRegistry:
                 default=True,
             )
         ]
+
+    # ------------------------------------------------------------- a2a catalog
+    def list_cards(self) -> list[tuple[str, AgentCard]]:
+        """In-process A2A catalog: (agent_id, AgentCard) for every loaded spec.
+
+        Internal mesh only (ADR-1). Cards project from AgentSpec (ADR-3).
+        """
+        return [(aid, spec_to_card(spec)) for aid, spec in self._agents.items()]
+
+    def get_card(self, agent_id: str) -> AgentCard | None:
+        """Return the AgentCard for agent_id, or None if not loaded."""
+        spec = self.get(agent_id)
+        return spec_to_card(spec) if spec else None
