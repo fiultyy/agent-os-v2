@@ -77,7 +77,17 @@ class EventStore:
 
     def _init_schema(self) -> None:
         self._conn.executescript(EVENT_SCHEMA)
-        self._conn.commit()
+        # ADR-1 (Node D): add agent_id to observe_events. Idempotent — legacy
+        # rows keep NULL (ADD COLUMN default NULL, no rebuild). try/except so an
+        # already-present column (fresh re-init) is a no-op. Same pattern as
+        # session_store.
+        try:
+            self._conn.execute(
+                "ALTER TABLE observe_events ADD COLUMN agent_id TEXT"
+            )
+            self._conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
     # ── Write ──────────────────────────────────────────────────────
 
@@ -87,9 +97,9 @@ class EventStore:
             self._conn.execute(
                 """
                 INSERT INTO observe_events
-                    (event_id, harness_type, harness_id, session_id, tick_id, event_type, data, timestamp, created_at)
+                    (event_id, harness_type, harness_id, session_id, tick_id, event_type, data, timestamp, created_at, agent_id)
                 VALUES
-                    (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event.event_id,
@@ -101,6 +111,7 @@ class EventStore:
                     json.dumps(event.data, ensure_ascii=False),
                     event.timestamp,
                     datetime.now(timezone.utc).isoformat(),
+                    getattr(event, "agent_id", "") or None,
                 ),
             )
             self._conn.commit()
@@ -108,6 +119,7 @@ class EventStore:
     async def append_many(self, events: List[ObserveEvent]) -> None:
         """Batch-append multiple events."""
         async with self._async_lock:
+            now = datetime.now(timezone.utc).isoformat()
             rows = [
                 (
                     e.event_id,
@@ -118,16 +130,17 @@ class EventStore:
                     e.event_type.value,
                     json.dumps(e.data, ensure_ascii=False),
                     e.timestamp,
-                    datetime.now(timezone.utc).isoformat(),
+                    now,
+                    getattr(e, "agent_id", "") or None,
                 )
                 for e in events
             ]
             self._conn.executemany(
                 """
                 INSERT OR IGNORE INTO observe_events
-                    (event_id, harness_type, harness_id, session_id, tick_id, event_type, data, timestamp, created_at)
+                    (event_id, harness_type, harness_id, session_id, tick_id, event_type, data, timestamp, created_at, agent_id)
                 VALUES
-                    (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )

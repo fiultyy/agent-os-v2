@@ -48,6 +48,10 @@ class ObserveCapability(AbstractCapability[Any]):
     emitter: Any = None  # ObserveEmitter(harness/emit.py)
     harness_id: str = ""
     session_id: str = ""
+    # ADR-1: semantic agent_id owning this turn. For a consumed A2A agent this
+    # is the TARGET id (set by assemble_capabilities from spec_id), NOT the
+    # caller's — so observe can tell whose turn each event belongs to.
+    agent_id: str = ""
 
     def get_ordering(self) -> CapabilityOrdering:
         return CapabilityOrdering(position="outermost")
@@ -76,7 +80,8 @@ class ObserveCapability(AbstractCapability[Any]):
                     )
                     if has_content:
                         await self._emit(
-                            tick_started(HARNESS_TYPE, self.harness_id, self.session_id, tick_id, user_msg)
+                            tick_started(HARNESS_TYPE, self.harness_id, self.session_id, tick_id, user_msg,
+                                         agent_id=self.agent_id)
                         )
                         started = True
                 yield event  # forward 到主路径(always)
@@ -87,7 +92,7 @@ class ObserveCapability(AbstractCapability[Any]):
                     await self._emit(tool_call(
                         HARNESS_TYPE, self.harness_id, self.session_id, tick_id,
                         tool_name=part.tool_name, arguments=args,
-                        call_id=part.tool_call_id,
+                        call_id=part.tool_call_id, agent_id=self.agent_id,
                     ))
                 elif isinstance(event, FunctionToolResultEvent):
                     part = event.part
@@ -104,24 +109,25 @@ class ObserveCapability(AbstractCapability[Any]):
                             call_id=getattr(part, "tool_call_id", ""),
                             result=part.content if ok else None,
                             error="" if ok else f"tool outcome: {outcome}",
+                            agent_id=self.agent_id,
                         ))
                 elif isinstance(event, PartDeltaEvent) and isinstance(event.delta, TextPartDelta):
                     await self._emit(token_delta(
                         HARNESS_TYPE, self.harness_id, self.session_id, tick_id,
-                        delta_text=event.delta.content_delta,
+                        delta_text=event.delta.content_delta, agent_id=self.agent_id,
                     ))
             # stream 正常耗尽 = success 闭环(仅当 started:空/非内容 wrap 不 emit tick)
             if started:
                 await self._emit(tick_completed(
                     HARNESS_TYPE, self.harness_id, self.session_id, tick_id,
-                    status="success", tool_count=tool_count,
+                    status="success", tool_count=tool_count, agent_id=self.agent_id,
                 ))
         except Exception:
             # 主路径异常:补 error tick 闭环(仅当 started),再传播(不吞主异常)
             if started:
                 await self._emit(tick_completed(
                     HARNESS_TYPE, self.harness_id, self.session_id, tick_id,
-                    status="error", response="native run failed",
+                    status="error", response="native run failed", agent_id=self.agent_id,
                 ))
             raise
 

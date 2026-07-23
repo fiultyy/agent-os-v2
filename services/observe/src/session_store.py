@@ -60,7 +60,16 @@ class SessionStore:
 
     def _init_schema(self) -> None:
         self._conn.executescript(SESSION_SCHEMA)
-        self._conn.commit()
+        # ADR-1: add agent_id column to observe_sessions. Idempotent — legacy
+        # rows keep NULL (SQLite ADD COLUMN default NULL, no rebuild). try/except
+        # so an already-present column (fresh DB or re-init) is a no-op.
+        try:
+            self._conn.execute(
+                "ALTER TABLE observe_sessions ADD COLUMN agent_id TEXT"
+            )
+            self._conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
     # ── CRUD ────────────────────────────────────────────────────────
 
@@ -69,16 +78,17 @@ class SessionStore:
         harness_type: str,
         session_id: str,
         harness_id: str,
+        agent_id: str = "",
     ) -> None:
-        """Register a new session."""
+        """Register a new session. ``agent_id`` (ADR-1) optional, legacy NULL-safe."""
         now = datetime.now(timezone.utc).isoformat()
         self._conn.execute(
             """
             INSERT OR REPLACE INTO observe_sessions
-                (harness_type, session_id, harness_id, created_at, last_active)
-            VALUES (?, ?, ?, ?, ?)
+                (harness_type, session_id, harness_id, created_at, last_active, agent_id)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (harness_type, session_id, harness_id, now, now),
+            (harness_type, session_id, harness_id, now, now, agent_id or None),
         )
         self._conn.commit()
 
@@ -92,6 +102,24 @@ class SessionStore:
             WHERE harness_type = ? AND session_id = ?
             """,
             (now, harness_type, session_id),
+        )
+        self._conn.commit()
+
+    def update_agent_id(
+        self, harness_type: str, session_id: str, agent_id: str
+    ) -> None:
+        """ADR-1: backfill agent_id on a session row only if currently NULL.
+
+        Idempotent and non-destructive: a row already carrying an agent_id
+        (e.g. set explicitly at create) is not overwritten.
+        """
+        self._conn.execute(
+            """
+            UPDATE observe_sessions
+            SET agent_id = ?
+            WHERE harness_type = ? AND session_id = ? AND agent_id IS NULL
+            """,
+            (agent_id, harness_type, session_id),
         )
         self._conn.commit()
 

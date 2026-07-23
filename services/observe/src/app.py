@@ -78,6 +78,7 @@ class SessionCreate(BaseModel):
     harness_type: str
     session_id: str
     harness_id: str
+    agent_id: str = ""  # ADR-1: optional semantic agent_id
 
 
 # ── Health ─────────────────────────────────────────────────────────
@@ -131,6 +132,7 @@ async def create_session(req: SessionCreate):
         req.harness_type,
         req.session_id,
         req.harness_id,
+        agent_id=req.agent_id,
     )
     logger.info(f"Session created: {req.harness_type}/{req.session_id}")
     return {"status": "created"}
@@ -210,9 +212,15 @@ async def ws_ingest(websocket: WebSocket):
                     # Emit (persist + broadcast)
                     if emitter:
                         await emitter.emit(event)
-                        # Update last_active
+                        # Update last_active + ADR-1: backfill agent_id from
+                        # the event if the session row lacks it (the WS ingest
+                        # URL carries no agent_id; it arrives in the payload).
                         if session_store:
                             session_store.update_last_active(harness_type, session_id)
+                            if getattr(event, "agent_id", ""):
+                                session_store.update_agent_id(
+                                    harness_type, session_id, event.agent_id
+                                )
                 except Exception as e:
                     logger.error(f"Failed to parse event: {e}")
 

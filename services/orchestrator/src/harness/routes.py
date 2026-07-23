@@ -364,7 +364,8 @@ def assemble_capabilities(
     else:
         skill_caps = all_skills
     caps = [
-        ObserveCapability(emitter=emitter, harness_id=harness_id, session_id=session_id),
+        ObserveCapability(emitter=emitter, harness_id=harness_id, session_id=session_id,
+                          agent_id=spec_id),
         MemoryWriterCapability(
             memory_event_bus=_state.memory_event_bus,
             knowledge_graph=_state.knowledge_graph,

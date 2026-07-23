@@ -149,3 +149,51 @@ def test_observe_tool_result_denied_outcome_reports_error() -> None:
     tr = [e for e in em.emitted if e["event_type"] == "tool_result"][0]
     assert tr["data"]["error"]                       # denied → error 非空
     assert "denied" in tr["data"]["error"]
+
+
+def test_observe_emits_agent_id_on_every_event() -> None:
+    """ADR-1 (Node D): every emitted event carries the capability's agent_id."""
+    em = _StubEmitter()
+    cap = ObserveCapability(emitter=em, harness_id="h", session_id="s", agent_id="main")
+
+    async def stream():
+        yield FunctionToolCallEvent(ToolCallPart("t", {}, "c1"))
+
+    asyncio.run(_consume(cap.wrap_run_event_stream(ctx=None, stream=stream())))
+    assert em.emitted, "expected events"
+    # Every event (tick_started/tool_call/tick_completed) tagged agent_id="main".
+    assert all(e["agent_id"] == "main" for e in em.emitted)
+
+
+def test_observe_consumed_agent_carries_target_not_caller() -> None:
+    """A2A invariant: a consumed agent's events carry the TARGET agent_id.
+
+    ObserveCapability is constructed by assemble_capabilities with the TARGET
+    spec_id (not the caller's). Simulate: caller=native consumes target=main →
+    the capability for the consumed run is built with agent_id="main".
+    """
+    em = _StubEmitter()
+    # assemble_capabilities would pass agent_id=spec_id(target) here.
+    cap = ObserveCapability(emitter=em, harness_id="h", session_id="s", agent_id="main")
+
+    async def stream():
+        yield PartDeltaEvent(index=0, delta=TextPartDelta(content_delta="hi"))
+
+    asyncio.run(_consume(cap.wrap_run_event_stream(ctx=None, stream=stream())))
+    assert all(e["agent_id"] == "main" for e in em.emitted)
+    # Not the caller "native".
+    assert not any(e["agent_id"] == "native" for e in em.emitted)
+
+
+def test_harness_events_base_carries_agent_id() -> None:
+    """orchestrator events.py: agent_id threaded through _base constructors."""
+    from src.harness.events import tick_started, tool_call, tick_completed
+
+    ev = tick_started("agent-os-v2", "h", "s", "t", "req", agent_id="main")
+    assert ev["agent_id"] == "main"
+    ev = tool_call("agent-os-v2", "h", "s", "t", "search", {}, agent_id="main")
+    assert ev["agent_id"] == "main"
+    ev = tick_completed("agent-os-v2", "h", "s", "t", "success", agent_id="main")
+    assert ev["agent_id"] == "main"
+    # default empty (legacy)
+    assert tick_started("agent-os-v2", "h", "s", "t", "r")["agent_id"] == ""

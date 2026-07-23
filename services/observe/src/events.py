@@ -41,6 +41,11 @@ class ObserveEvent:
     tick_id: str = ""
     event_type: EventType = EventType.TICK_STARTED
     data: Dict[str, Any] = field(default_factory=dict)
+    # ADR-1: semantic agent_id (e.g. "native"/"main"). Empty for legacy events.
+    # Lets observe tell which agent a turn belongs to — the basis of A2A mesh
+    # traceability. A consumed agent's events carry the TARGET agent_id, not the
+    # caller's (set by orchestrator assemble_capabilities).
+    agent_id: str = ""
     timestamp: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -55,6 +60,7 @@ class ObserveEvent:
             "tick_id": self.tick_id,
             "event_type": self.event_type.value,
             "data": self.data,
+            "agent_id": self.agent_id,
             "timestamp": self.timestamp,
         }
 

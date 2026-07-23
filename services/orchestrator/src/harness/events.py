@@ -26,6 +26,7 @@ def _base(
     tick_id: str,
     event_type: str,
     data: Dict[str, Any],
+    agent_id: str = "",
 ) -> Dict[str, Any]:
     return {
         "event_id": str(uuid.uuid4()),
@@ -35,34 +36,36 @@ def _base(
         "tick_id": tick_id,
         "event_type": event_type,
         "data": data,
+        "agent_id": agent_id,
         "timestamp": _now(),
     }
 
 
 def tick_started(
     harness_type: str, harness_id: str, session_id: str,
-    tick_id: str, request: str,
+    tick_id: str, request: str, *, agent_id: str = "",
 ) -> Dict[str, Any]:
     return _base(harness_type, harness_id, session_id, tick_id,
-                 "tick_started", {"request": request[:500]})
+                 "tick_started", {"request": request[:500]}, agent_id=agent_id)
 
 
 def tool_call(
     harness_type: str, harness_id: str, session_id: str,
     tick_id: str, tool_name: str, arguments: Dict[str, Any],
-    call_id: str = "",
+    call_id: str = "", *, agent_id: str = "",
 ) -> Dict[str, Any]:
     return _base(harness_type, harness_id, session_id, tick_id,
                  "tool_call", {
                      "call_id": call_id or str(uuid.uuid4()),
                      "tool_name": tool_name,
                      "arguments": arguments,
-                 })
+                 }, agent_id=agent_id)
 
 
 def tool_result(
     harness_type: str, harness_id: str, session_id: str,
     tick_id: str, call_id: str, result: Any = None, error: str = "",
+    *, agent_id: str = "",
 ) -> Dict[str, Any]:
     payload: Dict[str, Any] = {"call_id": call_id}
     if error:
@@ -72,13 +75,14 @@ def tool_result(
         payload["error"] = ""
         payload["result"] = str(result)[:500] if result else ""
     return _base(harness_type, harness_id, session_id, tick_id,
-                 "tool_result", payload)
+                 "tool_result", payload, agent_id=agent_id)
 
 
 def tick_completed(
     harness_type: str, harness_id: str, session_id: str,
     tick_id: str, status: str, response: str = "",
     tool_count: int = 0, duration_ms: float = 0.0,
+    *, agent_id: str = "",
 ) -> Dict[str, Any]:
     return _base(harness_type, harness_id, session_id, tick_id,
                  "tick_completed", {
@@ -86,15 +90,16 @@ def tick_completed(
                      "response": response[:500],
                      "tool_count": tool_count,
                      "duration_ms": duration_ms,
-                 })
+                 }, agent_id=agent_id)
 
 
 def token_delta(
     harness_type: str, harness_id: str, session_id: str,
     tick_id: str, delta_text: str, accumulated_text: str = "",
+    *, agent_id: str = "",
 ) -> Dict[str, Any]:
     return _base(harness_type, harness_id, session_id, tick_id,
                  "token_delta", {
                      "delta_text": delta_text,
                      "accumulated_text": accumulated_text,
-                 })
+                 }, agent_id=agent_id)
