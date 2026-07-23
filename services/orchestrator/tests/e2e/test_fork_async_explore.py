@@ -141,10 +141,10 @@ class TestForkAsyncExploreE2E:
         def _patched_emit(self, event):
             return capture.wrap(_orig_emit.__get__(self, emit_mod.ObserveEmitter))(event)
 
-        async def _probed_runner(rec, session_id, message):
+        async def _probed_runner(rec, session_id, message, tick_id):
             conc.mark_enter(session_id)
             try:
-                return await _orig_runner(rec, session_id, message)
+                return await _orig_runner(rec, session_id, message, tick_id)
             finally:
                 conc.mark_exit(session_id)
 

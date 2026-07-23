@@ -197,3 +197,59 @@ def test_harness_events_base_carries_agent_id() -> None:
     assert ev["agent_id"] == "main"
     # default empty (legacy)
     assert tick_started("agent-os-v2", "h", "s", "t", "r")["agent_id"] == ""
+
+
+# ── tick_id 单域(方案 A):ctx.metadata.tick_id 优先于自生成 uuid ─────────
+
+class _Ctx:
+    """最小 RunContext stub — 只暴露 metadata(ObserveCapability 读的唯一字段)。"""
+    def __init__(self, metadata):
+        self.metadata = metadata
+
+
+def test_observe_uses_injected_tick_id_from_metadata() -> None:
+    """ctx.metadata["tick_id"] 贯穿 tick_started/tool_call/tick_completed 全程。"""
+    em = _StubEmitter()
+    cap = ObserveCapability(emitter=em, harness_id="h", session_id="s")
+
+    async def stream():
+        yield FunctionToolCallEvent(ToolCallPart("t", {}, "c1"))
+
+    ctx = _Ctx(metadata={"tick_id": "orch-tick-XYZ"})
+    asyncio.run(_consume(cap.wrap_run_event_stream(ctx=ctx, stream=stream())))
+
+    assert em.emitted, "expected events"
+    # 全部事件用注入的 tick_id(非自生成 uuid)
+    assert all(e["tick_id"] == "orch-tick-XYZ" for e in em.emitted)
+    types = [e["event_type"] for e in em.emitted]
+    assert types[0] == "tick_started"
+    assert types[-1] == "tick_completed"
+
+
+def test_observe_falls_back_to_self_generated_tick_without_metadata() -> None:
+    """无 ctx.metadata(同步路径/旧调用方)→ 回退自生成 uuid(向后兼容)。"""
+    em = _StubEmitter()
+    cap = ObserveCapability(emitter=em, harness_id="h", session_id="s")
+
+    async def stream():
+        yield FunctionToolCallEvent(ToolCallPart("t", {}, "c1"))
+
+    asyncio.run(_consume(cap.wrap_run_event_stream(ctx=None, stream=stream())))
+    tick_ids = {e["tick_id"] for e in em.emitted}
+    assert len(tick_ids) == 1, "all events share one tick_id"
+    assert next(iter(tick_ids))  # non-empty string
+
+
+def test_observe_falls_back_when_metadata_lacks_tick_id() -> None:
+    """ctx.metadata 存在但无 tick_id 键 → 回退自生成(不崩)。"""
+    em = _StubEmitter()
+    cap = ObserveCapability(emitter=em, harness_id="h", session_id="s")
+
+    async def stream():
+        yield FunctionToolCallEvent(ToolCallPart("t", {}, "c1"))
+
+    ctx = _Ctx(metadata={"other": "value"})
+    asyncio.run(_consume(cap.wrap_run_event_stream(ctx=ctx, stream=stream())))
+    tick_ids = {e["tick_id"] for e in em.emitted}
+    assert len(tick_ids) == 1
+    assert next(iter(tick_ids))

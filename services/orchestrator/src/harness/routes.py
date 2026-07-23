@@ -489,15 +489,23 @@ async def _build_native_session(
     }
 
 
-async def _run_native_turn_async(rec: Dict[str, Any], session_id: str, message: str) -> None:
+async def _run_native_turn_async(
+    rec: Dict[str, Any], session_id: str, message: str, tick_id: str,
+) -> None:
     """F2:background runner for async native turns.
 
     复用同步路径的全部副作用(ObserveCapability tick lifecycle / messages 持久化 /
     usage emit),仅异步化。异常仅 log(已 started 的 HTTP 响应无法回传错误;observe
     tick_completed(status=error) 由 ObserveCapability 异常分支自动闭环)。
+
+    tick_id(orchestration 生成)经 metadata={"tick_id":...} 注入 agent.run →
+    ObserveCapability 读 ctx.metadata,使 emit 的 tick_started/tick_completed 用
+    同一个 tick_id(单域);cancel 端点 emit 的 tick_completed(cancelled) 同 tick_id。
     """
     try:
-        result = await rec["agent"].run(message, message_history=rec["messages"])
+        result = await rec["agent"].run(
+            message, message_history=rec["messages"], metadata={"tick_id": tick_id},
+        )
         rec["messages"] = result.all_messages()
         _store.touch(session_id)
         _persist_native_messages(session_id, rec["messages"])
@@ -650,7 +658,7 @@ async def trigger_turn(
             # 自动 emit,与同步路径同生命周期)。镜像 cc ClaudeClient.turn。
             tick_id = str(uuid.uuid4())
             task = asyncio.create_task(
-                _run_native_turn_async(rec, session_id, req.message)
+                _run_native_turn_async(rec, session_id, req.message, tick_id)
             )
             _async_turn_tasks[tick_id] = task
             task.add_done_callback(lambda t, k=tick_id: _async_turn_tasks.pop(k, None))

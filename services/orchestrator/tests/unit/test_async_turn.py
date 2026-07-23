@@ -41,7 +41,7 @@ def _make_fake_rec(emitter_events: list | None = None,
         def __init__(self):
             self.run_calls = []
 
-        async def run(self, message, message_history=None):
+        async def run(self, message, message_history=None, metadata=None):
             self.run_calls.append((message, list(message_history or [])))
             return _FakeResult(
                 output=f"reply:{message}",

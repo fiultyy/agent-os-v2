@@ -62,7 +62,14 @@ class ObserveCapability(AbstractCapability[Any]):
                 yield event
             return
 
-        tick_id = str(uuid.uuid4())
+        # 单域 tick_id:优先用 caller 经 agent.run(metadata={"tick_id":...}) 注入的
+        # orchestration tick_id(async native turn 路径),使 cancel 端点 emit 的
+        # tick_completed(cancelled) 与本 wrap emit 的 tick_started/tick_completed 同
+        # tick_id。无注入(同步路径 / 旧调用方)→ 回退自生成 uuid(向后兼容)。
+        meta = getattr(ctx, "metadata", None) or {}
+        tick_id = meta.get("tick_id") if isinstance(meta, dict) else None
+        if not tick_id:
+            tick_id = str(uuid.uuid4())
         tool_count = 0
         started = False  # 延迟到首个有内容 event 才 emit tick_started(见 async for)
         # 用户消息优先(ctx.prompt);占位 [native run] 仅在 prompt 不可得时(避免 TUI 把
