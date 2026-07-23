@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent OS v2 — A2A 流式编排设计(取代 turn-as-graph P0)</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<style>
+:root{
+  --bg:#0b0f17; --bg2:#11161f; --card:#161c28; --card2:#1c2433;
+  --bd:#262f42; --tx:#d7dde8; --tx2:#8b95a7; --mute:#5b6679;
+  --pri:#5bc8ff; --pri2:#7c8cff; --acc:#c099ff; --ok:#56d364; --warn:#ffb454; --danger:#ff6b6b;
+  --grad:linear-gradient(135deg,#5bc8ff 0%,#7c8cff 45%,#c099ff 100%);
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--tx);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;font-size:15px;line-height:1.65;-webkit-font-smoothing:antialiased}
+code,pre,.mono{font-family:"JetBrains Mono","SF Mono",Consolas,"Liberation Mono",Menlo,monospace}
+.layout{display:flex;align-items:flex-start;max-width:1480px;margin:0 auto}
+nav.sidebar{position:sticky;top:0;height:100vh;flex:0 0 252px;overflow-y:auto;padding:22px 16px;border-right:1px solid var(--bd);background:linear-gradient(180deg,var(--bg) 0%,#0d121b 100%)}
+nav.sidebar .brand{font-weight:700;font-size:14px;background:var(--grad);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:6px}
+nav.sidebar .brand-sub{font-size:11px;color:var(--mute);margin-bottom:18px}
+.nav-group{font-size:10.5px;color:var(--mute);text-transform:uppercase;letter-spacing:.8px;margin:16px 4px 6px}
+.nav-item{display:block;padding:7px 12px;border-radius:8px;color:var(--tx2);text-decoration:none;font-size:13.5px;margin-bottom:2px;border-left:2px solid transparent;transition:.15s}
+.nav-item:hover{background:var(--card);color:var(--tx)}
+main{flex:1;min-width:0;padding:0 40px 80px}
+.hero{margin:32px 0 8px;padding:34px;border-radius:18px;background:radial-gradient(1200px 300px at 0% 0%,rgba(124,140,255,.18),transparent),radial-gradient(900px 280px at 100% 0%,rgba(192,153,255,.14),transparent),var(--card);border:1px solid var(--bd)}
+.hero h1{margin:0 0 8px;font-size:30px;letter-spacing:.5px}
+.hero h1 .grad{background:var(--grad);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+.hero .lead{font-size:16px;color:var(--tx2);max-width:860px;margin:0 0 16px}
+.hero .stack{display:flex;flex-wrap:wrap;gap:7px;margin-top:6px}
+.tag{display:inline-block;padding:3px 10px;border-radius:20px;font-size:12px;background:var(--card2);border:1px solid var(--bd);color:var(--tx)}
+.tag.t{color:var(--pri);border-color:#23344750}
+.tag.a{color:var(--acc);border-color:#332a4750}
+.tag.danger{color:var(--danger);border-color:#47232350}
+section{margin:42px 0 0;scroll-margin-top:20px}
+h2{margin:0 0 6px;font-size:24px}
+h2 .n{color:var(--mute);font-family:"JetBrains Mono",Consolas,monospace;font-size:15px;margin-right:8px}
+h3{margin:26px 0 8px;font-size:17px;color:var(--pri)}
+.lead-p{font-size:15.5px;color:var(--tx2);max-width:880px;margin:0 0 18px}
+.purpose{font-size:15px;color:var(--tx);background:linear-gradient(90deg,rgba(91,200,255,.08),transparent);border-left:3px solid var(--pri);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0 18px}
+.pit{font-size:14px;background:linear-gradient(90deg,rgba(255,180,84,.08),transparent);border-left:3px solid var(--warn);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+.pit b{color:var(--warn)}
+.dangerbox{font-size:14px;background:linear-gradient(90deg,rgba(255,107,107,.08),transparent);border-left:3px solid var(--danger);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+.dangerbox b{color:var(--danger)}
+.human{font-size:14.5px;background:linear-gradient(90deg,rgba(86,211,100,.07),transparent);border-left:3px solid var(--ok);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+.human b{color:var(--ok)}
+.human::before{content:"说人话  ";font-weight:700;color:var(--ok);font-size:12px;letter-spacing:.5px}
+.mermaid-wrap{margin:18px 0;padding:18px;border-radius:12px;background:var(--bg2);border:1px solid var(--bd);text-align:center;overflow-x:auto}
+.mermaid-wrap .cap{font-size:12px;color:var(--mute);margin-top:10px;text-align:left}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:16px 0}
+.card{padding:16px 18px;border-radius:12px;background:var(--card);border:1px solid var(--bd)}
+.card h4{margin:0 0 6px;font-size:14.5px;color:var(--pri)}
+.card p{margin:0;font-size:13.5px;color:var(--tx2)}
+.card .pill{display:inline-block;margin-top:8px;padding:2px 9px;border-radius:14px;font-size:11px;background:var(--card2);color:var(--tx2)}
+table.cmp{width:100%;border-collapse:collapse;margin:14px 0;font-size:13.5px;background:var(--card);border:1px solid var(--bd);border-radius:12px;overflow:hidden}
+table.cmp th,table.cmp td{padding:11px 14px;border-bottom:1px solid var(--bd);text-align:left;vertical-align:top}
+table.cmp th{background:var(--card2);font-size:12.5px;color:var(--tx2);font-weight:600}
+table.cmp tr:last-child td{border-bottom:none}
+table.cmp td.dim{color:var(--mute);font-weight:600;width:150px}
+table.cmp .yes{color:var(--ok)}
+table.cmp .no{color:var(--danger)}
+table.cmp .mid{color:var(--warn)}
+.terminal{background:#070a11;border:1px solid var(--bd);border-radius:10px;padding:14px 16px;font-family:"JetBrains Mono",Consolas,monospace;font-size:12.5px;color:var(--tx2);line-height:1.6;overflow-x:auto;margin:14px 0;white-space:pre}
+.terminal .hi{color:var(--pri)}
+.terminal .ok{color:var(--ok)}
+.terminal .warn{color:var(--warn)}
+.terminal .acc{color:var(--acc)}
+.terminal .danger{color:var(--danger)}
+.terminal .mute{color:var(--mute)}
+.phased{display:flex;flex-direction:column;gap:14px;margin:16px 0}
+.phase{display:flex;gap:16px;padding:16px 18px;border-radius:12px;background:var(--card);border:1px solid var(--bd);border-left:3px solid var(--pri)}
+.phase.p1{border-left-color:var(--warn)}
+.phase .pk{flex:0 0 86px;font-weight:700;font-size:13px;color:var(--pri)}
+.phase.p1 .pk{color:var(--warn)}
+.phase .pb h4{margin:0 0 4px;font-size:14.5px}
+.phase .pb p{margin:0;font-size:13.5px;color:var(--tx2)}
+ul.dash{list-style:none;padding-left:0;margin:10px 0}
+ul.dash li{padding:5px 0 5px 22px;position:relative;font-size:14px;color:var(--tx2)}
+ul.dash li::before{content:"▸";position:absolute;left:0;color:var(--pri)}
+ul.dash li b{color:var(--tx)}
+.supersede{margin:18px 0;padding:16px 18px;border-radius:12px;background:linear-gradient(90deg,rgba(255,107,107,.10),transparent);border:1px solid #47232350;border-left:3px solid var(--danger);font-size:14px}
+.supersede b{color:var(--danger)}
+.footer{margin:48px 0 0;padding-top:18px;border-top:1px solid var(--bd);font-size:12.5px;color:var(--mute)}
+</style>
+</head>
+<body>
+<div class="layout">
+<nav class="sidebar">
+  <div class="brand">Agent OS v2</div>
+  <div class="brand-sub">A2A 流式编排设计</div>
+  <div class="nav-group">基础</div>
+  <a class="nav-item" href="#rev">修订声明</a>
+  <a class="nav-item" href="#paradigms">§1 两范式</a>
+  <a class="nav-item" href="#mesh">§2 A2A mesh 地基</a>
+  <div class="nav-group">核心</div>
+  <a class="nav-item" href="#projection">§3 原语=capability→card</a>
+  <a class="nav-item" href="#streaming">§4 流式编排 MVP</a>
+  <a class="nav-item" href="#handoff">§5 handoff 难点</a>
+  <div class="nav-group">全景</div>
+  <a class="nav-item" href="#primitives">§6 原语全谱</a>
+  <a class="nav-item" href="#defer">§7 defer + 落地</a>
+</nav>
+<main>
+
+<div class="hero">
+  <h1>A2A <span class="grad">流式编排</span> 设计</h1>
+  <p class="lead">把 agent turn 的编排从「一个模型临场发挥」拆成<b>两套各司其职的范式</b>:workflow(冻结红线的确定性子程序工具)+ A2A 流式编排(human&agentic 协同的即时编排)。原语不是独立引擎的部件,而是 <b>pydantic-ai capability → A2A card 投影</b>。本文取代 turn-as-graph 报告里被否的「给 workflow kernel 加 DAG」路线。</p>
+  <div class="stack">
+    <span class="tag t">A2A internal mesh ✅ 已通电</span>
+    <span class="tag a">primitives = capability projection</span>
+    <span class="tag">human-driven MVP</span>
+    <span class="tag danger">workflow = 红线不动</span>
+    <span class="tag">2026-07-23</span>
+  </div>
+</div>
+
+<div class="supersede" id="rev">
+<b>⚠️ 取代声明。</b>本文取代 <code>docs/turn-as-graph-design.html</code> 里的 <b>P0 路线(给 workflow kernel 加 DAG/条件分支)</b>——那条会动红线,已废。新路线:<b>graph 编排走 A2A 流式编排,不扩 workflow</b>。turn-as-graph 报告的四课题(智力颗粒度/全自动/记忆组件/硬编码多专项)仍有效,作为本设计的背景语境,但落地机制全部重定向到 A2A + capability 投影。
+</div>
+
+<section id="paradigms">
+<h2><span class="n">§1</span>两范式(彻底分清,别混)</h2>
+<p class="lead-p">这是整个设计的地基。两套范式对立、各管一摊,混在一起就是过去几版设计反复出错的根源。</p>
+
+<table class="cmp">
+<tr><th>维度</th><th>workflow(冻结红线)</th><th>流式编排(graph 走这条)</th></tr>
+<tr><td class="dim">本质</td><td><b>给单一高智力 agent 的工具</b>:封装让该 agent 做<b>固定、完整、代码级</b>编排(写 DSL/scripts,如 CC 的 workflow),扩展其执行能力</td><td><b>human & agentic 协同</b>:即时、流式、反应式地编排多 agent session</td></tr>
+<tr><td class="dim">计划时机</td><td><span class="no">先全计划</span>(agent 写完整脚本)</td><td><span class="yes">边走边编</span>(随结果涌现)</td></tr>
+<tr><td class="dim">下一步谁决</td><td>kernel 确定执行(run/pipeline/loop)</td><td>MVP=<b>人决</b>;post-MVP=agentic</td></tr>
+<tr><td class="dim">底层执行</td><td>subagent(有限 nesting)、有结束、内部小循环判断</td><td>A2A peer(fork/分支,各带 session/memory scope)</td></tr>
+<tr><td class="dim">可改性</td><td><span class="mid">可改脚本,但已跑部分不可热重载(像 cache)</span></td><td>每段可重编、fork 可发散/收敛</td></tr>
+<tr><td class="dim">独立性</td><td>抽象范式 + DSL/scripts,<b>相对独立迭代</b></td><td>依赖 A2A mesh + capability 装配</td></tr>
+<tr><td class="dim">红线</td><td><span class="no"><b>不动,不加 DAG/条件分支</b></span></td><td>—</td></tr>
+</table>
+
+<div class="dangerbox">
+<b>红线:workflow 全程不动。</b>它现在是、且只应是「agent 写完整确定性脚本 → kernel 执行」的<b>唯一验证过的 tools 范式</b>,扩展单 agent 的确定性执行能力。graph 编排<b>不扩 workflow 内核</b>。workflow 在流式编排里可被当作<b>一个确定性子程序原语</b>(agent 调 <code>v2_workflow_run</code>),但那是工具选择,不是编排底座。
+</div>
+
+<div class="human">
+两套范式管两种活:<b>程序能完全预先指定</b>→ workflow(agent 写死脚本跑);<b>程序随结果涌现</b>→ 流式编排(人/agent 即时编)。一个 main agent 可以两个都用——甩一段确定子程序给 workflow,外层用流式编排反应式调度。底座是 A2A,不是 workflow。
+</div>
+</section>
+
+<section id="mesh">
+<h2><span class="n">§2</span>A2A mesh 地基(已通电)</h2>
+<p class="lead-p">流式编排的底座是本轮已落地的 A2A 内部 mesh(6 commit)。native/main 自成 A2A 节点,可互发现 + 互消费。这套 mesh 对任意 <code>AgentSpec</code> 泛化——加 agent = 加 yaml 条目,自动入 card/catalog。</p>
+
+<div class="terminal"><span class="mute"># 本轮交付(A2A internal mesh,iteration_base 6c69079 → 0f253cc)</span>
+<span class="hi">A</span> AgentCard 投影 + catalog          <span class="ok">f5ff999</span>   card 从 AgentSpec 投影(非 pydantic-ai Agent)
+<span class="hi">B</span> LocalTransport + assemble 复用      <span class="ok">1ab1e3b</span>   进程内 message/send,agent_id_for_scope 单 chokepoint
+<span class="hi">C</span> v2_a2a_call 工具 + ToolBridge       <span class="ok">1d287a7</span>   源码注册名 a2a_call 无 v2_(RK11)
+<span class="hi">D</span> agent_id 端到端 emit→observe        <span class="ok">5cd94cb</span>   consumed 带 target agent_id
+<span class="hi">E</span> e2e native↔main 真跑(GLM)           <span class="ok">0f253cc</span>   main 答"全能助理/委派",scope 隔离
+   P1 ADR + spec                       <span class="mute">733a6dc</span>
+
+<span class="mute"># 验证(主 session 独立 P3):orchestrator 780 / observe 7 / e2e 2 真 GLM</span>
+<span class="mute"># 红线:R1(workflow 未碰)/ R5(observe 无 memory bus)/ RK11(src 无 v2_ 字面)全守</span></div>
+
+<div class="purpose">
+<b>关键性质:consumed agent = peer,非 subagent。</b>它带<b>全套自己 capability</b>(不剥),跑在<b>自己 agent_id scope</b>(memory 各写各的)。R1(workflow 子 agent 零 writer)是另一条轴,不触发。这让 mesh 里的每个 agent 都是可承担编排角色的对等节点——流式编排的前提。
+</div>
+</section>
+
+<section id="projection">
+<h2><span class="n">§3</span>核心原则:原语 = capability → card 投影</h2>
+<p class="lead-p">这是本设计最关键的一句。<b>原语不是独立编排引擎的部件,而是 agent 的 capability;A2A card 是它的声明面,project 自 pydantic-ai 的 capability 装配。</b>单一真源 = capability 装配;card = 投影;catalog = 发现。<b>无独立原语注册表,不造编排引擎。</b></p>
+
+<div class="mermaid-wrap">
+<div class="mermaid">
+flowchart LR
+  A["pydantic-ai capability 装配<br/>AgentSpec + caps(9 层)"] -->|spec_to_card 适配投影| B["A2A AgentCard<br/>skills/capabilities = 原语声明"]
+  B --> C["catalog<br/>列全 card = 原语 affordance 空间"]
+  C -->|人/agent 发现| D["谁能 fork、谁能 gate、谁能 delegate"]
+  classDef src fill:#1c2433,stroke:#5bc8ff,color:#d7dde8
+  classDef mid fill:#161c28,stroke:#7c8cff,color:#d7dde8
+  classDef out fill:#1c2433,stroke:#c099ff,color:#d7dde8
+  class A src
+  class B mid
+  class C,D out
+</div>
+<div class="cap">每个原语 = 一个 pydantic-ai capability(AbstractCapability):提供该原语的 tool(s) + 指令。装配 per-agent 挂哪些 → card 投影声明。投影是<b>适配</b>非 1:1(capability 内部形态 → A2A card 声明形态)。</div>
+</div>
+
+<h3>现有 capability → 原语(已覆盖大半)</h3>
+<table class="cmp">
+<tr><th>原语</th><th>源 capability</th><th>现状</th></tr>
+<tr><td class="dim">observe</td><td>ObserveCapability</td><td><span class="yes">✅ 已有</span></td></tr>
+<tr><td class="dim">delegate / consume</td><td>ToolBridge(v2_a2a_call)</td><td><span class="yes">✅ 本轮</span></td></tr>
+<tr><td class="dim">gate / guardrail</td><td>GuardrailCapability + skeptic</td><td><span class="yes">✅ 已有</span></td></tr>
+<tr><td class="dim">memory</td><td>MemoryWriterCapability</td><td><span class="yes">✅ 已有</span></td></tr>
+<tr><td class="dim">workflow(确定子程序)</td><td>ToolBridge(v2_workflow_run)</td><td><span class="yes">✅ 已有(冻结红线工具)</span></td></tr>
+<tr><td class="dim">format(结构化输出)</td><td>output_type(agent_spec)</td><td><span class="mid">🟡 defer 未接</span></td></tr>
+</table>
+
+<h3>需新建的 primitive-capability(拓扑/状态类)</h3>
+<table class="cmp">
+<tr><th>原语</th><th>新 capability</th><th>暴露</th></tr>
+<tr><td class="dim">fork</td><td>ForkCapability</td><td>v2_fork + 指令(一对多 + direction + agent_id 指派)</td></tr>
+<tr><td class="dim">merge / join</td><td>MergeCapability</td><td>v2_merge(收敛:pick / union / consensus)</td></tr>
+<tr><td class="dim">handoff</td><td>HandoffCapability</td><td>父→子状态交接(MVP 人写 / post-MVP summary)</td></tr>
+</table>
+
+<div class="purpose">
+<b>每加一个原语 = 加一个 capability</b>,装配 per-agent,<b>自动经 spec_to_card 投影入 card</b>;catalog / transport / agent_id 全复用(A2A mesh 不动)。workflow 也自然在这体系里——它是 ToolBridge 的 <code>v2_workflow_run</code>,作为「确定子程序原语」被投影声明,仍是冻结红线工具。
+</div>
+
+<h3>厘清:两类原语,声明位置不同(别混)</h3>
+<div class="grid-2">
+  <div class="card">
+    <h4>agent 侧原语(进 card)</h4>
+    <p>fork / delegate / gate / format / handoff / observe —— agent 能<b>执行或 afford</b> 的。project 自 capability,进 <code>card.skills/capabilities</code>。</p>
+    <span class="pill">声明在 card</span>
+  </div>
+  <div class="card">
+    <h4>人控原语(TUI control 面)</h4>
+    <p>compare / select / steer / approve —— <b>人</b>对 session 树的动作,不是 agent capability。操作 card 树本身,<b>不进 card</b>。</p>
+    <span class="pill">声明在 control 面</span>
+  </div>
+</div>
+</section>
+
+<section id="streaming">
+<h2><span class="n">§4</span>流式编排 MVP(human-driven fork-explore)</h2>
+<p class="lead-p">流式编排是 human & agentic 协同。<b>MVP 不设 agentic 入口,由 human 编排</b>——人看当前 turn 结果,人决定 fork 几路、各探什么方向,agent 只在各 fork 上执行。引擎是人,不是 LLM。agentic 自编排(LLM 自决 fork/分段)是 post-MVP。</p>
+
+<div class="terminal"><span class="mute"># 最小颗粒:基于当前 turn 结果 → fork session → 异步探索不同方向</span>
+<span class="hi">session S · turn N</span> 产出结果
+   <span class="acc">│ 人看 result,决定探 3 方向</span>
+   ├─ <span class="hi">fork</span> → S·a(async 探 A,agent=native)─┐
+   ├─ <span class="hi">fork</span> → S·b(async 探 B,agent=main)  ├ <span class="ok">session 组 = {S, S·a, S·b, S·c}</span>
+   └─ <span class="hi">fork</span> → S·c(async 探 C,agent=reader)─┘
+      各 fork 异步跑,人观察
+   <span class="acc">│ 人看 a/b/c,S·b 有戏 → 据「即时新需求」再编一段</span>
+   ├─ S·b <span class="hi">fork</span> → S·b1, S·b2   <span class="mute">← 续 turn</span>
+   ...
+   <span class="acc">│ 人收敛:挑/合/弃,merge 回主线</span></div>
+
+<h3>本体循环(你描述的那个)</h3>
+<div class="terminal"><span class="warn">编排一小段</span>  :人/agent 据 任务 + 已有结果,决定这段调谁、探什么
+<span class="warn">执行</span>        :各 fork 的 agent 作 peer 跑(v2_a2a_call / 各自 turn)
+<span class="warn">得 session 组</span>:fork 树(parent + 分支,可能不同 agent 参与)
+<span class="warn">即时新需求</span>  :据执行结果(segment 的产出)涌现新方向
+<span class="warn">再编一段</span>    :人据新需求 fork/续/换 agent
+<span class="warn">续 turn</span>     :同一逻辑 turn 继续循环(单 turn 内续 / 跨 turn resume)</div>
+
+<div class="human">
+最基础的编排就是 fork-explore:你现在用 agent 干活,干到一半想"要是走另一条路呢"——fork 出去异步探,几条路并行跑,你看着挑。CC/Cursor 都有这能力。AO2 的 <code>fork_session</code>(IT2)是种子,MVP 要把它升级成「一对多 + 指方向 + 指 agent + 异步并行」,配上人控 fork 树的 TUI 面。
+</div>
+
+<div class="pit">
+<b>MVP 不需要 agentic 编排引擎。</b>「即时编排」在人驱阶段 = 人读 catalog(看各 agent card 声明的原语 affordance)+ 人用 control 面原语(compare/select/steer)操作 fork 树。agentic 入口(agent 自决 fork/分段)留 post-MVP——那时 agent 自己调 ForkCapability 等 primitive-capability。
+</div>
+</section>
+
+<section id="handoff">
+<h2><span class="n">§5</span>handoff 难点:父节点状态 → 新 agent 继续</h2>
+<p class="lead-p">A2A agent 是对等 peer(各自 profile / 工具集 / memory scope / 模型)。"继续"不是 copy 一份 message——父节点对话是在<b>父 agent 的 framing</b>下产生的,原样塞给子 agent 会错位(工具调用引用子 agent 没有的工具、语境是父的 system prompt)。<b>关键分解:把"状态"拆三层,只有一层真要交接。</b></p>
+
+<table class="cmp">
+<tr><th>状态层</th><th>例子</th><th>跨 agent 交接</th></tr>
+<tr><td class="dim">material(物化)</td><td>改的代码 / 文件 / artifact</td><td><span class="yes">自动</span>——共享 workspace(repo 工作树),父改的文件子 agent 直接看得见</td></tr>
+<tr><td class="dim">conversational(会话语义)</td><td>探了啥 / 决定了啥 / 关键发现</td><td><span class="warn">要交接</span>(难点在这)</td></tr>
+<tr><td class="dim">memory(沉淀)</td><td>累积记忆</td><td>per-agent scope,跨读 opt-in(defer)</td></tr>
+</table>
+
+<div class="purpose">
+物化层因 workspace 共享而<b>免费转移</b>——真问题收窄到:<b>会话语义层怎么从父 agent 交到子 agent</b>。(若 fork 要物化隔离探索,每个 fork 配 git worktree,material 也 fork——这是 worktree 原语,另一条线。)
+</div>
+
+<h3>MVP:human-authored handoff(绕开自动交接)</h3>
+<div class="human">
+MVP 人编——人读父(native)turn 结果,<b>人写</b>子 fork 的初始 prompt("native 探了 X 发现 Y,main 你接着探 Z")。<b>人就是 handoff synthesizer</b>,续接 prompt = 交接物。零自动状态转移机制。正契合"MVP 由 human 编排"。
+</div>
+
+<h3>post-MVP:自动交接方案空间(真·难点)</h3>
+<table class="cmp">
+<tr><th>方案</th><th>机制</th><th>权衡</th></tr>
+<tr><td class="dim">handoff summary</td><td>LLM 综合父状态成结构化摘要 → 子 fresh 起跑带此摘要</td><td><span class="yes">agent-agnostic、profile/工具安全</span>;损真 + 一次 LLM 开销</td></tr>
+<tr><td class="dim">raw history 透传</td><td>父 <code>message_history</code> 喂子 <code>run(message_history=...)</code></td><td>文本可移植;<span class="no">工具集不同时崩</span>(同 registry 可,专项白名单不可)</td></tr>
+<tr><td class="dim">session-group 共享态</td><td>turn/fork-group 的结构化 KV,父写子读</td><td>解耦任何 agent;要新建存储</td></tr>
+<tr><td class="dim">A2A Task context</td><td>Task 带 history+artifacts+state,<code>message/send</code> 带上下文</td><td>协议原生;吃 task 状态机 defer</td></tr>
+</table>
+<div class="pit">实操大概率 <b>handoff summary + workspace 物化</b> 起步,session-group 共享态 / A2A Task context 随 task 状态机 defer 一起上。</div>
+</section>
+
+<section id="primitives">
+<h2><span class="n">§6</span>原语全谱(探索)</h2>
+<p class="lead-p">按操作对象分五类。✅ 撬棍 / 🟡 post-MVP 或已有可复用 / ❌ 缺。</p>
+
+<h3>1. 拓扑原语(shape session 谱系树)</h3>
+<table class="cmp">
+<tr><th>原语</th><th>干啥</th><th>AO2</th><th>MVP</th></tr>
+<tr><td class="dim">fork</td><td>从一点分叉(带父态)</td><td>fork_session(IT2)</td><td><span class="yes">✅</span></td></tr>
+<tr><td class="dim">spawn</td><td>起新独立 session(无父态)</td><td>spawn_instance</td><td><span class="yes">✅</span></td></tr>
+<tr><td class="dim">merge/join</td><td>多分支回收(fan-in:pick/union/consensus)</td><td><span class="no">❌</span></td><td><span class="yes">✅ 收敛必须</span></td></tr>
+<tr><td class="dim">checkpoint</td><td>存档某态可回溯(time-travel)</td><td><span class="mid">🟡</span></td><td><span class="mid">🟡</span></td></tr>
+<tr><td class="dim">cancel</td><td>杀运行中分支</td><td><span class="no">❌</span></td><td><span class="yes">✅</span></td></tr>
+<tr><td class="dim">compact</td><td>压长 history 续命</td><td><span class="yes">✅</span></td><td><span class="mid">🟡</span></td></tr>
+</table>
+
+<h3>2. 流控原语(segment 怎么串)</h3>
+<table class="cmp">
+<tr><th>原语</th><th>干啥</th><th>AO2</th><th>MVP</th></tr>
+<tr><td class="dim">sequence</td><td>A→B→C 链</td><td><span class="yes">✅ flow/workflow</span></td><td><span class="mid">🟡 复用</span></td></tr>
+<tr><td class="dim">parallel</td><td>并发 fan-out</td><td><span class="yes">✅ workflow run</span></td><td><span class="mid">🟡 复用</span></td></tr>
+<tr><td class="dim">conditional</td><td>据 result 分路(条件判断)</td><td><span class="no">❌ workflow 无条件边</span></td><td><span class="yes">✅ MVP=人判</span></td></tr>
+<tr><td class="dim">loop</td><td>循环到条件(try-fix-test)</td><td><span class="yes">✅ workflow loop</span></td><td><span class="mid">🟡 复用</span></td></tr>
+<tr><td class="dim">retry</td><td>失败重跑限次</td><td><span class="no">❌</span></td><td><span class="mid">🟡</span></td></tr>
+<tr><td class="dim">gate/guardrail</td><td>过关才续(skeptic 闸)</td><td><span class="yes">✅ skeptic</span></td><td><span class="yes">✅</span></td></tr>
+</table>
+
+<h3>3. 状态原语(move/transform state)</h3>
+<table class="cmp">
+<tr><th>原语</th><th>干啥</th><th>AO2</th><th>MVP</th></tr>
+<tr><td class="dim">handoff</td><td>父→子跨 agent 交接(难点)</td><td><span class="no">❌</span></td><td><span class="yes">✅ 人写</span></td></tr>
+<tr><td class="dim">transform/format</td><td>输出按 schema 格式化</td><td><span class="mid">🟡 output_type defer</span></td><td><span class="yes">✅</span></td></tr>
+<tr><td class="dim">shared-state</td><td>跨分支 KV blackboard</td><td><span class="no">❌</span></td><td><span class="mid">🟡 post-MVP</span></td></tr>
+<tr><td class="dim">route/classify</td><td>按内容路由到 agent</td><td><span class="no">❌</span></td><td><span class="mid">🟡</span></td></tr>
+<tr><td class="dim">map/reduce</td><td>逐项施 agent 再聚合</td><td><span class="mid">🟡 workflow 可表</span></td><td><span class="mid">🟡</span></td></tr>
+</table>
+
+<h3>4. 人机协同原语(MVP 编排面——人用这些,不进 card)</h3>
+<table class="cmp">
+<tr><th>原语</th><th>干啥</th><th>AO2</th><th>MVP</th></tr>
+<tr><td class="dim">observe/inspect</td><td>看分支状态/结果</td><td><span class="yes">✅ observe+TUI</span></td><td><span class="yes">✅ 核心</span></td></tr>
+<tr><td class="dim">compare</td><td>跨 fork 并排比对</td><td><span class="no">❌</span></td><td><span class="yes">✅</span></td></tr>
+<tr><td class="dim">select/pick</td><td>选分支/收敛</td><td><span class="no">❌</span></td><td><span class="yes">✅</span></td></tr>
+<tr><td class="dim">steer/redirect</td><td>改方向(再 fork/换 agent)</td><td><span class="mid">🟡 fork+spawn</span></td><td><span class="yes">✅</span></td></tr>
+<tr><td class="dim">inject/edit</td><td>人改 session 状态/纠正</td><td><span class="no">❌</span></td><td><span class="mid">🟡</span></td></tr>
+<tr><td class="dim">approve/gate</td><td>人过关才续</td><td><span class="no">❌</span></td><td><span class="mid">🟡</span></td></tr>
+</table>
+
+<h3>5. 多 agent 原语(A2A substrate)</h3>
+<table class="cmp">
+<tr><th>原语</th><th>干啥</th><th>AO2</th><th>MVP</th></tr>
+<tr><td class="dim">delegate/consume</td><td>A2A 调 peer</td><td><span class="yes">✅ v2_a2a_call(本轮)</span></td><td><span class="yes">✅</span></td></tr>
+<tr><td class="dim">assign</td><td>给分支指 agent</td><td><span class="yes">✅ agent_id 持久化</span></td><td><span class="yes">✅</span></td></tr>
+<tr><td class="dim">broadcast/pub-sub</td><td>广播/主题</td><td><span class="mid">🟡 CommunicationBus</span></td><td><span class="mid">🟡</span></td></tr>
+<tr><td class="dim">isolate/worktree</td><td>分支物化隔离</td><td><span class="mid">🟡 worktree(部分)</span></td><td><span class="mid">🟡 物化 fork 要</span></td></tr>
+</table>
+
+<div class="purpose">
+<b>区别于 workflow 的本质原语 = "流式编排"之所以不是 workflow:</b>
+<b>fork/merge</b>(谱系树:分支有 lineage,可分可合)—— workflow 只有 flat parallel; <b>人机协同面</b>(observe/compare/select/steer)—— 人是编排器; <b>handoff</b>(跨 agent 交接)—— 分支可换 agent; <b>conditional MVP 落到"人判"</b>—— workflow 无条件边,正好人补位。<br>
+<b>flow 类(sequence/parallel/loop/map-reduce)workflow kernel 已有 → 复用为子件,不重建。</b>流式编排只造它缺的(拓扑 + 人机面 + handoff),flow 复用 workflow。
+</div>
+</section>
+
+<section id="defer">
+<h2><span class="n">§7</span>defer 全景 + 落地路径</h2>
+
+<h3>A2A defer(与 graph 解耦)</h3>
+<table class="cmp">
+<tr><th>defer</th><th>是什么</th><th>与 streaming 关系</th></tr>
+<tr><td class="dim">HTTPTransport</td><td>真 A2A over HTTP</td><td>外部 agent 走这条</td></tr>
+<tr><td class="dim">外部 consume</td><td>真调外部 A2A agent</td><td>—</td></tr>
+<tr><td class="dim">外部 expose</td><td>native/main 包公网 server + /.well-known</td><td>—</td></tr>
+<tr><td class="dim">consumed persistent-session</td><td>peer 跨调用续聊</td><td><b>stateful session 组需要</b></td></tr>
+<tr><td class="dim">A2A task 状态机</td><td>input-required/working/completed</td><td><b>跨 turn resumable 长编排需要</b></td></tr>
+<tr><td class="dim">strict parent_tick 链</td><td>observe 嵌套严格父链</td><td>可视 fork 树 graph trace 需要</td></tr>
+<tr><td class="dim">专项 agent 进 mesh</td><td>reader/implementer/tester/skeptic</td><td>= 加 yaml 条目,primitive 自动入 card</td></tr>
+<tr><td class="dim">spec.output_type 接通</td><td>pydantic-ai 结构化输出</td><td>= format 原语激活</td></tr>
+</table>
+
+<h3>落地路径(MVP = human-driven fork-explore,workflow 全程不动)</h3>
+<div class="phased">
+  <div class="phase p1">
+    <div class="pk">撬棍</div>
+    <div class="pb">
+      <h4>fork 升级 + 异步执行器 + 人控面</h4>
+      <p><code>fork_session</code> 一对多 + direction + agent_id 指派 → 异步并行 session 执行器 → observe parent 链(defer 转正)+ TUI fork 树可视 + 人控 merge/挑选。human-authored handoff(零自动状态转移)。</p>
+    </div>
+  </div>
+  <div class="phase">
+    <div class="pk">P2</div>
+    <div class="pb">
+      <h4>primitive-capability 投影 + format 原语</h4>
+      <p>spec_to_card 扩适配层(caps → card 原语声明);ForkCapability / MergeCapability 落地(自动入 card);spec.output_type 接通(format 原语激活)。catalog 成原语 affordance 空间。</p>
+    </div>
+  </div>
+  <div class="phase">
+    <div class="pk">P3</div>
+    <div class="pb">
+      <h4>stateful session 组 + 跨 turn resume</h4>
+      <p>consumed persistent-session(peer 跨段续)+ A2A task 状态机(working/input-required/completed)+ 自动 handoff summary。agentic 入口(agent 自决 fork/分段)在此开启。</p>
+    </div>
+  </div>
+</div>
+
+<div class="footer">
+<b>取代声明</b>:本文取代 <code>docs/turn-as-graph-design.html</code> 的 P0 路线(workflow kernel DAG)。workflow = 冻结红线工具范式。<br>
+<b>关联</b>:A2A internal mesh(6 commit,本轮)· pydantic-ai v2 capability 系统 · turn-as-graph 四课题(背景语境)· 2026-07-23
+</div>
+
+</section>
+</main>
+</div>
+<script>mermaid.initialize({startOnLoad:true,theme:'dark',themeVariables:{primaryColor:'#1c2433',primaryTextColor:'#d7dde8',lineColor:'#5b6679',fontSize:'13px'}})</script>
+</body>
+</html>

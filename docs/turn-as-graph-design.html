@@ -1,0 +1,802 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent OS v2 — Turn-as-Graph 工程控制设计方案</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<style>
+:root{
+  --bg:#0b0f17; --bg2:#11161f; --card:#161c28; --card2:#1c2433;
+  --bd:#262f42; --tx:#d7dde8; --tx2:#8b95a7; --mute:#5b6679;
+  --pri:#5bc8ff; --pri2:#7c8cff; --acc:#c099ff; --ok:#56d364; --warn:#ffb454; --danger:#ff6b6b;
+  --grad:linear-gradient(135deg,#5bc8ff 0%,#7c8cff 45%,#c099ff 100%);
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--tx);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;font-size:15px;line-height:1.65;-webkit-font-smoothing:antialiased}
+code,pre,.mono{font-family:"JetBrains Mono","SF Mono",Consolas,"Liberation Mono",Menlo,monospace}
+.layout{display:flex;align-items:flex-start;max-width:1480px;margin:0 auto}
+nav.sidebar{position:sticky;top:0;height:100vh;flex:0 0 252px;overflow-y:auto;padding:22px 16px;border-right:1px solid var(--bd);background:linear-gradient(180deg,var(--bg) 0%,#0d121b 100%)}
+nav.sidebar .brand{font-weight:700;font-size:14px;background:var(--grad);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:6px}
+nav.sidebar .brand-sub{font-size:11px;color:var(--mute);margin-bottom:18px}
+.nav-group{font-size:10.5px;color:var(--mute);text-transform:uppercase;letter-spacing:.8px;margin:16px 4px 6px}
+.nav-item{display:block;padding:7px 12px;border-radius:8px;color:var(--tx2);text-decoration:none;font-size:13.5px;margin-bottom:2px;border-left:2px solid transparent;transition:.15s}
+.nav-item:hover{background:var(--card);color:var(--tx)}
+main{flex:1;min-width:0;padding:0 40px 80px}
+.hero{margin:32px 0 8px;padding:34px;border-radius:18px;background:radial-gradient(1200px 300px at 0% 0%,rgba(124,140,255,.18),transparent),radial-gradient(900px 280px at 100% 0%,rgba(192,153,255,.14),transparent),var(--card);border:1px solid var(--bd)}
+.hero h1{margin:0 0 8px;font-size:30px;letter-spacing:.5px}
+.hero h1 .grad{background:var(--grad);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+.hero .lead{font-size:16px;color:var(--tx2);max-width:820px;margin:0 0 16px}
+.hero .stack{display:flex;flex-wrap:wrap;gap:7px;margin-top:6px}
+.tag{display:inline-block;padding:3px 10px;border-radius:20px;font-size:12px;background:var(--card2);border:1px solid var(--bd);color:var(--tx)}
+.tag.t{color:var(--pri);border-color:#23344750}
+.tag.a{color:var(--acc);border-color:#332a4750}
+section{margin:42px 0 0;scroll-margin-top:20px}
+h2{margin:0 0 6px;font-size:24px}
+h2 .n{color:var(--mute);font-family:"JetJetBrains Mono",Consolas,monospace;font-size:15px;margin-right:8px}
+h3{margin:26px 0 8px;font-size:17px;color:var(--pri)}
+.lead-p{font-size:15.5px;color:var(--tx2);max-width:860px;margin:0 0 18px}
+.purpose{font-size:15px;color:var(--tx);background:linear-gradient(90deg,rgba(91,200,255,.08),transparent);border-left:3px solid var(--pri);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0 18px}
+.pit{font-size:14px;background:linear-gradient(90deg,rgba(255,180,84,.08),transparent);border-left:3px solid var(--warn);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+.pit b{color:var(--warn)}
+.human{font-size:14.5px;background:linear-gradient(90deg,rgba(86,211,100,.07),transparent);border-left:3px solid var(--ok);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+.human b{color:var(--ok)}
+.human::before{content:"说人话  ";font-weight:700;color:var(--ok);font-size:12px;letter-spacing:.5px}
+.mermaid-wrap{margin:18px 0;padding:18px;border-radius:12px;background:var(--bg2);border:1px solid var(--bd);text-align:center;overflow-x:auto}
+.mermaid-wrap .cap{font-size:12px;color:var(--mute);margin-top:10px;text-align:left}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:16px 0}
+.grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin:16px 0}
+.card{padding:16px 18px;border-radius:12px;background:var(--card);border:1px solid var(--bd)}
+.card h4{margin:0 0 6px;font-size:14.5px;color:var(--pri)}
+.card p{margin:0;font-size:13.5px;color:var(--tx2)}
+.card .pill{display:inline-block;margin-top:8px;padding:2px 9px;border-radius:14px;font-size:11px;background:var(--card2);color:var(--tx2)}
+table.cmp{width:100%;border-collapse:collapse;margin:14px 0;font-size:13.5px;background:var(--card);border:1px solid var(--bd);border-radius:12px;overflow:hidden}
+table.cmp th,table.cmp td{padding:11px 14px;border-bottom:1px solid var(--bd);text-align:left;vertical-align:top}
+table.cmp th{background:var(--card2);font-size:12.5px;color:var(--tx2);font-weight:600}
+table.cmp tr:last-child td{border-bottom:none}
+table.cmp td.dim{color:var(--mute);font-weight:600;width:160px}
+table.cmp .yes{color:var(--ok)}
+table.cmp .no{color:var(--danger)}
+table.cmp .mid{color:var(--warn)}
+.flow{display:flex;flex-direction:column;gap:0;margin:16px 0}
+.step{display:flex;gap:14px;padding:12px 0;position:relative}
+.step:not(:last-child)::before{content:"";position:absolute;left:14px;top:34px;bottom:-6px;width:2px;background:var(--bd)}
+.step-no{flex:0 0 30px;height:30px;border-radius:50%;background:var(--grad);color:#0b0f17;font-weight:700;font-size:13px;display:flex;align-items:center;justify-content:center;position:relative;z-index:1;box-shadow:0 0 0 4px var(--card)}
+.step-body{flex:1;padding-top:3px}
+.step-title{font-size:14.5px;font-weight:600;color:var(--tx)}
+.step-title code{font-size:12.5px;color:var(--pri)}
+.step-detail{font-size:13px;color:var(--tx2);margin-top:3px}
+ul.dash{list-style:none;padding-left:0;margin:10px 0}
+ul.dash li{padding:5px 0 5px 22px;position:relative;font-size:14px;color:var(--tx2)}
+ul.dash li::before{content:"▸";position:absolute;left:0;color:var(--pri)}
+ul.dash li b{color:var(--tx)}
+ul.dash li .yes{color:var(--ok)}
+ul.dash li .no{color:var(--danger)}
+.comm{background:var(--bg2);border:1px solid var(--bd);border-radius:10px;overflow:hidden;margin:14px 0}
+.comm-row{display:flex;border-bottom:1px solid var(--bd);font-size:13px}
+.comm-row:last-child{border-bottom:none}
+.comm-k{flex:0 0 150px;padding:10px 13px;color:var(--mute);background:rgba(255,255,255,.02);font-size:12px;border-right:1px solid var(--bd);font-family:"JetBrains Mono",Consolas,monospace}
+.comm-v{flex:1;padding:10px 13px;color:var(--tx)}
+.comm-v code{font-size:12px;color:var(--pri)}
+.terminal{background:#070a11;border:1px solid var(--bd);border-radius:10px;padding:14px 16px;font-family:"JetBrains Mono",Consolas,monospace;font-size:12.5px;color:var(--tx2);line-height:1.55;overflow-x:auto;margin:14px 0;white-space:pre}
+.terminal .hi{color:var(--pri)}
+.terminal .ok{color:var(--ok)}
+.terminal .warn{color:var(--warn)}
+.terminal .acc{color:var(--acc)}
+.terminal .mute{color:var(--mute)}
+.phased{display:flex;flex-direction:column;gap:14px;margin:16px 0}
+.phase{display:flex;gap:16px;padding:16px 18px;border-radius:12px;background:var(--card);border:1px solid var(--bd);border-left:3px solid var(--pri)}
+.phase.p1{border-left-color:var(--warn)}
+.phase.p2{border-left-color:var(--pri)}
+.phase.p3{border-left-color:var(--acc)}
+.phase .pno{flex:0 0 64px;font-weight:700;font-size:13px;color:var(--mute);font-family:"JetBrains Mono",Consolas,monospace}
+.phase .pno b{display:block;font-size:18px;color:var(--tx)}
+.phase .pbody{flex:1}
+.phase .pbody h4{margin:0 0 4px;font-size:15px;color:var(--tx)}
+.phase .pbody p{margin:0;font-size:13.5px;color:var(--tx2)}
+.phase .pbody .gap{margin-top:8px;font-size:12.5px;color:var(--warn)}
+.kpi-row{display:flex;gap:14px;flex-wrap:wrap;margin:14px 0}
+.kpi{flex:1;min-width:150px;padding:14px 16px;border-radius:11px;background:var(--bg2);border:1px solid var(--bd)}
+.kpi .v{font-size:22px;font-weight:700;background:var(--grad);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+.kpi .l{font-size:12px;color:var(--mute);margin-top:2px}
+.footer{margin-top:50px;padding-top:20px;border-top:1px solid var(--bd);font-size:12.5px;color:var(--mute)}
+code.inl{background:var(--bg2);padding:1px 6px;border-radius:5px;font-size:12.5px;color:var(--pri);border:1px solid var(--bd)}
+@media(max-width:900px){.layout{flex-direction:column}nav.sidebar{position:static;height:auto;width:auto;border-right:none;border-bottom:1px solid var(--bd)}main{padding:0 20px 60px}.grid-2,.grid-3{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="layout">
+
+<nav class="sidebar">
+  <div class="brand">Agent OS v2</div>
+  <div class="brand-sub">Turn-as-Graph · 工程控制设计</div>
+  <div class="nav-group">开篇</div>
+  <a class="nav-item" href="#s1">1. 用户视角</a>
+  <a class="nav-item" href="#s2">2. 主流 harness 的天花板</a>
+  <a class="nav-item" href="#s3">3. 核心抽象 Turn-as-Graph</a>
+  <div class="nav-group">高阶工程控制</div>
+  <a class="nav-item" href="#s4">4. 六个差异化特点</a>
+  <a class="nav-item" href="#s5a">5.1 智力 vs 颗粒度</a>
+  <a class="nav-item" href="#s5b">5.2 全自动化</a>
+  <a class="nav-item" href="#s5c">5.3 记忆组件化</a>
+  <a class="nav-item" href="#s5d">5.4 硬编码多专项</a>
+  <div class="nav-group">落地</div>
+  <a class="nav-item" href="#s6">6. TUI 可视化</a>
+  <a class="nav-item" href="#s7">7. 落地路径</a>
+  <a class="nav-item" href="#s8">8. 差异化总结</a>
+</nav>
+
+<main>
+
+<div style="margin:18px 0;padding:16px 18px;border-radius:12px;background:linear-gradient(90deg,rgba(255,107,107,.10),transparent);border:1px solid #47232350;border-left:3px solid #ff6b6b;font-size:14px;color:#d7dde8">
+<b style="color:#ff6b6b">⚠️ 取代声明(2026-07-23)。</b>本文 <b>P0 路线(给 workflow kernel 加 DAG/条件分支)已废</b>——那会动红线。graph 编排改走 <b>A2A 流式编排</b>,权威文档见 <code>docs/a2a-streaming-orchestration-design.html</code>。本报告 <b>四课题(智力颗粒度 / 全自动 / 记忆组件 / 硬编码多专项)仍有效</b>,作为新设计的背景语境;落地机制全部重定向到 A2A + capability 投影。
+</div>
+
+<div class="hero">
+  <h1>把一个 turn 从<span class="grad">「一条线」</span>变成<span class="grad">「一张图」</span></h1>
+  <p class="lead">这是一份关于「如何在 AO2 里用<b>节点图</b>编排 agent turn、把工程控制做到比主流 harness 高一阶」的设计方案。核心理念：<b>确定的事交给硬编码的图拓扑，需要判断的事才切给小智力模型</b>——人只在中断点出现，其余全自动。</p>
+  <div class="stack">
+    <span class="tag t">Turn-as-Graph</span>
+    <span class="tag t">智力分层调度</span>
+    <span class="tag a">能力即组件</span>
+    <span class="tag a">硬编码拓扑 + 小智力切点</span>
+    <span class="tag">全自动闭环</span>
+    <span class="tag">可观测 / 可干预 / 可恢复</span>
+  </div>
+</div>
+
+<!-- ========================= §1 ========================= -->
+<section id="s1">
+<h2><span class="n">§1</span>用户视角:你坐在 TUI 前看到什么</h2>
+<p class="lead-p">不讲架构,先讲体验。这一节回答一个问题:<b>这套东西做出来,用起来是什么感觉?</b></p>
+
+<div class="purpose">
+你打开 TUI,在输入框敲一句话——比如「给 observe 服务加一个按 harness_type 聚合的统计端点,带测试」。回车。
+屏幕上不是开始刷一行行流式文本,而是<b>长出一张图</b>:一个发起节点,往下分叉成几个子任务(读现状/写实现/写测试),它们各自亮起、跑完汇合到一个收敛节点,最后落地成一个提交节点。
+你看见哪个节点在转、哪个卡住了、哪个失败了。中间任何时刻你可以插手——暂停某个分支、改个方向、或者直接接管。跑完给你一屏:改了哪些文件、测试绿没绿、花了多少 token。
+</div>
+
+<div class="mermaid-wrap">
+<div class="mermaid">
+flowchart TD
+  U([👤 你敲一句话]):::user
+  P[发起节点<br/>主控拆解任务]:::plan
+  R[读现状<br/>glm-4.7 小模型]:::small
+  I[写实现<br/>专项 agent]:::spec
+  T[写测试<br/>专项 agent]:::spec
+  V{收敛<br/>skeptic 审查}:::verify
+  C[提交节点<br/>汇总 + commit]:::commit
+  U --> P
+  P --> R
+  P --> I
+  P --> T
+  R --> V
+  I --> V
+  T --> V
+  V -->|pass| C
+  V -->|fail·回头改| I
+  classDef user fill:#2a1f3d,stroke:#c099ff,color:#e8d5ff
+  classDef plan fill:#1a2438,stroke:#5bc8ff,color:#d7eaff
+  classDef small fill:#162c22,stroke:#56d364,color:#cffeec
+  classDef spec fill:#1a2438,stroke:#7c8cff,color:#d7ddff
+  classDef verify fill:#3d2f1a,stroke:#ffb454,color:#ffe9c7
+  classDef commit fill:#1a2438,stroke:#5bc8ff,color:#d7eaff
+</div>
+<div class="cap">▲ 用户视角的「一张图」:每个节点是一个小专项 agent,智力按节点粗细分配,失败自动回头。</div>
+</div>
+
+<div class="human">
+<b>这跟现在主流 harness 的区别</b>:你现在用 Claude Code 或 Codex,屏幕上是一条流式文本流——模型说一句、调个工具、再说一句,你看完才知道它在干嘛。它是「一根线」。这里是一张「图」:你能一眼看见全局结构、看见每个分支的进度、看见智力被分配到了哪里。线是被动跟着模型走,图是你能主动俯瞰和干预。
+</div>
+
+<div class="kpi-row">
+  <div class="kpi"><div class="v">一张图</div><div class="l">全局结构可见</div></div>
+  <div class="kpi"><div class="v">N 个智力</div><div class="l">按节点粗细分配模型</div></div>
+  <div class="kpi"><div class="v">2 个中断点</div><div class="l">共识 + 验收,中间全自动</div></div>
+  <div class="kpi"><div class="v">断点续跑</div><div class="l">挂了不丢、接着干</div></div>
+</div>
+</section>
+
+<!-- ========================= §2 ========================= -->
+<section id="s2">
+<h2><span class="n">§2</span>问题:主流 harness 的工程控制天花板在哪</h2>
+<p class="lead-p">要讲清楚「高阶在哪」,先得说清楚「现在的低阶在哪」。我们直接和 Claude Code / Codex / OpenClaw 摆在一起比。</p>
+
+<table class="cmp">
+<tr>
+  <th>工程控制维度</th>
+  <th>Claude Code / Codex</th>
+  <th>OpenClaw</th>
+  <th class="yes">AO2(本方案)</th>
+</tr>
+<tr>
+  <td class="dim">流程结构</td>
+  <td><span class="no">无</span>。一条对话流,工具调用线性串联</td>
+  <td><span class="mid">半</span>。有多 agent,但编排靠 prompt</td>
+  <td><span class="yes">显式节点图</span>。DAG/并行/收敛是数据结构</td>
+</tr>
+<tr>
+  <td class="dim">智力分配</td>
+  <td><span class="no">All-or-nothing</span>。一个超贵大模型从头干到尾</td>
+  <td><span class="mid">固定</span>。每个 agent 绑死一个模型</td>
+  <td><span class="yes">分层调度</span>。粗颗粒大模型主控,细颗粒小模型专项</td>
+</tr>
+<tr>
+  <td class="dim">记忆</td>
+  <td><span class="no">黑箱</span>。一个大 memory 块,不按任务维度</td>
+  <td><span class="mid">半</span>。有记忆但耦合在 agent 内</td>
+  <td><span class="yes">组件化</span>。记忆是可挂摘的 capability,按节点维度读写</td>
+</tr>
+<tr>
+  <td class="dim">工程知识承载</td>
+  <td><span class="no">全靠 prompt</span>。流程步骤藏在提示词里</td>
+  <td><span class="no">全靠 prompt</span></td>
+  <td><span class="yes">硬编码拓扑</span>。确定步骤是图结构,不是模型临场发挥</td>
+</tr>
+<tr>
+  <td class="dim">自动化程度</td>
+  <td><span class="mid">人全程盯</span>。每步都要看</td>
+  <td><span class="mid">人全程盯</span></td>
+  <td><span class="yes">闭环</span>。人只在共识+验收,中间全自动</td>
+</tr>
+<tr>
+  <td class="dim">可恢复</td>
+  <td><span class="no">挂了重来</span>。断了基本没了</td>
+  <td><span class="no">挂了重来</span></td>
+  <td><span class="yes">事件溯源 + resume</span>。断点续跑,不丢进度</td>
+</tr>
+<tr>
+  <td class="dim">可观测</td>
+  <td><span class="mid">流式文本</span>。只能跟着看</td>
+  <td><span class="mid">流式文本</span></td>
+  <td><span class="yes">图 + 事件流</span>。俯瞰全局,下钻细节</td>
+</tr>
+</table>
+
+<h3>五个痛点,一句话各表</h3>
+<ul class="dash">
+  <li><b>线性</b>:turn 是「一根线」,看不到全局结构,任务一复杂就迷路。<span class="no">→ 要变成一张图</span></li>
+  <li><b>黑箱</b>:模型脑子里怎么拆任务的、为啥走这步,你不知道。<span class="no">→ 拓扑要显式、要可见</span></li>
+  <li><b>智力 All-or-nothing</b>:简单子任务也用最贵的模型烧钱烧时间。<span class="no">→ 智力要按颗粒度分层</span></li>
+  <li><b>记忆黑箱</b>:一个大会话记忆,不区分是哪个任务沉淀的,越积越脏。<span class="no">→ 记忆要组件化、按任务维度</span></li>
+  <li><b>不可恢复</b>:长任务跑到一半断了,基本从头再来。<span class="no">→ 要事件溯源 + 断点续跑</span></li>
+</ul>
+
+<div class="pit"><b>关键洞察</b>:这五个痛点本质是<b>同一个病根</b>——主流 harness 把「工程控制」整个外包给了<b>一个大模型的临场发挥</b>。流程、调度、记忆、恢复,全靠模型自己临场想。AO2 的思路是反过来的:<b>能确定的部分,硬编码成图结构;只有真正需要判断的切点,才请模型出场</b>。这是从「LLM-centric」到「engineering-controlled with LLM at the seams」的根本转向。</div>
+</section>
+
+<!-- ========================= §3 ========================= -->
+<section id="s3">
+<h2><span class="n">§3</span>核心抽象:Turn-as-Graph</h2>
+<p class="lead-p">这一节把「一张图」这个直觉,落到 AO2 已有的代码地基上。结论是:<b>三层已经齐了,只差把 turn 本身升格成图</b>。</p>
+
+<div class="purpose">
+<b>Turn-as-Graph</b> 的意思是:一个 agent turn 不再是「调一次模型 + 一串工具」,而是一张<b>可执行的节点图</b>。这张图由三层支撑——<b>执行引擎</b>(workflow kernel,跑图)、<b>注入系统</b>(capability,给每个节点配指令和工具)、<b>留痕层</b>(observe,全程事件溯源 + 可恢复)。三层解耦,各管一摊。
+</div>
+
+<h3>三层地基(AO2 现状,代码级)</h3>
+
+<div class="grid-3">
+  <div class="card">
+    <h4>① 执行引擎 · workflow kernel</h4>
+    <p>Pydantic spec 定义图,3 个原语:<code>run</code>(fan-out/fan-in 并行)、<code>pipeline</code>(无 barrier 阶段链)、<code>loop</code>(seen 去重收敛)。journal SQLite WAL 记事件,断点 resume。子 agent 零记忆(R1 红线)。</p>
+    <span class="pill">engine.py · journal.py</span>
+  </div>
+  <div class="card">
+    <h4>② 注入系统 · capability</h4>
+    <p>9 层 capability 装配,每层自带<b>指令段</b>(get_instructions)和<b>工具集</b>(get_toolset),按序拼进 system prompt。Profile L0-L4 分层 + 动态层(多 cwd)。<b>记忆/工具/守卫都是可挂摘的组件</b>。</p>
+    <span class="pill">native_agent.py · capabilities/</span>
+  </div>
+  <div class="card">
+    <h4>③ 留痕层 · observe</h4>
+    <p>独立进程 8002,SQLite WAL + WS subscribe。<b>事件溯源</b>:tick_started/tool_call/tool_result/tick_completed + flow/memory/orch 语义事件。挂了能从事件流重建状态。</p>
+    <span class="pill">observe/ · emit.py</span>
+  </div>
+</div>
+
+<h3>一个 turn 的完整 flow 流向(代码现状)</h3>
+<p class="lead-p">下面这条链路,是 <code>routes.py:532 trigger_turn</code> 的实际走向。这是 Turn-as-Graph 要「升格」的对象——现在它是一条线,目标是让它能<b>在③图执行那一步,展开成一张图</b>。</p>
+
+<div class="flow">
+  <div class="step"><div class="step-no">1</div><div class="step-body"><div class="step-title">HTTP 进来 · <code>POST /h/agent-os-v2/sessions/{id}/turn</code></div><div class="step-detail">三种 harness 分派:agent-os-v2 走完整 capability 链;claw/claude-code 是黑盒(红线,不走 capability)。</div></div></div>
+  <div class="step"><div class="step-no">2</div><div class="step-body"><div class="step-title">session 恢复 · <code>_build_native_session</code></div><div class="step-detail">内存 miss → 从 store 重建;恢复 message_history + active_cwd(contextvar)+ agent_id → 取 spec。</div></div></div>
+  <div class="step"><div class="step-no">3</div><div class="step-body"><div class="step-title">capability 装配(9 层)</div><div class="step-detail">EngineeringDiscipline(0) → Observe(1) → MemoryWriter(2) → ToolBridge(3) → Guardrail(4) → Skills(5,defer) → Memory(6) → Profile L0-L4(7) → MultiCwdScope(8)。每层带指令段 + 工具集。</div></div></div>
+  <div class="step"><div class="step-no">4</div><div class="step-body"><div class="step-title">LLM 调用 · <code>Agent.run</code></div><div class="step-detail">pydantic-ai 拼 system prompt(L0-L4 + 动态层)→ 调 GLM(经 /api/anthropic)→ 工具调用循环。<b>★ Turn-as-Graph 升格点:这里要能展开成图执行,而非单次 run。</b></div></div></div>
+  <div class="step"><div class="step-no">5</div><div class="step-body"><div class="step-title">事件 emit · ObserveCapability wrap</div><div class="step-detail">outermost wrap,遍历 stream:tool_call/tool_result/token_delta/tick_completed → WS 推 observe。MemoryWriter inner wrap 按轮沉淀记忆。</div></div></div>
+  <div class="step"><div class="step-no">6</div><div class="step-body"><div class="step-title">持久化 · <code>_persist_native_messages</code></div><div class="step-detail">SQLite 存 ModelMessages(JSON)+ touch last_turn_at + usage 上报。跨重启不丢。</div></div></div>
+</div>
+
+<div class="pit"><b>现状缺口(诚实陈述)</b>:workflow kernel 的图原语只有 <code>run/pipeline/loop</code> 三个——<b>没有 DAG、没有条件分支、没有 depends_on</b>。而且现在 workflow 是「agent 调用 <code>v2_workflow_run</code> 工具发起的子编排」,不是「turn 本身就是图」。Turn-as-Graph 要补的就是这两件事:(a) 给 kernel 加一个真正的 <b>DAG + 条件边</b>层;(b) 让 turn 的入口能<b>直接承载图</b>,而不只是单次 run。这两点是本方案 §7 落地的核心。</div>
+
+<div class="mermaid-wrap">
+<div class="mermaid">
+sequenceDiagram
+  autonumber
+  participant U as 👤 用户(TUI)
+  participant R as routes / trigger_turn
+  participant C as capability 链(9 层)
+  participant W as 图执行引擎·升格点
+  participant O as observe(留痕)
+  participant DB as SQLite(持久化)
+  U->>R: POST /turn「加聚合端点」
+  R->>R: 恢复 session + active_cwd
+  R->>C: 装配 9 层(指令+工具)
+  C->>W: Agent.run —— ★这里展开成图
+  W->>W: 拆解→并行子节点→收敛
+  W-->>O: 每节点 tick/tool 事件
+  W->>W: skeptic 审查 / 失败回头
+  W-->>R: 收敛结果
+  R->>DB: 存 messages + usage
+  R-->>U: 一屏图 + 结果
+</div>
+<div class="cap">▲ turn 的未来走向:第 4 步从「单次 Agent.run」变成「展开一张图」。三层各司其职:capability 注入、引擎执行、observe 留痕。</div>
+</div>
+</section>
+
+<!-- ========================= §4 ========================= -->
+<section id="s4">
+<h2><span class="n">§4</span>六个高阶工程控制特点</h2>
+<p class="lead-p">这一节是「突破主流 harness」的核心。六个特点,每个都对应一个主流痛点,且都落在 AO2 已有的地基上。</p>
+
+<div class="grid-2">
+  <div class="card">
+    <h4>① 节点图是一等公民</h4>
+    <p>流程不再是藏在 prompt 里的隐式步骤,而是<b>显式的数据结构</b>(节点 + 边 + 依赖)。可序列化、可 diff、可版本化、可在 TUI 里画出来。主流 harness 的「流程」是模型临场想的,这里是你<b>设计出来、存下来、可复用</b>的工程资产。</p>
+    <span class="pill">治痛点:线性 + 黑箱</span>
+  </div>
+  <div class="card">
+    <h4>② 智力分层调度</h4>
+    <p>不是全程一个模型。粗颗粒用大模型(glm-5.2 主控拆解),细颗粒用小模型(glm-4.7 专项执行)。调度决策本身也是<b>可编程的</b>:哪个节点该用多大智力,由图拓扑 + 节点 spec 决定,不是模型自己临场挑。</p>
+    <span class="pill">治痛点:All-or-nothing 智力 → 详见 §5.1</span>
+  </div>
+  <div class="card">
+    <h4>③ 能力即组件(capability)</h4>
+    <p>记忆、工具、守卫、profile 都是<b>可挂可摘的 capability</b>。每个节点可以挂不同的能力组合——读现状的节点不要写权限,写实现的节点挂全工具,审查节点只读不写。<b>能力随节点流动,不是全局一刀切</b>。</p>
+    <span class="pill">治痛点:记忆黑箱 → 详见 §5.3</span>
+  </div>
+  <div class="card">
+    <h4>④ 确定流程 + 小智力切点</h4>
+    <p>复杂工程的<b>主体是确定性流程</b>(先读、再写、再测、再审)——这部分<b>硬编码成图拓扑</b>,不烧智力。只在每个需要判断的切点(「这个实现对不对」「这个测试够不够」),请一个<b>小而专的微调模型</b>出场。<b>工程知识在图里,不在 prompt 里</b>。</p>
+    <span class="pill">治痛点:工程知识全靠 prompt → 详见 §5.4</span>
+  </div>
+  <div class="card">
+    <h4>⑤ 全自动闭环</h4>
+    <p>从一句话到完成,<b>人只出现两次</b>:开头对齐共识(P1)、结尾验收(P4)。中间 P2 执行 + P3 回归<b>全自动无人中断</b>,异常才 push 通知。不是「自动助手」,是「自动工程师」。</p>
+    <span class="pill">治痛点:人全程盯 → 详见 §5.2</span>
+  </div>
+  <div class="card">
+    <h4>⑥ 可观测 / 可干预 / 可恢复</h4>
+    <p>observe 全程事件溯源(SQLite WAL),journal 断点 resume。TUI 可视化每个节点状态。<b>任意节点边界可设干预点</b>——暂停、改向、接管。挂了不丢,接着跑。这是「工程系统」该有的可控性,不是「魔法黑盒」。</p>
+    <span class="pill">治痛点:不可恢复 + 不可观测</span>
+  </div>
+</div>
+</section>
+
+<!-- ========================= §5.1 课题1 ========================= -->
+<section id="s5a">
+<h2><span class="n">§5.1</span>课题一:LLM 智力 与 task 颗粒度 的平衡</h2>
+<p class="lead-p">核心问题:<b>什么时候用一个聪明大模型做整件事,什么时候拆成小颗粒用多个小模型?</b>答案是——<b>颗粒度由任务的确定性决定,不由大小决定</b>。</p>
+
+<div class="purpose">
+<b>调度第一原则:确定的部分用最弱的智力,不确定的部分才用强智力。</b>一个任务越能被拆成确定的步骤,就越该用小颗粒 + 小模型;越是开放探索、需要临场判断,才越该用大模型整体处理。智力是稀缺资源,要花在刀刃(判断切点)上,不该均匀撒在每一步。
+</div>
+
+<div class="mermaid-wrap">
+<div class="mermaid">
+flowchart TD
+  Q{任务类型?}:::q
+  Q -->|开放探索<br/>需求模糊| BIG[大模型整体处理<br/>glm-5.2 · 高 effort<br/>颗粒度:粗]:::big
+  Q -->|半结构化<br/>有步骤但需判断| MID[拆成阶段 pipeline<br/>每阶段专项模型<br/>颗粒度:中]:::mid
+  Q -->|完全确定<br/>步骤清晰| SMALL[拆成细节点 fan-out<br/>小模型 glm-4.7<br/>颗粒度:细]:::small
+  BIG --> COST[贵但少用 · 用于共识/拆解/综合]:::c
+  MID --> COST2[中 · 用于实现/审查]:::c
+  SMALL --> COST3[便宜可大规模 · 用于读/搜/格式化]:::c
+  classDef q fill:#3d2f1a,stroke:#ffb454,color:#ffe9c7
+  classDef big fill:#2a1f3d,stroke:#c099ff,color:#e8d5ff
+  classDef mid fill:#1a2438,stroke:#5bc8ff,color:#d7eaff
+  classDef small fill:#162c22,stroke:#56d364,color:#cffeec
+  classDef c fill:#11161f,stroke:#262f42,color:#8b95a7
+</div>
+<div class="cap">▲ 调度决策树:颗粒度匹配任务的「确定程度」。不是越大越聪明越好,是「该粗的粗、该细的细」。</div>
+</div>
+
+<h3>三个颗粒度档位(落到 AO2 节点 spec)</h3>
+<table class="cmp">
+<tr><th>档位</th><th>用在哪种任务</th><th>模型 / effort</th><th>AO2 原语</th></tr>
+<tr><td class="dim"><span class="acc">粗颗粒</span></td><td>需求拆解、共识对齐、最终综合、跨节点冲突仲裁</td><td><code>glm-5.2</code> · high effort</td><td>主控 turn + 图入口</td></tr>
+<tr><td class="dim"><span class="pri">中颗粒</span></td><td>单文件实现、写测试、单节点 skeptic 审查</td><td><code>glm-4.7</code> · medium</td><td><code>pipeline</code> stage</td></tr>
+<tr><td class="dim"><span class="ok">细颗粒</span></td><td>读现状、grep 搜索、格式化、证据收集</td><td><code>glm-4.7</code> · low</td><td><code>run</code> fan-out</td></tr>
+</table>
+
+<div class="human">
+<b>用大白话讲</b>:你让一个人「写个完整功能」,他要懂全局、要会设计,得请高级工程师(大模型,贵)。但你让他「在这 10 个文件里找所有调用了 X 函数的地方」,这是体力活,实习生(小模型,便宜)并行干最快。<b>聪明的活用聪明人,笨活用便宜人并行</b>——但决定「哪个活该用谁」这件事本身,是项目经理(主控大模型)干一次就定的,不是每个活都重新想。
+</div>
+
+<h3>智力-颗粒度平衡的三个操作杠杆</h3>
+<div class="comm">
+  <div class="comm-row"><div class="comm-k">node.model / effort</div><div class="comm-v">每个节点 spec 里直接写死该用哪个模型、多大 effort。<b>这是硬编码的调度决策</b>,不靠模型临场挑。<code>WorkflowNodeSpec(model, effort)</code></div></div>
+  <div class="comm-row"><div class="comm-k">fan_out 并发度</div><div class="comm-v">细颗粒任务用高并发(<code>run</code> + Semaphore),把 N 个独立子任务同时撒出去——<b>便宜模型 × 并发 = 比一个贵模型串行更快更省</b>。</div></div>
+  <div class="comm-row"><div class="comm-k">schema_ref 结构化输出</div><div class="comm-v">判断切点用 schema 约束输出(<code>schema_registry</code>),把「自由发挥」收窄成「填表」——<b>降低对智力的要求</b>,小模型也能稳定产出结构化结论。</div></div>
+</div>
+
+<div class="pit"><b>反模式警告</b>:不要把所有节点都设成大模型高 effort——那是「用最贵的方式跑确定的流程」,既慢又烧钱,还不如主流 harness 一个模型串行。<b>颗粒度分配本身就是工程设计的核心产出</b>,这张智力分配图应该被 review、被存档、被复用。</div>
+</section>
+
+<!-- ========================= §5.2 课题2 ========================= -->
+<section id="s5b">
+<h2><span class="n">§5.2</span>课题二:全自动化设计</h2>
+<p class="lead-p">核心问题:<b>怎么做到从一句话到完成,中间不打扰人,又能保证不出乱子?</b>答案是——<b>四阶段闭环,人只在两端,中间靠对抗验证 + 红线守恒</b>。</p>
+
+<div class="purpose">
+<b>自动化第二原则:自动化不是「放手让模型干」,是「把判断点提前到开头、把验证点铺满全程」。</b>开头一次性把目标和边界对齐(共识),中间执行 + 验证全自动(对抗式 skeptic 兜底),结尾一次性验收。人不在中间出现,是因为中间该有的判断已经被<b>设计</b>进了验证节点——不是省略了,是结构化了。
+</div>
+
+<div class="mermaid-wrap">
+<div class="mermaid">
+flowchart LR
+  P1[P1 共识<br/>🎨 有人]:::human --> P2[P2 执行<br/>🤖 全自动]:::auto
+  P2 --> P3[P3 回归<br/>🤖 全自动]:::auto
+  P3 --> P4[P4 验收<br/>🎨 有人]:::human
+  P2 -.异常.-> PUSH[push 通知<br/>不暂停]:::warn
+  classDef human fill:#3d2f1a,stroke:#ffb454,color:#ffe9c7
+  classDef auto fill:#1a2438,stroke:#5bc8ff,color:#d7eaff
+  classDef warn fill:#3d1a1a,stroke:#ff6b6b,color:#ffcfcf
+</div>
+<div class="cap">▲ 四阶段闭环:人只在 P1(共识)+ P4(验收)。P2/P3 全自动,异常只 push 不暂停。</div>
+</div>
+
+<div class="phased">
+  <div class="phase p1">
+    <div class="pno"><b>P1</b>共识</div>
+    <div class="pbody">
+      <h4>🎨 有人 · 把目标和边界一次锁死</h4>
+      <p>需求理解(查代码/ADR/memory)→ 对齐范围、架构决策、验收标准 → 产出 spec + ADR + 编排图。这里 grill 到位,后面才不返工。<b>提问预算</b>:只有不可逆决策(MUST-ASK)才打断人,其余 agent 自决。</p>
+    </div>
+  </div>
+  <div class="phase p2">
+    <div class="pno"><b>P2</b>执行</div>
+    <div class="pbody">
+      <h4>🤖 全自动 · 按编排图拓扑推进</h4>
+      <p>每个节点 spawn 独立 subagent(1 节点 = 1 subagent),拓扑序推进。<b>每节点内部 implement → skeptic → fix(max 3 轮)</b>,对抗验证兜底。节点失败不阻塞依赖链,标记 out(failed) 继续。异常 push 通知,<b>不暂停、不回问</b>。</p>
+      <div class="gap">★ Turn-as-Graph 升格后:这里的「节点」就是图里的节点,P2 的推进 = 图的拓扑执行。</div>
+    </div>
+  </div>
+  <div class="phase p3">
+    <div class="pno"><b>P3</b>回归</div>
+    <div class="pbody">
+      <h4>🤖 全自动 · 全局视角收口</h4>
+      <p>P2 每个节点独立 context 看不到彼此 → P3 做<b>跨节点一致性审查</b>(上游 commit 契约下游是否遵守、接口/类型一致、同名符号冲突)+ 回归测试 + ADR 对照。<b>这是唯一的全局视角</b>,补 P2 孤岛。</p>
+    </div>
+  </div>
+  <div class="phase p1">
+    <div class="pno"><b>P4</b>验收</div>
+    <div class="pbody">
+      <h4>🎨 有人 · 一屏报告 + 决策</h4>
+      <p>一屏呈现:哪些节点 pass/fail、回归绿没绿、ADR 守没守、defer 了什么、改了多少文件。memory 沉淀踩坑。然后人决策:接受 / 回炉某节点 / 处理 defer。<b>不写归档文档</b>(git + memory 是事实归档)。</p>
+    </div>
+  </div>
+</div>
+
+<div class="human">
+<b>为什么中间能无人</b>:不是「信任模型」,是「中间该拦的都拦了」。每个节点出口有 skeptic 审查(对抗式,默认反驳),每个依赖边界有契约检查,整体有 P3 全局审查。模型要是瞎搞,skeptic 会拦下、fix loop 会回头、P3 会抓出跨节点冲突。<b>自动化靠的是验证结构,不是模型自觉</b>。人省下来的精力,花在 P1 想清楚、P4 看明白——这两端才是人不可替代的。
+</div>
+
+<h3>三条自动化纪律(守不住就退化成「自动闯祸」)</h3>
+<ul class="dash">
+  <li><b>没有新鲜证据,不接受完成声明</b>。节点说 pass 必须带 skeptic verdict + 测试结果,不信模型的自述。</li>
+  <li><b>红线 grep 守恒</b>(R1 子代理零 memory writer / R5 workflow 无 memory 事件 / RK11 注册名无 v2_ 前缀)——机械检查,任何节点不得违反。</li>
+  <li><b>异常只 push 不暂停</b>。失败标记后继续推进依赖链,不阻塞、不等人,把问题攒到 P4 一次性处理。</li>
+</ul>
+</section>
+
+<!-- ========================= §5.3 课题3 ========================= -->
+<section id="s5c">
+<h2><span class="n">§5.3</span>课题三:记忆组件化利用</h2>
+<p class="lead-p">核心问题:<b>记忆怎么从「一个全局黑箱」变成「按任务维度、可挂可摘的组件」?</b>答案是——<b>记忆本身就是 capability,随节点流动,读写按节点 scope</b>。</p>
+
+<div class="purpose">
+<b>记忆第三原则:记忆不该是一个大池子,该是「这次任务沉淀了什么 / 这次任务该召回什么」的<b>局部视图</b>。</b>每个节点有自己的记忆 scope:读现状的节点只读相关历史、写实现的节点沉淀这次的设计决策、审查节点读这次所有产出。记忆不是全局共享的污染源,是按节点/任务维度隔离的<b>组件</b>。
+</div>
+
+<h3>AO2 现状:记忆已经是 capability(地基齐了)</h3>
+<div class="comm">
+  <div class="comm-row"><div class="comm-k">MemoryWriterCapability</div><div class="comm-v">inner wrap,wrap_run_event_stream 每轮 tool_result 自动沉淀(TURN_END + INGEST + KG + PRE_COMPRESS 四件套)。<b>写记忆是自动的、按 turn 的</b>,不需要模型主动调。</div></div>
+  <div class="comm-row"><div class="comm-k">MemoryCapability</div><div class="comm-v">eager(高频),提供 <code>experience_memory</code> + <code>kg_memory</code> 工具,模型主动召回经验 + 知识图谱。<b>读记忆是工具,按需的</b>。</div></div>
+  <div class="comm-row"><div class="comm-k">R1 红线</div><div class="comm-v">workflow 子 agent <b>零 memory writer</b>——子节点不写记忆,避免 fan-out N 个节点各写各的污染主记忆。沉淀只在主控 turn 的 MemoryWriterCapability 发生。</div></div>
+</div>
+
+<div class="human">
+<b>现在记忆是怎么工作的</b>:主控 turn 跑完一轮,MemoryWriterCapability 自动把这轮的工具结果、产出、token 消耗沉淀成经验 + 知识图谱(<b>写是自动的</b>)。下一轮模型需要历史时,用 MemoryCapability 提供的工具主动去召回(<b>读是主动的</b>)。子节点(workflow fan-out 出来的)<b>不写记忆</b>(R1)——它们是干活的,沉淀是主控的事。这已经比主流 harness 的「一个大 memory」强了:<b>读写分离、自动沉淀、按 turn 维度</b>。
+</div>
+
+<h3>组件化记忆的三个进阶设计(本方案要做的)</h3>
+<div class="grid-3">
+  <div class="card">
+    <h4>① 节点级记忆 scope</h4>
+    <p>每个节点声明它的记忆 scope:<b>读哪些 tag 的历史、沉淀到哪个 tag</b>。读现状节点 scope=「架构现状」,审查节点 scope=「本次所有产出」。记忆隔离,不互相污染。</p>
+    <span class="pill">能力随节点流动(特点③)</span>
+  </div>
+  <div class="card">
+    <h4>② 图级记忆视图</h4>
+    <p>一张图跑完,沉淀一份<b>图级摘要</b>(这次拆解成几个节点、每个节点结论、整体得失)——这是最有价值的「经验」,下次同类任务直接召回整个图的结构。</p>
+    <span class="pill">图即经验,可复用</span>
+  </div>
+  <div class="card">
+    <h4>③ 记忆作为可干预点</h4>
+    <p>用户在 TUI 能看见「这次召回/沉淀了哪些记忆条目」,可以<b>删错条、补对条、钉重要条</b>。记忆不是黑箱沉淀,是可见可治理的资产。</p>
+    <span class="pill">治痛点:记忆黑箱</span>
+  </div>
+</div>
+
+<div class="mermaid-wrap">
+<div class="mermaid">
+flowchart LR
+  subgraph master["主控 turn"]
+    MW[MemoryWriterCapability<br/>自动沉淀·按 turn]:::w
+    MC[MemoryCapability<br/>主动召回·按需]:::r
+  end
+  subgraph nodes["图节点 fan-out"]
+    N1[节点1<br/>零 writer R1]:::n
+    N2[节点2<br/>零 writer R1]:::n
+    N3[节点3<br/>零 writer R1]:::n
+  end
+  MW -.图级摘要.-> STORE[(记忆库<br/>经验 + KG)]
+  STORE -.召回.-> MC
+  MC -.喂给.-> N1
+  N1 -->|结果回主控| MW
+  classDef w fill:#2a1f3d,stroke:#c099ff,color:#e8d5ff
+  classDef r fill:#1a2438,stroke:#5bc8ff,color:#d7eaff
+  classDef n fill:#11161f,stroke:#262f42,color:#8b95a7
+</div>
+<div class="cap">▲ 记忆组件化:写只在主控(自动),读按需召回喂给子节点,子节点零 writer(R1)。沉淀按 turn/图维度,不污染。</div>
+</div>
+
+<div class="pit"><b>关键边界(R1 为什么是红线)</b>:如果 fan-out 的 N 个子节点各写各的记忆,主记忆库会被<b>同质、低质、重复</b>的内容淹没——N 个节点读同一个文件,就写 N 条几乎一样的记忆。R1 强制「沉淀只发生在主控 turn」,保证记忆库的<b>信噪比</b>。组件化不是「每个组件都写」,是「写得对的地方才写」。</div>
+</section>
+
+<!-- ========================= §5.4 课题4 ========================= -->
+<section id="s5d">
+<h2><span class="n">§5.4</span>课题四:硬编码级多专项 agent + 小智力微调模型分工</h2>
+<p class="lead-p">核心问题:<b>怎么用一堆「笨但专」的模型,解决复杂工程化问题?</b>答案是——<b>复杂问题的大部分是确定的,硬编码成图;只有切点需要智力,用专项微调小模型填</b>。</p>
+
+<div class="purpose">
+<b>分工第四原则:工程化问题的主体是「确定的流程」,不是「需要天才的创造」。</b>加个端点、写个测试、改个 bug——步骤是固定的(读现状→定位→改→测→审)。这部分<b>硬编码成图拓扑</b>(pipeline 的 stage 顺序 = 工程步骤),每个节点配一个<b>专项 agent</b>(特定 profile + 工具白名单 + 小智力模型)。<b>工程知识活在图结构里,不活在 prompt 临场发挥里</b>。只有「这个实现到底对不对」这种切点,才切给微调过的小模型判断。
+</div>
+
+<h3>三种「智力载体」的分工(关键区分)</h3>
+<table class="cmp">
+<tr><th>载体</th><th>承载什么</th><th>形式</th><th>智力需求</th></tr>
+<tr><td class="dim"><span class="acc">图拓扑</span></td><td>流程步骤、依赖关系、并行/串行、收敛点</td><td><b>硬编码</b>(DAG/pipeline spec)</td><td><span class="ok">零智力</span>(确定)</td></tr>
+<tr><td class="dim"><span class="pri">专项 agent</span></td><td>某类子任务的执行能力(读/写/测/审)</td><td>profile + 工具白名单 + 小模型</td><td><span class="mid">小智力</span>(专项微调)</td></tr>
+<tr><td class="dim"><span class="pri2">主控大模型</span></td><td>需求拆解、跨节点仲裁、最终综合</td><td>主控 turn + 图入口</td><td><span class="danger">强智力</span>(少用)</td></tr>
+</table>
+
+<div class="human">
+<b>用大白话讲</b>:盖一栋楼,「先打地基、再立柱、再封顶」这个顺序是<b>建筑规范规定的</b>(硬编码图拓扑),不需要每个工人都重新想。「怎么把这根柱子立直」是<b>木工的专项手艺</b>(专项 agent + 微调),不需要总工程师亲自干。只有「这栋楼整体结构合不合理」才要<b>总工程师拍板</b>(主控大模型,少用)。<b>主流 harness 的问题是:让总工程师从挖地基干到封顶</b>——又贵又慢又浪费。AO2 让总工程师只画图(图拓扑)和拍板,挖地基立柱子交给专项工(小模型)。
+</div>
+
+<h3>专项 agent 怎么造(落到 agents.yaml + capability)</h3>
+<p class="lead-p">AO2 已经有 agents.yaml 持久化(现在两个 agent:native 专员 + main 助理)。专项 agent 就是<b>给 agents.yaml 多写几条</b>,每条配死它的「手艺」。</p>
+
+<div class="terminal"><span class="mute"># 专项 agent 矩阵示例(本方案要扩的):</span>
+<span class="hi">- id: reader</span>              <span class="mute"># 读现状专员 · 细颗粒</span>
+  model: glm-4.7
+  tools: {allow: [v2_file_read, v2_search, kg_memory]}   <span class="mute"># 只读不写</span>
+  profile: [L0:你是代码侦察兵,只摸清现状不改动]
+
+<span class="hi">- id: implementer</span>        <span class="mute"># 实现专员 · 中颗粒</span>
+  model: glm-4.7
+  tools: {allow: [v2_file_read, v2_file_write, v2_search]}
+  profile: [L0:你是一个专注的实现者,只改必要的地方]
+
+<span class="hi">- id: tester</span>             <span class="mute"># 测试专员 · 中颗粒</span>
+  model: glm-4.7
+  tools: {allow: [v2_file_read, v2_file_write, v2_bash]}
+  profile: [L0:你只写测试,覆盖被改逻辑的边界]
+
+<span class="acc">- id: skeptic</span>          <span class="mute"># 审查专员 · 中颗粒(对抗)</span>
+  model: glm-4.7
+  tools: {allow: [v2_file_read, v2_search]}               <span class="mute"># 只读,绝不写</span>
+  profile: [L0:你的默认立场是反驳,找出实现的漏洞]
+
+<span class="mute"># 主控(已存在):</span>
+<span class="pri2">- id: main</span>              <span class="mute"># 全能助理 · 粗颗粒,需求拆解+综合</span>
+  model: glm-5.2  effort: high</div>
+
+<div class="pit"><b>「微调」在这里的含义</b>:不是指模型权重微调(成本太高、不通用),而是<b>通过 profile 指令 + 工具白名单 + schema 约束,把一个通用小模型「框」成专项</b>。glm-4.7 本身是通用的,但配死「只读 + 你是侦察兵 + 输出固定 schema」,它在这个窄任务上就表现得像「专门调过」的。<b>这是穷人版微调,但够用、可复用、可组合</b>。真有钱有数据了,某个高频节点(比如 skeptic)再上权重微调,是平滑升级路径。</div>
+
+<h3>复杂问题的分解范式:拓扑即工程知识</h3>
+<div class="mermaid-wrap">
+<div class="mermaid">
+flowchart TD
+  REQ([需求:加聚合端点]):::q
+  subgraph topo["🔧 硬编码图结构 = 工程知识"]
+    direction TB
+    R[[reader<br/>读现状]]:::small
+    D{main 主控<br/>设计实现方案}:::big
+    I[[implementer<br/>写实现]]:::mid
+    T[[tester<br/>写测试]]:::mid
+    S{{skeptic<br/>审查}}:::verify
+    F[[fix loop<br/>max 3 轮]]:::warn
+  end
+  REQ --> R
+  R --> D
+  D --> I
+  D --> T
+  I --> S
+  T --> S
+  S -->|fail| F --> I
+  S -->|pass| DONE([完成]):::ok
+  classDef q fill:#3d2f1a,stroke:#ffb454,color:#ffe9c7
+  classDef small fill:#162c22,stroke:#56d364,color:#cffeec
+  classDef big fill:#2a1f3d,stroke:#c099ff,color:#e8d5ff
+  classDef mid fill:#1a2438,stroke:#5bc8ff,color:#d7eaff
+  classDef verify fill:#3d2f1a,stroke:#ffb454,color:#ffe9c7
+  classDef warn fill:#3d1a1a,stroke:#ff6b6b,color:#ffcfcf
+  classDef ok fill:#162c22,stroke:#56d364,color:#cffeec
+</div>
+<div class="cap">▲ 拓扑即工程知识:虚线框里的「读→设计→实现/测试并行→审查→回头」是<b>硬编码的工程步骤</b>(不烧智力),切点(审查、设计)才切给模型。</div>
+</div>
+
+<div class="human">
+<b>这一节的灵魂</b>:复杂工程化问题,大部分是「<b>该怎么做其实早就定了</b>」——加功能就是读现状→改→测→审,改 bug 就是定位→改→测→审。这些步骤是<b>工程常识</b>,不该每次让大模型重新「想」一遍,更不该藏在 prompt 里靠模型临场发挥。把它<b>硬编码成可复用的图模板</b>,每个槽位塞一个专项小模型,就是「用结构化的工程知识 + 便宜的小智力,稳定地解决一大类问题」。这比「一个天才大模型从头干到尾」更稳、更便宜、更可控——<b>这才是工程化</b>。
+</div>
+</section>
+
+<!-- ========================= §6 ========================= -->
+<section id="s6">
+<h2><span class="n">§6</span>TUI 可视化:把图亮在终端里</h2>
+<p class="lead-p">ratatui 框架下,节点图在终端能画到什么程度?结论:<b>够用,且该用文本/Braille,不该上重 crate</b>。</p>
+
+<div class="purpose">
+AO2 的 TUI(apps/tui-rs, ratatui 0.28)已经有三个 tab:<b>Flows(编排图)</b>、<b>Observe(事件流)</b>、<b>Control(对话输入)</b>。关键发现:<code>components/anchor.rs</code> 已经封装了 <code>Canvas + Braille</code> 画线/点/标签的能力(AnchorGraph),<b>但当前 Flows panel 没用它——用的是纯文本 BFS 分层渲染</b>。这是正确的 ponytail 选择:终端节点图就该用文本框 + 连线字符,不该引入重型的 force-directed graph crate(社区 <code>tui-nodes</code> 失维、<code>ratatui_flow</code> 太重)。
+</div>
+
+<h3>节点图渲染方案(复用现有能力)</h3>
+<div class="grid-2">
+  <div class="card">
+    <h4>布局:分层 DAG(BFS)</h4>
+    <p>节点按依赖层级从上到下排,每层一行。同层节点横向并排。<b>复用现有 <code>flow_dag_lines</code> 纯文本渲染</b>,把节点状态(进行中/成功/失败)用颜色 + spinner 表达。</p>
+    <span class="pill">render.rs · 复用现有</span>
+  </div>
+  <div class="card">
+    <h4>连线:Braille 精细 / 字符粗放</h4>
+    <p>粗放用 <code>──▶</code> / <code>│</code> 字符(现状);精细场景(需要斜线)用 <code>anchor.rs</code> 的 Canvas+Braille。<b>两种都现成,按终端宽度切</b>。</p>
+    <span class="pill">anchor.rs · 已封装</span>
+  </div>
+  <div class="card">
+    <h4>状态:颜色 + glyph + spinner</h4>
+    <p><code>●</code>进行中(青+spinner)/<code>✓</code>成功(绿)/<code>✗</code>失败(红)/<code>◐</code>等待(灰)。<b>一眼看全局进度</b>。</p>
+    <span class="pill">glyph 复用 Observe 渲染</span>
+  </div>
+  <div class="card">
+    <h4>交互:点节点下钻</h4>
+    <p>方向键选中节点 → 回车 → 弹出该节点详情(指令/工具/事件流/skeptic 结论)。<b>图是俯瞰,下钻是细节</b>,两层视图。</p>
+    <span class="pill">tui-popup + ratatui-interact</span>
+  </div>
+</div>
+
+<h3>三 tab 协作(图 + 事件 + 对话)</h3>
+<div class="mermaid-wrap">
+<div class="mermaid">
+flowchart LR
+  subgraph TUI["apps/tui-rs"]
+    F[Flows tab<br/>🖼 节点图俯瞰<br/>状态/进度/依赖]:::f
+    O[Observe tab<br/>📡 事件流细节<br/>tick/tool/token]:::o
+    C[Control tab<br/>⌨ 对话输入<br/>一句话发起]:::c
+  end
+  OBS[(observe :8002<br/>WS subscribe)]
+  C -->|POST /turn| ORC[orche :8001]
+  ORC -->|事件| OBS
+  OBS -->|实时| O
+  OBS -->|flow 事件| F
+  F -.点节点.-> O
+  classDef f fill:#2a1f3d,stroke:#c099ff,color:#e8d5ff
+  classDef o fill:#1a2438,stroke:#5bc8ff,color:#d7eaff
+  classDef c fill:#162c22,stroke:#56d364,color:#cffeec
+</div>
+<div class="cap">▲ 三 tab 各管一摊:Control 发起、Flows 俯瞰全局、Observe 下钻细节。数据全来自 observe 事件流(WS 实时)。</div>
+</div>
+
+<h3>用户能做的四种干预(特点⑥ 可干预)</h3>
+<ul class="dash">
+  <li><b>看</b>:Flows tab 俯瞰全图进度,哪个节点在转/失败/等待,一目了然。</li>
+  <li><b>钻</b>:选中节点看详情——指令、工具调用、skeptic 结论、消耗 token。</li>
+  <li><b>停</b>:在节点边界设断点,暂停某分支(高级,需要图执行引擎支持 pause)。</li>
+  <li><b>改</b>:失败节点的 fix loop 耗尽时,接管手动修,或改方向重新发起。</li>
+</ul>
+
+<div class="terminal"><span class="mute">┌─ Flows ──────────────────────────────┐</span>
+<span class="mute">│</span>  <span class="acc">REQ 加聚合端点</span>                       <span class="mute">│</span>
+<span class="mute">│</span>    └─ <span class="ok">✓ reader</span> 读现状 (glm-4.7 · 312 tok) <span class="mute">│</span>
+<span class="mute">│</span>    └─ <span class="acc">✦ main</span> 设计方案 <span class="mute">·····</span> <span class="mute">│</span>
+<span class="mute">│</span>       ├─ <span class="hi">● implementer</span> 写实现 <span class="warn">(spinner)</span> <span class="mute">│</span>
+<span class="mute">│</span>       └─ <span class="ok">✓ tester</span> 写测试                    <span class="mute">│</span>
+<span class="mute">│</span>       └─ <span class="mute">◐ skeptic</span> 等待                    <span class="mute">│</span>
+<span class="mute">└──────────────────────────────────────┘</span>
+<span class="mute">  ↑ ↓ 选节点 · ⏎ 下钻 · Tab 切 Observe 看事件流</span></div>
+</section>
+
+<!-- ========================= §7 ========================= -->
+<section id="s7">
+<h2><span class="n">§7</span>落地路径:基于现状,分三阶段</h2>
+<p class="lead-p">三层地基已齐(workflow kernel + capability + observe),只差「turn 升格成图」。分三阶段,每阶段都可独立验证、不破坏现有红线。</p>
+
+<div class="phased">
+  <div class="phase p1">
+    <div class="pno"><b>P0</b>通气</div>
+    <div class="pbody">
+      <h4>给 workflow kernel 补 DAG + 条件边</h4>
+      <p>现状只有 <code>run/pipeline/loop</code>。<b>加一个 <code>graph</code> 原语</b>:节点 + 边 + depends_on + 条件边(上一节点结果决定下游走哪条)。复用 journal 的 SQLite WAL resume(已有)。这一步把「图」从「隐式」变「显式」,是 Turn-as-Graph 的地基。</p>
+      <div class="gap">缺口:engine.py 现无 DAG/条件分支/depends_on。这是 §3 指出的核心缺口。</div>
+    </div>
+  </div>
+  <div class="phase p2">
+    <div class="pno"><b>P1</b>升格</div>
+    <div class="pbody">
+      <h4>让 turn 入口能承载图(不只是单次 run)</h4>
+      <p>现在 turn = 一次 <code>Agent.run</code>。<b>在 trigger_turn 里加图分派</b>:主控模型输出图 spec(或从模板取)→ 图执行引擎跑 → 事件全程 emit observe。专项 agent 矩阵(reader/implementer/tester/skeptic)扩进 agents.yaml。<b>这一步 turn 真正变成图</b>。</p>
+      <div class="gap">关键:图分派不能破 R1(子节点零 writer)/ R5(workflow 无 memory 事件)。红线 grep 守恒。</div>
+    </div>
+  </div>
+  <div class="phase p3">
+    <div class="pno"><b>P2</b>可视</div>
+    <div class="pbody">
+      <h4>TUI Flows panel 从纯文本升 Braille 图 + 下钻交互</h4>
+      <p>复用 <code>anchor.rs</code> Canvas 能力,Flows panel 渲染带状态颜色的分层 DAG;选中节点回车弹详情(tui-popup)。<b>WS 已 subscribe flow 事件</b>(现成),只需把渲染从文本升图形 + 加交互。<b>这一步图亮在终端里</b>。</p>
+      <div class="gap">observe 已发 flow 事件(node_started/completed),WS 已订阅,只差渲染升级。</div>
+    </div>
+  </div>
+</div>
+
+<h3>每阶段的验证标准(对抗式,不靠自述)</h3>
+<table class="cmp">
+<tr><th>阶段</th><th>验证手段</th><th>绿的定义</th></tr>
+<tr><td class="dim"><span class="warn">P0</span></td><td>单测:DAG 拓扑执行 + 条件边分派 + journal resume 断点</td><td>图跑通 + resume 不重算已完节点 + 红线 grep 全过</td></tr>
+<tr><td class="dim"><span class="pri">P1</span></td><td>real e2e:一句话 → 图展开 → 专项 agent 各司其职 → 收敛</td><td>turn 产出正确 + R1/R5 守恒 + 事件全 observe</td></tr>
+<tr><td class="dim"><span class="acc">P2</span></td><td>TUI 真机:图渲染 + 节点状态实时 + 下钻详情</td><td>三 tab 协作 + 状态颜色正确 + WS 实时刷新</td></tr>
+</table>
+
+<div class="pit"><b>落地纪律</b>:每阶段必须<b>独立可验证 + 不破红线</b>。P0 没好之前不碰 P1(图地基不稳别盖楼);P1 没好之前不碰 P2(图都跑不起来别急着画)。这是 orchestrator 的「ADR 前置 + 分阶段收敛」纪律,避免一锅炖。<b>每阶段产出 ADR 留痕</b>(决策为什么这么定),沉淀 memory。</div>
+</section>
+
+<!-- ========================= §8 ========================= -->
+<section id="s8">
+<h2><span class="n">§8</span>差异化总结:为什么这是「更高阶」</h2>
+<p class="lead-p">一屏讲清楚:AO2 的 Turn-as-Graph 比 Claude Code / Codex / OpenClaw 高在哪。</p>
+
+<table class="cmp">
+<tr><th>维度</th><th>主流 harness</th><th class="yes">AO2 Turn-as-Graph</th></tr>
+<tr><td class="dim">流程</td><td>模型临场想的,藏在 prompt,一条线</td><td class="yes">硬编码成图拓扑,显式可见可复用</td></tr>
+<tr><td class="dim">智力</td><td>一个贵模型全程,All-or-nothing</td><td class="yes">分层调度,粗用大模型细用小模型</td></tr>
+<tr><td class="dim">记忆</td><td>全局黑箱大池子</td><td class="yes">capability 组件,按 turn/节点维度,读写分离</td></tr>
+<tr><td class="dim">工程知识</td><td>外包给大模型临场发挥</td><td class="yes">活在图结构里,专项小模型填切点</td></tr>
+<tr><td class="dim">自动化</td><td>人全程盯</td><td class="yes">闭环,人只在共识+验收,中间对抗验证兜底</td></tr>
+<tr><td class="dim">恢复</td><td>挂了重来</td><td class="yes">事件溯源 + journal resume 断点续跑</td></tr>
+<tr><td class="dim">可观测</td><td>流式文本跟着看</td><td class="yes">图俯瞰 + 事件下钻,两层视图</td></tr>
+</table>
+
+<div class="purpose" style="border-left-color:var(--acc);background:linear-gradient(90deg,rgba(192,153,255,.08),transparent)">
+<b>一句话本质</b>:主流 harness 把整个工程控制<b>外包给一个大模型的临场发挥</b>;AO2 把工程控制<b>拆成三层硬结构</b>(图拓扑 + 能力组件 + 事件留痕),让大模型只在真正需要判断的切点出场。<b>这不是「更强的 AI」,是「把 AI 用在更对的地方」</b>——这正是工程化的本质:用结构化的确定性,兜住开放问题的不确定性。
+</div>
+
+<div class="human" style="border-left-color:var(--pri)">
+<b>最后一句给用户</b>:你买的不是一个「更聪明的模型」,是一套「能把聪明和不聪明都用在刀刃上」的<b>工程控制系统</b>。聪明的部分(拆解、仲裁、综合)用强智力且少用;不聪明的部分(读、搜、格式化、走流程)用便宜小模型大规模并行;中间全程可见、可干预、可恢复。<b>复杂工程化问题,本质是确定流程 + 少量判断切点——AO2 的图结构把前者硬编码,把后者切给小智力微调模型</b>。这就是比主流高一阶的地方。
+</div>
+
+<div class="footer">
+  Agent OS v2 · Turn-as-Graph 工程控制设计方案 · 2026-07-23<br>
+  基于代码现状(engine.py / routes.py / capabilities/ / apps/tui-rs / observe)· 红线 R1·R5·RK11 守恒 · 落地分 P0/P1/P2 三阶段
+</div>
+
+</section>
+
+</main>
+</div>
+
+<script>
+mermaid.initialize({startOnLoad:true,theme:'dark',themeVariables:{primaryColor:'#1c2433',primaryTextColor:'#d7dde8',primaryBorderColor:'#5bc8ff',lineColor:'#5b6679',secondaryColor:'#161c28',tertiaryColor:'#11161f'}});
+</script>
+</body>
+</html>

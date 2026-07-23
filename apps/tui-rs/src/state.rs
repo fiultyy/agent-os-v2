@@ -783,6 +783,9 @@ pub struct App {
     pub orch_cursor: usize,
     /// Orchestrate tab 当前选中(光标节点投影;render footer / 原语用)。
     pub orch_selection: Option<Selection>,
+    /// ADR-O4:人控原语 registry。footer hint 渲染 + key dispatch + 灰显从此派生。
+    /// W-B 注入 primitives::all()(四空壳占位);W-C 各填真实 impl。
+    pub primitives: Vec<Box<dyn crate::primitives::OrchestratePrimitive>>,
     /// 顶栏 TabBar(ADR-1:Home/Flows/Observe/Control 4 tab)。
     pub tabbar: TabBar,
     /// 鼠标光标(ADR-2:帧末黑底黄字高亮)。
@@ -947,6 +950,7 @@ impl App {
             fork_tree: ForkTree::default(),
             orch_cursor: 0,
             orch_selection: None,
+            primitives: crate::primitives::all(),
             tabbar: {
                 let mut t = TabBar::new(vec![
                     "Flows".to_string(),
@@ -1286,6 +1290,48 @@ impl App {
         self.orch_selection = order.get(self.orch_cursor)
             .and_then(|sid| self.fork_tree.nodes.get(sid))
             .map(Selection::from_node);
+    }
+
+    // ── ADR-O4:原语 registry 派生(footer hint + key dispatch)──────────
+
+    /// Orchestrate tab footer hint:从 registry 派生。enabled 原语高亮,disabled 灰显。
+    /// render 底栏 panel==Orchestrate 时调此(替代全局硬编码 hint)。
+    pub fn orch_primitive_hint(&self) -> String {
+        let sel = self.orch_selection.as_ref();
+        let mut parts: Vec<String> = Vec::new();
+        for p in &self.primitives {
+            let on = sel.map(|s| p.enabled(s)).unwrap_or(false);
+            // 灰显用 (·) 包裹 label,enabled 显 key+label。
+            let seg = if on {
+                format!("{}={}", p.key(), p.label())
+            } else {
+                format!("({})", p.label())
+            };
+            parts.push(seg);
+        }
+        format!(" {} ", parts.join(" · "))
+    }
+
+    /// Orchestrate tab key dispatch:按 key 查 registry,enabled 则 invoke。
+    /// 返回 true = 已消费(handle_base_key 不再走后续分支)。
+    /// disabled / 无匹配 → false(交回 handle_base_key 处理导航键 j/k/1-4/q 等)。
+    /// 关键:即使 disabled 也消费(灰显按键无副作用,不回退到别 panel 的全局动作如 f=create flow)。
+    pub fn dispatch_orchestrate_primitive(&mut self, key: char) -> bool {
+        let sel = match self.orch_selection.clone() {
+            Some(s) => s,
+            None => return false, // 无选中:不消费,交回导航
+        };
+        let idx = self.primitives.iter().position(|p| p.key() == key);
+        let Some(idx) = idx else { return false }; // 无原语绑此 key:不消费
+        if !self.primitives[idx].enabled(&sel) {
+            return true; // 灰显:消费但 no-op(不回退到全局 f=create flow 等)
+        }
+        // 借用冲突:primitives[idx].invoke 需 &mut self,但 primitives 在 self 内。
+        // 取出 Box → invoke → 放回(原语无状态,取出/放回语义等价)。安全且惯用。
+        let prim = std::mem::replace(&mut self.primitives[idx], Box::new(crate::primitives::PlaceholderPrimitive::new("", '\0', "")));
+        prim.invoke(&sel, self);
+        self.primitives[idx] = prim; // 放回(恢复原 instance)
+        true
     }
 
     /// j/Down:Orchestrate 光标下移(DFS 序跨层级)。
@@ -2408,6 +2454,16 @@ impl App {
 
     /// base panel 键位(P1 保留 + P2 扩展 e=raw exec / p=弹窗)。返回 true = 退出 app。
     fn handle_base_key(&mut self, k: &KeyEvent) -> bool {
+        // ADR-O4:Orchestrate tab 原语 key dispatch(最薄优先级)。
+        // 命中原语 key(enabled invoke / disabled 静默消费)→ return;导航键(j/k/1-4/q)无原语
+        // 绑定 → dispatch 返 false → 走后续 match。R1:仅 Orchestrate tab,Flows/flow 0 改动。
+        if self.panel == Panel::Orchestrate {
+            if let KeyCode::Char(ch) = k.code {
+                if self.dispatch_orchestrate_primitive(ch) {
+                    return false;
+                }
+            }
+        }
         // ADR-1/ADR-7:Control insert 模式 = textarea 编辑态。
         // 文字键/Backspace/Left/Right/Enter/Esc 进 textarea;↑↓ 翻历史;@ 触 mention popup。
         // textarea.handle_key 直接 mutate text+cursor;Enter=Send 发送 turn(发送后 clear)。
@@ -3147,6 +3203,74 @@ mod tests {
         assert_eq!(app.orch_cursor, 0);
         app.orch_cursor_up(); // clamp
         assert_eq!(app.orch_cursor, 0);
+    }
+
+    #[test]
+    fn orch_primitive_registry_has_four_shells() {
+        // ADR-O4:W-B 预建四空壳(fork/async_turn/open_events/cancel),mod.rs all() 列四 make()。
+        let app = App::new(crate::kitty::detect());
+        let ids: Vec<&str> = app.primitives.iter().map(|p| p.id()).collect();
+        assert_eq!(ids, vec!["fork", "async_turn", "open_events", "cancel"]);
+        let keys: Vec<char> = app.primitives.iter().map(|p| p.key()).collect();
+        assert_eq!(keys, vec!['f', 'a', 'o', 'x']);
+    }
+
+    #[test]
+    fn orch_primitive_shells_disabled_and_dispatch_consumes() {
+        // 四空壳 enabled 恒 false(W-B 占位)。dispatch 命中 bound key → 消费(true,no-op);
+        // 命中未绑 key(如 'q')→ 不消费(false,交回导航)。
+        let mut app = App::new(crate::kitty::detect());
+        let sessions = vec![
+            OrchSession { session_id: "root".into(), harness_type: "agent-os-v2".into(), agent_id: "n".into(), parent_session_id: String::new() },
+        ];
+        app.fork_tree = build_fork_tree(sessions);
+        app.panel = Panel::Orchestrate;
+        app.sync_orch_selection();
+        let sel = app.orch_selection.clone().unwrap();
+        // 四空壳均 disabled。
+        for p in &app.primitives {
+            assert!(!p.enabled(&sel), "placeholder {} should be disabled", p.id());
+        }
+        // 命中 bound key(灰显)→ 消费 true(no-op,不回退全局)。
+        assert!(app.dispatch_orchestrate_primitive('f'));
+        assert!(app.dispatch_orchestrate_primitive('x'));
+        // 未绑 key('q')→ 不消费 false。
+        assert!(!app.dispatch_orchestrate_primitive('q'));
+        // 无选中 → 不消费。
+        app.orch_selection = None;
+        assert!(!app.dispatch_orchestrate_primitive('f'));
+    }
+
+    #[test]
+    fn orch_primitive_hint_derives_from_registry() {
+        // footer hint 从 registry 派生:disabled 显 (label),enabled 显 key=label。
+        // W-B 四空壳均 disabled → 全 (label) 形式。
+        let mut app = App::new(crate::kitty::detect());
+        app.fork_tree = build_fork_tree(vec![
+            OrchSession { session_id: "r".into(), harness_type: "agent-os-v2".into(), agent_id: "n".into(), parent_session_id: String::new() },
+        ]);
+        app.sync_orch_selection();
+        let hint = app.orch_primitive_hint();
+        assert!(hint.contains("(fork)"), "hint={} should gray-out disabled fork", hint);
+        assert!(hint.contains("(cancel)"), "hint={}", hint);
+        // 确认 key 不出现在 disabled 段(disabled 显 (label) 不含 key=)。
+        assert!(!hint.contains("f=fork"), "disabled should not show key: hint={}", hint);
+    }
+
+    #[test]
+    fn orch_dispatch_does_not_swallow_navigation_keys() {
+        // handle_base_key 在 Orchestrate tab:j/k 仍导航(无原语绑 j/k)。
+        let mut app = App::new(crate::kitty::detect());
+        app.fork_tree = build_fork_tree(vec![
+            OrchSession { session_id: "r".into(), harness_type: "agent-os-v2".into(), agent_id: "n".into(), parent_session_id: String::new() },
+            OrchSession { session_id: "c".into(), harness_type: "agent-os-v2".into(), agent_id: "a".into(), parent_session_id: "r".into() },
+        ]);
+        app.panel = Panel::Orchestrate;
+        app.orch_cursor = 0;
+        app.sync_orch_selection();
+        // j 无原语绑定 → 走导航 → cursor 下移。
+        app.handle_base_key(&KeyEvent::new(KeyCode::Char('j'), crossterm::event::KeyModifiers::empty()));
+        assert_eq!(app.orch_cursor, 1, "j should still navigate in Orchestrate");
     }
 
     #[test]

@@ -1248,11 +1248,19 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 
     // 底栏 hint。
-    let hint = Paragraph::new(format!(
-        " Tab/1-4 切 tab · 鼠标点 tab · j/k 选(flow panel 切 flow)· t turn · f/G/D 创建 flow · R 运行 · s spawn · p 弹窗 · ? help · q quit{}",
-        if app.term.hint.is_empty() { String::new() } else { format!("  ⚠ {}", app.term.hint) },
-    ))
-    .style(Style::default().fg(Color::DarkGray));
+    // ADR-O4:Orchestrate tab 从 registry 动态派生原语 hint(灰显/高亮);其余 tab 全局硬编码。
+    let hint_text = match app.panel {
+        Panel::Orchestrate => format!(
+            "{}· j/k 跨层级 · 1-4 切 tab · q quit{}",
+            app.orch_primitive_hint(),
+            if app.term.hint.is_empty() { String::new() } else { format!("  ⚠ {}", app.term.hint) },
+        ),
+        _ => format!(
+            " Tab/1-4 切 tab · 鼠标点 tab · j/k 选(flow panel 切 flow)· t turn · f/G/D 创建 flow · R 运行 · s spawn · p 弹窗 · ? help · q quit{}",
+            if app.term.hint.is_empty() { String::new() } else { format!("  ⚠ {}", app.term.hint) },
+        ),
+    };
+    let hint = Paragraph::new(hint_text).style(Style::default().fg(Color::DarkGray));
     f.render_widget(hint, chunks[2]);
 
     // z-order layer 1:overlay(Kitty 图片预览)IT3 ② 已废——终端能力并入 i 弹窗(open_props)。

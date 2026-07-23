@@ -14,6 +14,7 @@
 mod components;
 mod events;
 mod kitty;
+mod primitives;
 mod render;
 mod state;
 mod theme;
