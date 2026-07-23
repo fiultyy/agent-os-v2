@@ -103,3 +103,27 @@ def token_delta(
                      "delta_text": delta_text,
                      "accumulated_text": accumulated_text,
                  }, agent_id=agent_id)
+
+
+def branch_created(
+    harness_type: str, harness_id: str, session_id: str,
+    branch_id: str, parent_branch_id: str, fork_tick_id: str = "",
+    *, agent_id: str = "",
+) -> Dict[str, Any]:
+    """F3(ADR-S5):fork 时 emit。session_id=child(新 fork),parent_branch_id=source。
+
+    observe ws_ingest 据此回填 child session 的 parent_session_id → fork 树可观测。
+    agent_id 透传(D 的字段),让 observe 知道是谁的 fork。
+
+    顶层 ``parent_session_id`` 键必须显式写:_base 不含此键,而 observe
+    ``ObserveEvent.from_dict`` 读顶层字段(非 data)回填 session 行。漏写则
+    ws_ingest 的 update_parent_session_id 永不触发(parent 恒空串)。
+    """
+    ev = _base(harness_type, harness_id, session_id, "",
+               "branch_created", {
+                   "branch_id": branch_id,
+                   "parent_branch_id": parent_branch_id,
+                   "fork_tick_id": fork_tick_id,
+               }, agent_id=agent_id)
+    ev["parent_session_id"] = parent_branch_id  # 顶层(observe from_dict 读此)
+    return ev

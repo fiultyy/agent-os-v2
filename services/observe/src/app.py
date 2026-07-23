@@ -215,11 +215,17 @@ async def ws_ingest(websocket: WebSocket):
                         # Update last_active + ADR-1: backfill agent_id from
                         # the event if the session row lacks it (the WS ingest
                         # URL carries no agent_id; it arrives in the payload).
+                        # ADR-S5 (F3): branch_created also backfills
+                        # parent_session_id → observe fork tree lineage.
                         if session_store:
                             session_store.update_last_active(harness_type, session_id)
                             if getattr(event, "agent_id", ""):
                                 session_store.update_agent_id(
                                     harness_type, session_id, event.agent_id
+                                )
+                            if getattr(event, "parent_session_id", ""):
+                                session_store.update_parent_session_id(
+                                    harness_type, session_id, event.parent_session_id
                                 )
                 except Exception as e:
                     logger.error(f"Failed to parse event: {e}")

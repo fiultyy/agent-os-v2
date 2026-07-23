@@ -70,6 +70,15 @@ class SessionStore:
             self._conn.commit()
         except sqlite3.OperationalError:
             pass  # column already exists
+        # ADR-S5 (F3): parent_session_id for fork lineage. Same idempotent ALTER
+        # pattern — legacy/non-fork rows keep NULL, no rebuild.
+        try:
+            self._conn.execute(
+                "ALTER TABLE observe_sessions ADD COLUMN parent_session_id TEXT"
+            )
+            self._conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
     # ── CRUD ────────────────────────────────────────────────────────
 
@@ -120,6 +129,25 @@ class SessionStore:
             WHERE harness_type = ? AND session_id = ? AND agent_id IS NULL
             """,
             (agent_id, harness_type, session_id),
+        )
+        self._conn.commit()
+
+    def update_parent_session_id(
+        self, harness_type: str, session_id: str, parent_session_id: str
+    ) -> None:
+        """ADR-S5 (F3): backfill parent_session_id on a session row only if NULL.
+
+        Non-destructive (matches update_agent_id): a row already carrying a
+        parent isn't overwritten. Lets observe build a fork tree
+        (parent → child sessions) for lineage queries.
+        """
+        self._conn.execute(
+            """
+            UPDATE observe_sessions
+            SET parent_session_id = ?
+            WHERE harness_type = ? AND session_id = ? AND parent_session_id IS NULL
+            """,
+            (parent_session_id, harness_type, session_id),
         )
         self._conn.commit()
 

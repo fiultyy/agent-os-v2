@@ -916,6 +916,21 @@ async def fork_session(
                 native_sid=new_sid, agent_id=src_agent_id,
                 parent_session_id=source,
             )
+            # F3(ADR-S5):emit branch_created → observe 回填 child parent_session_id。
+            # child=新 session_id;session_id 字段载 child(branch_created 的语义:
+            # 此事件属于新 fork 分支)。agent_id 透传(D),让 observe 知道谁的 fork。
+            # fire-and-forget(ADR-7):emit 失败不阻塞 fork。
+            fork_emitter = new_rec.get("emitter")
+            if fork_emitter is not None:
+                from .events import branch_created as _branch_created
+                try:
+                    await fork_emitter.emit(_branch_created(
+                        "agent-os-v2", new_rec.get("harness_id", ""),
+                        new_sid, branch_id=new_sid, parent_branch_id=source,
+                        agent_id=src_agent_id or "",
+                    ))
+                except Exception:
+                    logger.warning("branch_created emit failed for %s", new_sid)
             forks.append({
                 "new_session_id": new_sid, "source": source,
                 "direction": tgt.first_message, "forked": True,

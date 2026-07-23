@@ -30,9 +30,10 @@ def store(tmp_path, monkeypatch):
 
 def _native_rec(messages=None, spec_id="native"):
     """轻量 native rec mock(_build_native_session 返的结构)。messages 用真 ModelMessage
-    让深拷贝断言有意义(验证非浅引用)。"""
+    让深拷贝断言有意义(验证非浅引用)。emitter=AsyncMock:F3 fork emit branch_created
+    用 `await emitter.emit(...)`,普通 MagicMock 不可 await。"""
     return {
-        "agent": MagicMock(), "emitter": MagicMock(), "messages": messages or [],
+        "agent": MagicMock(), "emitter": AsyncMock(), "messages": messages or [],
         "session_id": "s", "harness_type": "agent-os-v2", "native_sid": "s",
         "cwd_scope": [], "spec_id": spec_id,
     }
@@ -322,3 +323,109 @@ def test_native_fork_source_not_found_404(store):
             "agent-os-v2", routes.ForkReq(source_session_id="ghost", first_message="x"),
         ))
     assert ei.value.status_code == 404
+
+
+# ── F3(ADR-S5):fork emit branch_created → observe parent 链 ──────────
+
+def test_native_fork_emits_branch_created(store, monkeypatch):
+    """F3:fork 成功时经 child emitter emit branch_created(parent_branch_id=source,
+    branch_id=child, agent_id 透传)。fake emitter spy 断言 shape。"""
+    src_sid = "src-emit"
+    routes._sessions[routes._key("agent-os-v2", src_sid)] = _native_rec(spec_id="english-expert")
+    store.create(src_sid, "agent-os-v2", native_sid=src_sid, agent_id="english-expert")
+    monkeypatch.setattr(routes, "_build_native_session",
+                        AsyncMock(side_effect=lambda sid, **kw: _native_rec(
+                            messages=kw.get("messages"), spec_id=kw.get("agent_id") or "native")))
+
+    r = asyncio.run(routes.fork_session(
+        "agent-os-v2", routes.ForkReq(source_session_id=src_sid, first_message="branch"),
+    ))
+    new_sid = r["forks"][0]["new_session_id"]
+    child_rec = routes._sessions[routes._key("agent-os-v2", new_sid)]
+    # child emitter.emit 被调一次(branch_created)
+    child_rec["emitter"].emit.assert_awaited_once()
+    sent = child_rec["emitter"].emit.await_args.args[0]
+    # shape 断言(ADR-S5)
+    assert sent["event_type"] == "branch_created"
+    assert sent["session_id"] == new_sid          # child(此事件属新 fork 分支)
+    assert sent["data"]["parent_branch_id"] == src_sid  # source = parent
+    assert sent["data"]["branch_id"] == new_sid   # child = branch
+    assert sent["agent_id"] == "english-expert"   # 透传(ADR-1,D 的字段)
+    assert sent["harness_type"] == "agent-os-v2"
+    # 顶层 parent_session_id 键必须存在(observe from_dict 读顶层回填 session 行;
+    # 漏写则 ws_ingest update_parent_session_id 永不触发 — skeptic 发现的回归点)
+    assert sent["parent_session_id"] == src_sid
+
+
+def test_native_fork_branch_created_agent_id_empty_when_no_spec(store, monkeypatch):
+    """源 spec_id 为空 → branch_created agent_id=""(legacy 兼容,不崩)。"""
+    src_sid = "src-nospec"
+    routes._sessions[routes._key("agent-os-v2", src_sid)] = _native_rec(spec_id="")
+    store.create(src_sid, "agent-os-v2", native_sid=src_sid, agent_id="")
+    monkeypatch.setattr(routes, "_build_native_session",
+                        AsyncMock(side_effect=lambda sid, **kw: _native_rec(
+                            messages=kw.get("messages"), spec_id=kw.get("agent_id") or "")))
+
+    r = asyncio.run(routes.fork_session(
+        "agent-os-v2", routes.ForkReq(source_session_id=src_sid, first_message="x"),
+    ))
+    new_sid = r["forks"][0]["new_session_id"]
+    child_rec = routes._sessions[routes._key("agent-os-v2", new_sid)]
+    sent = child_rec["emitter"].emit.await_args.args[0]
+    assert sent["agent_id"] == ""
+
+
+def test_native_fork_emit_failure_does_not_break_fork(store, monkeypatch):
+    """ADR-7:branch_created emit 抛异常不阻塞 fork(fire-and-forget,fork 仍成功返回)。"""
+    src_sid = "src-emitfail"
+    routes._sessions[routes._key("agent-os-v2", src_sid)] = _native_rec(spec_id="native")
+    store.create(src_sid, "agent-os-v2", native_sid=src_sid, agent_id="native")
+
+    async def fake_build(sid, messages=None, agent_id=None):
+        rec = _native_rec(messages=messages, spec_id=agent_id)
+        rec["emitter"] = AsyncMock()
+        rec["emitter"].emit = AsyncMock(side_effect=RuntimeError("ws down"))
+        return rec
+    monkeypatch.setattr(routes, "_build_native_session", fake_build)
+
+    r = asyncio.run(routes.fork_session(
+        "agent-os-v2", routes.ForkReq(source_session_id=src_sid, first_message="x"),
+    ))
+    # emit 抛了但 fork 仍成功(不被污染)
+    assert r["forked"] is True
+    assert len(r["forks"]) == 1
+
+
+def test_native_fork_no_emitter_skips_emit_safely(store, monkeypatch):
+    """rec 无 emitter(边界)→ 不 emit,不崩(fork 仍成功)。"""
+    src_sid = "src-noemit"
+    routes._sessions[routes._key("agent-os-v2", src_sid)] = _native_rec(spec_id="native")
+    store.create(src_sid, "agent-os-v2", native_sid=src_sid, agent_id="native")
+
+    async def fake_build(sid, messages=None, agent_id=None):
+        rec = _native_rec(messages=messages, spec_id=agent_id)
+        rec["emitter"] = None  # 边界:无 emitter
+        return rec
+    monkeypatch.setattr(routes, "_build_native_session", fake_build)
+
+    r = asyncio.run(routes.fork_session(
+        "agent-os-v2", routes.ForkReq(source_session_id=src_sid, first_message="x"),
+    ))
+    assert r["forked"] is True
+
+
+def test_branch_created_events_module_shape():
+    """orchestrator events.branch_created 构造正确 dict(独立单测,不依赖 routes)。"""
+    from src.harness.events import branch_created
+    ev = branch_created(
+        "agent-os-v2", "native_abc", "child-sid",
+        branch_id="child-sid", parent_branch_id="parent-sid",
+        agent_id="main",
+    )
+    assert ev["event_type"] == "branch_created"
+    assert ev["session_id"] == "child-sid"
+    assert ev["data"]["branch_id"] == "child-sid"
+    assert ev["data"]["parent_branch_id"] == "parent-sid"
+    assert ev["agent_id"] == "main"
+    # 顶层 parent_session_id(observe from_dict 读此键回填 session 行)
+    assert ev["parent_session_id"] == "parent-sid"

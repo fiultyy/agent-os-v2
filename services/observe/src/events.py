@@ -46,6 +46,10 @@ class ObserveEvent:
     # traceability. A consumed agent's events carry the TARGET agent_id, not the
     # caller's (set by orchestrator assemble_capabilities).
     agent_id: str = ""
+    # ADR-S5 (F3): parent session_id for fork lineage. Empty for non-fork /
+    # legacy events. branch_created carries it both here (top-level, for direct
+    # session-store backfill) and in data.parent_branch_id (wire contract).
+    parent_session_id: str = ""
     timestamp: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -61,6 +65,7 @@ class ObserveEvent:
             "event_type": self.event_type.value,
             "data": self.data,
             "agent_id": self.agent_id,
+            "parent_session_id": self.parent_session_id,
             "timestamp": self.timestamp,
         }
 
@@ -199,9 +204,15 @@ def branch_created(
     session_id: str,
     branch_id: str,
     parent_branch_id: str,
-    fork_tick_id: str,
+    fork_tick_id: str = "",
+    agent_id: str = "",
 ) -> ObserveEvent:
-    """Create branch_created event (agent-os-v2 specific)."""
+    """Create branch_created event (agent-os-v2 specific).
+
+    ADR-S5 (F3):parent_branch_id 同时提到顶层 parent_session_id 字段,方便
+    ws_ingest 直接回填 session 行的 parent_session_id(不必 dig data)。agent_id
+    透传(ADR-1),让 observe 知道是谁的 fork。
+    """
     return ObserveEvent(
         harness_type=harness_type,
         harness_id=harness_id,
@@ -213,6 +224,8 @@ def branch_created(
             "parent_branch_id": parent_branch_id,
             "fork_tick_id": fork_tick_id,
         },
+        agent_id=agent_id,
+        parent_session_id=parent_branch_id,
     )
 
 
