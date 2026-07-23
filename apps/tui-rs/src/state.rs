@@ -507,10 +507,11 @@ fn copy_to_clipboard(s: &str) {
 }
 
 /// 触发一个 turn(POST /h/{type}/sessions/{sid}/turn)。type∈{claw,claude-code}。
-/// 返回 server 回的 status 文本。
-pub fn trigger_turn(ht: &str, sid: &str, message: &str) -> Option<String> {
+/// `async_run=true` 仅 agent-os-v2 有意义:server create_task 后立返 {started,tick_id},
+/// 不等 LLM 跑完(observe tick 事件流报进度)。返回 server 回的 status 文本。
+pub fn trigger_turn(ht: &str, sid: &str, message: &str, async_run: bool) -> Option<String> {
     let resp = ureq::post(&format!("{}/h/{}/sessions/{}/turn", ORCH, ht, sid))
-        .send_json(serde_json::json!({ "message": message }))
+        .send_json(serde_json::json!({ "message": message, "async_run": async_run }))
         .ok()?;
     resp.into_string().ok()
 }
@@ -786,6 +787,11 @@ pub struct App {
     /// ADR-O4:人控原语 registry。footer hint 渲染 + key dispatch + 灰显从此派生。
     /// W-B 注入 primitives::all()(四空壳占位);W-C 各填真实 impl。
     pub primitives: Vec<Box<dyn crate::primitives::OrchestratePrimitive>>,
+    /// ADR-O6:session_id → 运行中异步 turn 的 tick_id。tick_started 插入,tick_completed 移除。
+    /// cancel 原语从此查 tick_id(Selection 不带 tick_id,同 ht 走 fork_tree node 的做法)。
+    /// ponytail: 仅内存态;tree 全量刷新(fetch_orch_tree)不清此 map(刷新不发 tick 事件,
+    /// 节点状态另由 tick_started/completed 事件驱动刷新),stale 由 tick_completed 清。
+    pub running_ticks: HashMap<String, String>,
     /// 顶栏 TabBar(ADR-1:Home/Flows/Observe/Control 4 tab)。
     pub tabbar: TabBar,
     /// 鼠标光标(ADR-2:帧末黑底黄字高亮)。
@@ -951,6 +957,7 @@ impl App {
             orch_cursor: 0,
             orch_selection: None,
             primitives: crate::primitives::all(),
+            running_ticks: HashMap::new(),
             tabbar: {
                 let mut t = TabBar::new(vec![
                     "Flows".to_string(),
@@ -1110,7 +1117,7 @@ impl App {
                 .insert("openclaw/agent:main:main".to_string(), evs);
         }
     }
-    pub fn do_turn(&mut self) {
+    pub fn do_turn(&mut self, async_run: bool) {
         // optimistic 立即回显(spinner + 用户输入)+ 异步发送(不阻塞 UI)。
         // WS 推 tick_started(含 user msg request)→ drain_ws push + 清 pending(切换正常显示);
         // subscribe connect 时序可能丢 WS tick_started → 后台 fetch 全量兜补(has_tick 才 replace)。
@@ -1127,7 +1134,7 @@ impl App {
             self.pending_since = Some(std::time::Instant::now()); // #8 记时刻,Tick 超 60s 兜底清
             let tx = self.fetch_tx.clone();
             std::thread::spawn(move || {
-                let _ = trigger_turn(&norm_ht_v, &sid, &msg);
+                let _ = trigger_turn(&norm_ht_v, &sid, &msg, async_run);
                 // 等 observe ingest tick_started(含 user msg;LLM 首 token 前 gateway 推 stream start,
                 // emitter 合成 tick_started → observe,~几百 ms)。subscribe 时序丢 WS tick_started 时,
                 // fetch 全量补(observe 有)。sleep 确保拉到 tick_started。
@@ -1368,6 +1375,12 @@ impl App {
     pub fn apply_orch_tree_event(&mut self, session_id: &str, ev: &ObserveEvent) {
         let status = ev.data.get("status").and_then(|v| v.as_str()).unwrap_or("");
         let new_state = NodeState::from_event(&ev.event_type, status);
+        // ADR-O6:维护 session→tick_id,供 cancel 原语查。tick_started 插,tick_completed 清。
+        match ev.event_type.as_str() {
+            "tick_started" => { self.running_ticks.insert(session_id.to_string(), ev.tick_id.clone()); }
+            "tick_completed" => { self.running_ticks.remove(session_id); }
+            _ => {}
+        }
         let in_tree = self.fork_tree.nodes.contains_key(session_id);
         if in_tree {
             // branch_created 可能引入新子节点:刷新整树(observe 已 update parent)。
@@ -2740,6 +2753,11 @@ impl App {
                     if matches!(self.focus, FocusTarget::ObserveSession) {
                         self.jump_to_control(self.cursor);
                     }
+                }
+                // ADR-O4:Orchestrate tab Enter → 查 key='\n' 原语(open-events)。
+                // Enter 非 KeyCode::Char,不走上面的 Char dispatch;此处显式路由保持 registry 派发。
+                if self.panel == Panel::Orchestrate && self.dispatch_orchestrate_primitive('\n') {
+                    return false;
                 }
                 false
             }
