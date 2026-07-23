@@ -158,8 +158,9 @@ impl NodeState {
     pub fn from_event(event_type: &str, status: &str) -> Self {
         match (event_type, status) {
             ("tick_started", _) => NodeState::Running,
-            ("tick_completed", "cancelled") => NodeState::Idle,
-            ("tick_completed", _) => NodeState::Done,
+            ("tick_completed", "success") => NodeState::Done,
+            // error/cancelled/其他终态均不显成 ✓(语义错);显式 Idle。
+            ("tick_completed", _) => NodeState::Idle,
             ("branch_created", _) => NodeState::Active,
             _ => NodeState::Idle,
         }
@@ -249,7 +250,9 @@ struct OrchSession {
 struct OrchSessionsResp { sessions: Vec<OrchSession> }
 
 fn fetch_orch_sessions() -> Vec<OrchSession> {
+    // timeout 防 observe 慢时 drain_ws 内 ureq 阻塞 30s(默认)致 TUI 帧冻结。
     ureq::get(&format!("{}/sessions", OBSERVE))
+        .timeout(std::time::Duration::from_secs(2))
         .query("harness_type", "agent-os-v2")
         .call().ok()
         .and_then(|r| r.into_json::<OrchSessionsResp>().ok())
@@ -3088,6 +3091,8 @@ mod tests {
         assert_eq!(NodeState::from_event("tick_started", ""), NodeState::Running);
         assert_eq!(NodeState::from_event("tick_completed", "success"), NodeState::Done);
         assert_eq!(NodeState::from_event("tick_completed", "cancelled"), NodeState::Idle);
+        // error 不显成 ✓(语义错)→ Idle。
+        assert_eq!(NodeState::from_event("tick_completed", "error"), NodeState::Idle);
         assert_eq!(NodeState::from_event("branch_created", ""), NodeState::Active);
         assert_eq!(NodeState::from_event("unknown", ""), NodeState::Idle);
         // glyph 覆盖 4 态(防退化成单一符号)。

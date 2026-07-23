@@ -721,14 +721,15 @@ async def cancel_turn(
     不碰 workflow_engine.py(R1);observe 侧只经 emitter.emit,不引 memory(R5)。
     """
     _validate_type(harness_type)
-    task = _async_turn_tasks.get(req.tick_id)
+    # pop-or-get 原子化:消 get 与后续 pop 间残留窗口竞态(两并发 cancel 同 tick_id
+    # 都过 get 检查,双 cancel)。pop 命中即独占;done_callback 的 pop 是幂等兜底。
+    task = _async_turn_tasks.pop(req.tick_id, None)
     if task is None:
         raise HTTPException(
             status_code=404,
-            detail={"tick_id": req.tick_id, "error": "tick not found (already done or never started)"},
+            detail=f"tick_id {req.tick_id} not found (already done or never started)",
         )
     task.cancel()
-    _async_turn_tasks.pop(req.tick_id, None)
     # emit tick_completed(cancelled) — 复用 native session 的 emitter(fire-and-forget)。
     # ponytail:emitter 从 _sessions rec 取;无 rec(None/已删)则跳过 emit,task 已取消仍是真。
     rec = _sessions.get(_key(harness_type, session_id))

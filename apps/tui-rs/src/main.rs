@@ -97,11 +97,13 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> i
                     sub_flows.insert(tf.flow_id.clone());
                 }
             }
-            // ADR-O1:Orchestrate fork 树根 session 订阅(agent-os-v2 WS,刷节点状态)。
-            for root in &app.fork_tree.roots {
-                if !sub_orch_roots.contains(root) {
-                    mgr.subscribe("agent-os-v2", root);
-                    sub_orch_roots.insert(root.clone());
+            // ADR-O1:Orchestrate fork 树订阅(agent-os-v2 WS,刷节点状态)。订阅全树
+            // 节点(roots + 子 fork 节点),不只 roots —— 否则子节点 tick 事件不到
+            // drain_ws,状态静态。Set 记忆防重复订阅。
+            for sid in app.fork_tree.nodes.keys() {
+                if !sub_orch_roots.contains(sid) {
+                    mgr.subscribe("agent-os-v2", sid);
+                    sub_orch_roots.insert(sid.clone());
                 }
             }
         }
