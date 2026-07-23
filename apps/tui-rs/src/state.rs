@@ -353,6 +353,25 @@ pub fn fork_session(ht: &str, source: &str, first_msg: &str) -> Option<(String, 
     let forked = v.get("forked").and_then(|x| x.as_bool()).unwrap_or(true);
     Some((new_sid, forked))
 }
+/// ADR-O6:POST /h/{type}/sessions/{id}/turn/cancel {tick_id} → 协作式中断异步 turn。
+/// Ok(()) = 后端 200(cancelled);Err(msg) = 404(tick 不在/已结束)或 orche 不可达/超时。
+/// timeout 防 orche 慢时 TUI 帧冻结(与 fetch_orch_sessions/merge_orche 一致)。
+pub fn cancel_turn(ht: &str, sid: &str, tick_id: &str) -> Result<(), String> {
+    let url = format!("{}/h/{}/sessions/{}/turn/cancel", ORCH, ht, sid);
+    match ureq::post(&url)
+        .timeout(std::time::Duration::from_secs(3))
+        .send_json(serde_json::json!({ "tick_id": tick_id }))
+    {
+        Ok(r) if r.status() == 200 => Ok(()),
+        Ok(r) => Err(format!("HTTP {}", r.status())),
+        // 404 = tick_id 已结束/不存在(ADR-O6 显式);其余 = 连接/超时类。
+        Err(e) => Err(if e.kind() == ureq::ErrorKind::HTTP {
+            "tick 不在(已结束?)".into()
+        } else {
+            "orche 不可达/超时".into()
+        }),
+    }
+}
 /// POST /h/{type}/sessions/{id}/archive {prompt?} → summary turn 文本。失败 None。
 pub fn archive_session(ht: &str, sid: &str, prompt: Option<&str>) -> Option<String> {
     let body = match prompt {
@@ -507,10 +526,11 @@ fn copy_to_clipboard(s: &str) {
 }
 
 /// 触发一个 turn(POST /h/{type}/sessions/{sid}/turn)。type∈{claw,claude-code}。
-/// 返回 server 回的 status 文本。
-pub fn trigger_turn(ht: &str, sid: &str, message: &str) -> Option<String> {
+/// `async_run=true` 仅 agent-os-v2 有意义:server create_task 后立返 {started,tick_id},
+/// 不等 LLM 跑完(observe tick 事件流报进度)。返回 server 回的 status 文本。
+pub fn trigger_turn(ht: &str, sid: &str, message: &str, async_run: bool) -> Option<String> {
     let resp = ureq::post(&format!("{}/h/{}/sessions/{}/turn", ORCH, ht, sid))
-        .send_json(serde_json::json!({ "message": message }))
+        .send_json(serde_json::json!({ "message": message, "async_run": async_run }))
         .ok()?;
     resp.into_string().ok()
 }
@@ -786,6 +806,11 @@ pub struct App {
     /// ADR-O4:人控原语 registry。footer hint 渲染 + key dispatch + 灰显从此派生。
     /// W-B 注入 primitives::all()(四空壳占位);W-C 各填真实 impl。
     pub primitives: Vec<Box<dyn crate::primitives::OrchestratePrimitive>>,
+    /// ADR-O6:session_id → 运行中异步 turn 的 tick_id。tick_started 插入,tick_completed 移除。
+    /// cancel 原语从此查 tick_id(Selection 不带 tick_id,同 ht 走 fork_tree node 的做法)。
+    /// ponytail: 仅内存态;tree 全量刷新(fetch_orch_tree)不清此 map(刷新不发 tick 事件,
+    /// 节点状态另由 tick_started/completed 事件驱动刷新),stale 由 tick_completed 清。
+    pub running_ticks: HashMap<String, String>,
     /// 顶栏 TabBar(ADR-1:Home/Flows/Observe/Control 4 tab)。
     pub tabbar: TabBar,
     /// 鼠标光标(ADR-2:帧末黑底黄字高亮)。
@@ -951,6 +976,7 @@ impl App {
             orch_cursor: 0,
             orch_selection: None,
             primitives: crate::primitives::all(),
+            running_ticks: HashMap::new(),
             tabbar: {
                 let mut t = TabBar::new(vec![
                     "Flows".to_string(),
@@ -1110,7 +1136,7 @@ impl App {
                 .insert("openclaw/agent:main:main".to_string(), evs);
         }
     }
-    pub fn do_turn(&mut self) {
+    pub fn do_turn(&mut self, async_run: bool) {
         // optimistic 立即回显(spinner + 用户输入)+ 异步发送(不阻塞 UI)。
         // WS 推 tick_started(含 user msg request)→ drain_ws push + 清 pending(切换正常显示);
         // subscribe connect 时序可能丢 WS tick_started → 后台 fetch 全量兜补(has_tick 才 replace)。
@@ -1127,7 +1153,7 @@ impl App {
             self.pending_since = Some(std::time::Instant::now()); // #8 记时刻,Tick 超 60s 兜底清
             let tx = self.fetch_tx.clone();
             std::thread::spawn(move || {
-                let _ = trigger_turn(&norm_ht_v, &sid, &msg);
+                let _ = trigger_turn(&norm_ht_v, &sid, &msg, async_run);
                 // 等 observe ingest tick_started(含 user msg;LLM 首 token 前 gateway 推 stream start,
                 // emitter 合成 tick_started → observe,~几百 ms)。subscribe 时序丢 WS tick_started 时,
                 // fetch 全量补(observe 有)。sleep 确保拉到 tick_started。
@@ -1368,6 +1394,12 @@ impl App {
     pub fn apply_orch_tree_event(&mut self, session_id: &str, ev: &ObserveEvent) {
         let status = ev.data.get("status").and_then(|v| v.as_str()).unwrap_or("");
         let new_state = NodeState::from_event(&ev.event_type, status);
+        // ADR-O6:维护 session→tick_id,供 cancel 原语查。tick_started 插,tick_completed 清。
+        match ev.event_type.as_str() {
+            "tick_started" => { self.running_ticks.insert(session_id.to_string(), ev.tick_id.clone()); }
+            "tick_completed" => { self.running_ticks.remove(session_id); }
+            _ => {}
+        }
         let in_tree = self.fork_tree.nodes.contains_key(session_id);
         if in_tree {
             // branch_created 可能引入新子节点:刷新整树(observe 已 update parent)。
@@ -1479,7 +1511,7 @@ impl App {
     fn run_ctx_action(&mut self, a: CtxAction) {
         use CtxAction::*;
         match a {
-            Turn => self.do_turn(),
+            Turn => self.do_turn(false),
             Spawn => self.do_spawn(),
             Reconnect => self.do_reconnect_or_refresh(),
             Fork => self.do_fork(),
@@ -1993,7 +2025,7 @@ impl App {
     /// 触发 Control 按钮 id(0-7)动作(鼠标点击 + 键盘 Enter 共用,F1 修复)。
     fn trigger_control_button(&mut self, id: usize) {
         match id {
-            0 => { self.do_turn(); self.mark_action("trigger"); }
+            0 => { self.do_turn(false); self.mark_action("trigger"); }
             1 => { self.do_spawn(); self.mark_action("spawn"); }
             2 => {
                 // 对齐 r 键:claw→重连+刷新,cc→无状态提示,无 cursor→刷新兜底
@@ -2546,7 +2578,7 @@ impl App {
                     let msg = self.textarea.text().to_string();
                     self.push_history(&msg);
                     self.turn_msg = msg;
-                    self.do_turn();
+                    self.do_turn(false);
                     self.textarea.clear();
                     self.paste_burst.clear_after_explicit_paste();
                     self.mark_action("trigger");
@@ -2741,6 +2773,11 @@ impl App {
                         self.jump_to_control(self.cursor);
                     }
                 }
+                // ADR-O4:Orchestrate tab Enter → 查 key='\n' 原语(open-events)。
+                // Enter 非 KeyCode::Char,不走上面的 Char dispatch;此处显式路由保持 registry 派发。
+                if self.panel == Panel::Orchestrate && self.dispatch_orchestrate_primitive('\n') {
+                    return false;
+                }
                 false
             }
             KeyCode::Char('1') => {
@@ -2843,7 +2880,7 @@ impl App {
                 false
             }
             KeyCode::Char('t') => {
-                self.do_turn();
+                self.do_turn(false);
                 self.mark_action("trigger");
                 false
             }
@@ -3206,19 +3243,20 @@ mod tests {
     }
 
     #[test]
-    fn orch_primitive_registry_has_four_shells() {
-        // ADR-O4:W-B 预建四空壳(fork/async_turn/open_events/cancel),mod.rs all() 列四 make()。
+    fn orch_primitive_registry_has_four_primitives() {
+        // ADR-O4:首批四原语注册(fork/async-turn/open-events/cancel)。
+        // W-C 四文件皆填真实 impl。
         let app = App::new(crate::kitty::detect());
         let ids: Vec<&str> = app.primitives.iter().map(|p| p.id()).collect();
-        assert_eq!(ids, vec!["fork", "async_turn", "open_events", "cancel"]);
+        assert_eq!(ids, vec!["fork", "async-turn", "open-events", "cancel"]);
         let keys: Vec<char> = app.primitives.iter().map(|p| p.key()).collect();
-        assert_eq!(keys, vec!['f', 'a', 'o', 'x']);
+        assert_eq!(keys, vec!['f', 't', '\n', 'x']);
     }
 
     #[test]
-    fn orch_primitive_shells_disabled_and_dispatch_consumes() {
-        // 四空壳 enabled 恒 false(W-B 占位)。dispatch 命中 bound key → 消费(true,no-op);
-        // 命中未绑 key(如 'q')→ 不消费(false,交回导航)。
+    fn orch_primitive_enabled_and_dispatch_consumes() {
+        // 有选中(idle root):fork/async-turn/open-events enabled,cancel disabled(非 Running)。
+        // dispatch 命中 bound key → 消费(true);命中未绑 key('q')→ 不消费(false,交回导航)。
         let mut app = App::new(crate::kitty::detect());
         let sessions = vec![
             OrchSession { session_id: "root".into(), harness_type: "agent-os-v2".into(), agent_id: "n".into(), parent_session_id: String::new() },
@@ -3227,12 +3265,10 @@ mod tests {
         app.panel = Panel::Orchestrate;
         app.sync_orch_selection();
         let sel = app.orch_selection.clone().unwrap();
-        // 四空壳均 disabled。
-        for p in &app.primitives {
-            assert!(!p.enabled(&sel), "placeholder {} should be disabled", p.id());
-        }
-        // 命中 bound key(灰显)→ 消费 true(no-op,不回退全局)。
-        assert!(app.dispatch_orchestrate_primitive('f'));
+        // enabled 断言(不 dispatch 真实原语免触发网络/fork 副作用)。
+        let enabled: Vec<&str> = app.primitives.iter().filter(|p| p.enabled(&sel)).map(|p| p.id()).collect();
+        assert_eq!(enabled, vec!["fork", "async-turn", "open-events"], "real primitives enabled on selection");
+        // cancel disabled(非 Running)→ dispatch 'x' 消费 true(no-op 灰显)。
         assert!(app.dispatch_orchestrate_primitive('x'));
         // 未绑 key('q')→ 不消费 false。
         assert!(!app.dispatch_orchestrate_primitive('q'));
@@ -3243,18 +3279,20 @@ mod tests {
 
     #[test]
     fn orch_primitive_hint_derives_from_registry() {
-        // footer hint 从 registry 派生:disabled 显 (label),enabled 显 key=label。
-        // W-B 四空壳均 disabled → 全 (label) 形式。
+        // footer hint 从 registry 派生:enabled 显 key=label,disabled 显 (label)。
+        // 有选中(idle root):fork/async/events enabled,cancel 非 Running disabled。
         let mut app = App::new(crate::kitty::detect());
         app.fork_tree = build_fork_tree(vec![
             OrchSession { session_id: "r".into(), harness_type: "agent-os-v2".into(), agent_id: "n".into(), parent_session_id: String::new() },
         ]);
         app.sync_orch_selection();
         let hint = app.orch_primitive_hint();
-        assert!(hint.contains("(fork)"), "hint={} should gray-out disabled fork", hint);
-        assert!(hint.contains("(cancel)"), "hint={}", hint);
-        // 确认 key 不出现在 disabled 段(disabled 显 (label) 不含 key=)。
-        assert!(!hint.contains("f=fork"), "disabled should not show key: hint={}", hint);
+        // enabled 原语显 key=label。
+        assert!(hint.contains("f=fork"), "enabled fork should show key=label: hint={}", hint);
+        assert!(hint.contains("t=async"), "enabled async-turn should show t=async: hint={}", hint);
+        // cancel 非 Running disabled → 显 (cancel),不含 key=。
+        assert!(hint.contains("(cancel)"), "disabled cancel grayed: hint={}", hint);
+        assert!(!hint.contains("x=cancel"), "disabled should not show key: hint={}", hint);
     }
 
     #[test]
@@ -4243,7 +4281,7 @@ mod tests {
         app.control_chat_scroll.offset = 0;
         app.chat_follow_tail = false;
         app.turn_msg.clear();
-        app.do_turn();
+        app.do_turn(false);
         assert!(app.chat_follow_tail, "do_turn sets tail=true");
         assert_eq!(app.control_chat_scroll.offset, 39, "scroll_to_bottom locks to total-1");
     }
