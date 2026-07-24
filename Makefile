@@ -10,11 +10,15 @@ dev:
 
 # Start Orchestrator (native /h 路径 + 多 agent + memory)
 dev-orch:
-	cd services/orchestrator && uvicorn src.engine:app --reload --port 8001
+	cd services/orchestrator && PYTHONPATH=src LD_PRELOAD=/lib/x86_64-linux-gnu/libsqlite3.so.0 \
+		uvicorn src.engine:app --reload --port 8001
+	# PYTHONPATH=src: a2a 是 top-level import(agent_registry from a2a.card),需 src 在 path
+	# LD_PRELOAD: miniconda3 sqlite corrupted,preload 系统 libsqlite3
 
 # Start observe-service (TUI 观测层)
 dev-observe:
-	cd services/observe && uvicorn src.app:app --reload --port 8002
+	cd services/observe && LD_PRELOAD=/lib/x86_64-linux-gnu/libsqlite3.so.0 \
+		uvicorn src.app:app --reload --port 8002
 
 # Start TUI (接力前端,Rust ratatui)
 dev-tui:

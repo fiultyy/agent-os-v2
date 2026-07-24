@@ -6,6 +6,9 @@ is corrupted.  We must monkey-patch sqlite3 → pysqlite3 at the *very*
 beginning of the process, before any transitive import touches sqlite3.
 
 All application imports (engine, services, etc.) happen *after* the patch.
+
+启动:python services/orchestrator/start.py
+   (pysqlite3 patch 方案;LD_PRELOAD 方案见根 start.sh / Makefile dev-orch。两者择一。)
 """
 
 import sys
@@ -20,22 +23,12 @@ if __name__ == "__main__":
     import os
     import uvicorn
 
-    os.chdir("/home/yy/projects/agent-os/services/orchestrator")
+    # 相对 chdir(start.py 所在 services/orchestrator),避免写死旧 agent-os 绝对路径。
+    os.chdir(os.path.dirname(os.path.abspath(__file__)))
     sys.path.insert(0, "src")
 
-    # Import engine only AFTER pysqlite3 is patched.
-    # This guarantees that every module (vector.py, event_store.py, etc.)
-    # sees the patched sqlite3 when it does `import sqlite3`.
+    # Import engine only AFTER pysqlite3 is patched — 保证每个模块(vector.py /
+    # event_store.py 等)import sqlite3 时看到 patched 版本。
     from engine import app
 
-    uvicorn.run(app, host="127.0.0.1", port=18792, log_level="info")
-
-# ── Notes ───────────────────────────────────────────────────────
-#
-# resource-manager micro-service:
-#   This orchestrator handles agent execution, memory, and canvas.
-#   The resource-manager service (provider config, model routing) is
-#   a separate micro-service that must be started independently.
-#   See services/resource-manager/README.md for details.
-#
-#   To start:  cd services/resource-manager && python start.py
+    uvicorn.run(app, host="127.0.0.1", port=int(os.getenv("ORCHESTRATOR_PORT", "8001")), log_level="info")
