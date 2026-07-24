@@ -841,3 +841,33 @@ def test_trigger_turn_restore_rebuilds_same_spec_session(monkeypatch, tmp_path):
     assert rebuilt["spec_id"] == "native"
     _SESSION_CWD.pop("agent-os-v2:restore-sid", None)
 
+
+def test_list_sessions_merges_session_active_cwd(store):
+    """ADR-3:agent-os-v2 session store cwd=None(创建即 None),turn 时 _active_cwd 落
+    _SESSION_CWD。GET sessions 应按 session_key 查 _SESSION_CWD 合并,使 cwd 非 None。"""
+    # agent-os-v2 session:store 创建即 cwd=None(native agent 无 req.cwd)
+    from src.tools.cwd_scope import _SESSION_CWD
+    store.create("v2-sid", "agent-os-v2", native_sid="v2-native", agent_id="native")
+    assert store.get("agent-os-v2", "v2-sid")["cwd"] is None   # 前置:确为 None
+    # turn 时记录了 session 级 active cwd(实际由 cwd_scope_capability / turn 写入)
+    _SESSION_CWD["agent-os-v2:v2-sid"] = "/abs/workspace"
+    try:
+        out = asyncio.run(routes.list_sessions("agent-os-v2"))
+        s = next(x for x in out["sessions"] if x["session_id"] == "v2-sid")
+        assert s["cwd"] == "/abs/workspace"   # 合并后非 None
+    finally:
+        _SESSION_CWD.pop("agent-os-v2:v2-sid", None)
+
+
+def test_list_sessions_store_cwd_wins(store):
+    """ADR-3:store cwd 优先,仅 None 时 fallback _SESSION_CWD(claw/claude 不回归)。"""
+    from src.tools.cwd_scope import _SESSION_CWD
+    store.create("cc-sid", "claude-code", native_sid="uuid-cc", cwd="/store/cwd")
+    _SESSION_CWD["claude-code:cc-sid"] = "/should-not-win"
+    try:
+        out = asyncio.run(routes.list_sessions("claude-code"))
+        s = next(x for x in out["sessions"] if x["session_id"] == "cc-sid")
+        assert s["cwd"] == "/store/cwd"       # store cwd 优先
+    finally:
+        _SESSION_CWD.pop("claude-code:cc-sid", None)
+

@@ -83,9 +83,12 @@ pub fn fetch_sessions() -> Option<SessionsGrouped> {
         .ok()?
         .into_json::<SessionsGrouped>()
         .ok()?;
-    // 合并 orche cwd/running(orche type 用 norm_ht 后的 claw/claude-code;离线静默跳过)。
+    // 合并 orche cwd/running(orche type 用 norm_ht 后的 claw/claude-code/agent-os-v2;离线静默跳过)。
     merge_orche_session_meta(&mut sg, "claw");
     merge_orche_session_meta(&mut sg, "claude-code");
+    // ADR-3:C.T2 — agent-os-v2 漏合并致 TUI 显示 (no cwd)。obs_ht 直名(observe ht=agent-os-v2,
+    // orche type 同名,无 openclaw 类映射,见 merge_orche_session_meta 内 obs_ht 逻辑)。
+    merge_orche_session_meta(&mut sg, "agent-os-v2");
     Some(sg)
 }
 
