@@ -1,35 +1,31 @@
-# AO2 agent 持久化配置(P0 seed)。
+# AO2 agent 持久化配置。
 # 位置:repo 根(agent_registry._locate_config 经 git-root 推断找此;优先级 =
 # AO2_AGENTS_CONFIG env > AO2_REPO_ROOT/agents.yaml > <git-root>/agents.yaml >
 # <stateDir>/agents.yaml)。此前放 services/orchestrator/ 是 bug(start.sh cwd=
 # repo 根 vs Makefile dev-orch cwd=services/orchestrator 不一致,load path 找
 # cwd/agents.yaml 漏 services/orchestrator/),移根为规范位置 + git-root 推断统一。
-# workspace 显式指 repo root:向后兼容——_active_cwd 默认 = workspace = repo root
-# = 等价今天(单 cwd 退化)。cwds 空(P0 不引入多 cwd 行为;P1 才填 cwd scope)。
+#
+# ADR-2: 默认 agent = help(面向终端用户的 AO2 新手向导)。三层 prompt 分工:
+#   ① instructions(本文件短指令:中文/带步骤/不臆造配置)
+#   ② profile(workspace SOUL.md 人设 + AGENTS.md 规则,profile_registry 自动扫)
+#   ③ skill(ao2-help SKILL.md 业务配置详解,defer 按需加载)
+# 路由 registry-driven:registry.get(agent_id) or default() → 换 default 自动跟上。
 defaults:
   model: glm-4.7
   workspace_base: null
   skills: []
 agents:
-  - id: native
+  - id: help
     default: true
-    name: 原生 harness 迭代专员
+    name: AO2 新手向导
     model: glm-4.7
-    workspace: /home/yy/projects/agent-os-v2
-    cwds:
-      - path: services/orchestrator
-        label: orchestrator
-        default: true
-      - path: services/observe
-        label: observe
-      - path: apps/tui-rs
-        label: tui-rs
-    skills: [ao2-architecture]
+    workspace: agents/help/workspace  # repo 内 trackable(参照 agents/main/workspace 风格);相对 repo root,registry.resolve_workspace 会 expanduser/resolve
+    cwds: []  # 面向终端用户无多服务 cwd 需求(参照 main 退化);空 → 单 workspace cwd
+    skills: [ao2-help]
     effort: medium
-  - id: main
-    name: 全能助理(claw main 迁移)
-    model: glm-4.7
-    workspace: /home/yy/projects/agent-os-v2/agents/main/workspace  # repo 内 trackable(clone 即有 instruction);绝对路径同 native 风格
-    cwds: []  # 单 cwd 退化(workspace 基准);用户助理无多服务 cwd 需求
-    skills: [ao2-architecture]
-    effort: medium
+    instructions: |
+      你是 AO2 的新手向导,面向终端用户(非开发者),用中文回答。
+      每个回答都带可操作步骤:告诉用户具体在哪改配置、敲什么命令、看哪个页面。
+      绝不臆造配置项或端口号——不确定就承认"我不确定",并引导用户查 agents.yaml、
+      ao2-help skill、start.sh 或 docs/dev-startup.md,或建议跑命令实地确认。
+      业务配置的完整说明,用 load_capability 载入 ao2-help skill。
