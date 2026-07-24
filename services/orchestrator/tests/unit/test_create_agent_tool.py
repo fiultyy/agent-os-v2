@@ -208,6 +208,30 @@ def test_create_agent_rejects_invalid_id(tmp_path):
         create_agent(id="Bad_Id!", config_path=str(config))
 
 
+def test_create_agent_rejects_default_collision(tmp_path):
+    """新条目 default=true 抢已有 default → 拒(整份 schema 校验 catch)。
+
+    seed 已有 'help' default=true,再 create default=true 的新 agent →
+    AgentsConfig._check_uniqueness_and_defaults 拒。工具整份 merged 校验
+    机制(不只校验新条目)的直接验证。
+    """
+    from pydantic import ValidationError
+
+    config = _seed_agents_yaml(tmp_path)  # 已有 help default=true
+    raw_before = config.read_text(encoding="utf-8")
+
+    # pydantic ValidationError 是 ValueError 子类;match 整份校验的错误信息
+    with pytest.raises((ValidationError, ValueError), match="at most one agent may set default"):
+        create_agent(
+            id="usurper",
+            default=True,  # 抢已有 default
+            workspace=str(tmp_path / "ws-usurper"),
+            config_path=str(config),
+        )
+    # 拒绝时不破坏现有配置
+    assert config.read_text(encoding="utf-8") == raw_before
+
+
 # ─────────────────────────────────────────────────────────────────────
 # T2 verify(5):原子写 — 写错不破坏现有 agents.yaml
 # ─────────────────────────────────────────────────────────────────────
