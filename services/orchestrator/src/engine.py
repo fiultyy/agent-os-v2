@@ -240,11 +240,33 @@ if _SKILL_TOOLS_AVAILABLE:
     except ImportError as _a2a_import_err:
         logger.warning("a2a_call tool unavailable: %s", _a2a_import_err)
 
+    # create_agent(ADR-3):queen 写文件能力。register 名 **create_agent**(无
+    # v2_ 前缀,RK11)— ToolBridgeCapability.get_toolset 已 .prefixed("v2"),
+    # 模型可见名 = v2_create_agent。COMPOSITE 层(创建 agent = 多步文件操作 +
+    # schema 校验,与 workflow_run 同类复杂度)。灾难底线:同名 agent 拒(不覆盖)
+    # + agents.yaml 原子写(临时文件 + os.replace,写错不破坏现有配置)。
+    _n_creator = 0
+    try:
+        from src.tools.agent_creator import CREATE_AGENT_SCHEMA, create_agent
+        _tool_registry.register(
+            "create_agent", create_agent,
+            description=(
+                "Create a new AO2 agent — atomically append to agents.yaml + "
+                "write workspace/SOUL.md + workspace/AGENTS.md (+ optional skill). "
+                "Refuses to overwrite existing agent id (catastrophe guard). "
+                "Returns ok + agent_id + workspace; restart orche to take effect."
+            ),
+            parameters=CREATE_AGENT_SCHEMA, layer=ToolLayer.COMPOSITE,
+        )
+        _n_creator = 1
+    except ImportError as _creator_import_err:
+        logger.warning("create_agent tool unavailable: %s", _creator_import_err)
+
     logger.info(
-        "tool register: primitive=%d skill=%d workflow=%d a2a=%d total=%d | list_tools=%d catalog.count=%d "
+        "tool register: primitive=%d skill=%d workflow=%d a2a=%d creator=%d total=%d | list_tools=%d catalog.count=%d "
         "(composite skipped: browser_flow/code_review)",
-        _n_prim, _n_skill, _n_wf, _n_a2a,
-        _n_prim + _n_skill + _n_wf + _n_a2a,
+        _n_prim, _n_skill, _n_wf, _n_a2a, _n_creator,
+        _n_prim + _n_skill + _n_wf + _n_a2a + _n_creator,
         len(_tool_registry.list_tools()), _tool_registry.get_catalog().count(),
     )
 
