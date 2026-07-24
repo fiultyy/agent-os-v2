@@ -21,7 +21,7 @@ agents:
     model: glm-4.7
     workspace: /home/yy/projects/agent-os-v2/agents/help/workspace  # repo 内 trackable(clone 即有);绝对路径同 native/main 风格——registry.resolve_workspace 用 Path(workspace).resolve() 按 cwd 解析相对路径,而 orchestrator 启动 cwd=services/orchestrator(start.sh 子 shell cd),相对路径会拼错 → 必须绝对
     cwds: []  # 面向终端用户无多服务 cwd 需求(参照 main 退化);空 → 单 workspace cwd
-    skills: [ao2-help]
+    skills: [ao2-help, ao2-architecture]
     effort: medium
     instructions: |
       你是 AO2 的新手向导,面向终端用户(非开发者),用中文回答。
