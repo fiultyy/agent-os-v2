@@ -71,6 +71,11 @@ class ObserveCapability(AbstractCapability[Any]):
         if not tick_id:
             tick_id = str(uuid.uuid4())
         tool_count = 0
+        # 累积 TextPartDelta(content_delta)→ tick_completed.response:使 TUI render
+        # 用 tick_completed.response(turn 完成显)非依赖 token_delta 流(token_delta
+        # 撑 app.events cap,历史 turn 被挤)。token_delta 仍 emit(流式增量),但
+        # tick_completed 带最终完整 response 是 TUI 渲染主源。
+        assistant_text = ""
         started = False  # 延迟到首个有内容 event 才 emit tick_started(见 async for)
         # 用户消息优先(ctx.prompt);占位 [native run] 仅在 prompt 不可得时(避免 TUI 把
         # 占位当用户消息渲染 → 内容跟 cc/oc harness 不一致)。
@@ -119,6 +124,7 @@ class ObserveCapability(AbstractCapability[Any]):
                             agent_id=self.agent_id,
                         ))
                 elif isinstance(event, PartDeltaEvent) and isinstance(event.delta, TextPartDelta):
+                    assistant_text += event.delta.content_delta
                     await self._emit(token_delta(
                         HARNESS_TYPE, self.harness_id, self.session_id, tick_id,
                         delta_text=event.delta.content_delta, agent_id=self.agent_id,
@@ -127,7 +133,7 @@ class ObserveCapability(AbstractCapability[Any]):
             if started:
                 await self._emit(tick_completed(
                     HARNESS_TYPE, self.harness_id, self.session_id, tick_id,
-                    status="success", tool_count=tool_count, agent_id=self.agent_id,
+                    status="success", response=assistant_text, tool_count=tool_count, agent_id=self.agent_id,
                 ))
         except Exception:
             # 主路径异常:补 error tick 闭环(仅当 started),再传播(不吞主异常)

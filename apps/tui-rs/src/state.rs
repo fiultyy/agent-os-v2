@@ -398,13 +398,14 @@ pub fn delete_session_raw(ht: &str, sid: &str) -> bool {
 }
 
 pub fn fetch_events(h: &str, sid: &str) -> Option<Vec<ObserveEvent>> {
-    // IT6:limit 50→200,与 drain_ws cap=200 对齐(原 50 截断长 session)。
-    ureq::get(&format!("{}/sessions/{}/{}/events?limit=200", OBSERVE, h, sid))
+    // token_delta 流式 token 不存 app.events(撑 cap 挤历史 turn 结构)。filter token_delta。
+    // limit 1000 = observe 端点 cap max(>1000 超限返空)。render 用 tick_completed.response,流式 P2 defer。
+    ureq::get(&format!("{}/sessions/{}/{}/events?limit=1000", OBSERVE, h, sid))
         .call()
         .ok()?
         .into_json::<EventsResp>()
         .ok()
-        .map(|e| e.events)
+        .map(|e| e.events.into_iter().filter(|ev| ev.event_type != "token_delta").collect())
 }
 
 /// orche /health 预检(ADR-3)。GET :8001/health → bool。
@@ -3007,6 +3008,11 @@ impl App {
                     {
                         let sid = key.strip_prefix("agent-os-v2/").unwrap_or("");
                         self.apply_orch_tree_event(sid, &ev);
+                    }
+                    // token_delta 流式 token 不存 app.events(撑爆 cap=200 挤掉历史 turn 结构;
+                    // render 用 tick_completed.response,流式 token P2 defer)
+                    if ev.event_type == "token_delta" {
+                        continue;
                     }
                     let evs = self.events.entry(key.clone()).or_default();
                     // IT7:去重——REST fetch_events(替换)+ WS drain_ws(追加)时序重叠时,
