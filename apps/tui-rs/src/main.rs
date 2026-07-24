@@ -117,6 +117,17 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> i
 }
 
 fn main() -> io::Result<()> {
+    if std::env::args().any(|a| a == "--help" || a == "-h") {
+        println!("v2-tui-rs — harness-bridge TUI (ratatui)");
+        println!();
+        println!("用法:");
+        println!("  v2-tui-rs                      交互 TUI(需 TTY)");
+        println!("  v2-tui-rs --dump [--replay P]  离线渲染分层/弹窗(非 TTY,确定性)");
+        println!("  v2-tui-rs --widgets-dump       控件 demo 离线渲染");
+        println!("  v2-tui-rs --widgets            控件 demo 交互");
+        println!("  v2-tui-rs --help | -h          本用法并退出");
+        return Ok(());
+    }
     if std::env::args().any(|a| a == "--widgets-dump") {
         widgets_demo::run_dump();
         return Ok(());
@@ -361,11 +372,19 @@ fn run_dump() {
 }
 
 fn print_buffer(term: &Terminal<ratatui::backend::TestBackend>) {
+    use unicode_width::UnicodeWidthStr;
     let buf = term.backend().buffer();
     for y in 0..buf.area.height {
         let mut s = String::new();
-        for x in 0..buf.area.width {
-            s.push_str(&buf[(x, y as u16)].symbol());
+        let mut x = 0u16;
+        while x < buf.area.width {
+            let sym = buf[(x, y)].symbol();
+            s.push_str(sym);
+            // 双宽字符(CJK)右半 cell 是占位:ratatui reset 成空格,或被 image overlay
+            // 残留 glyph(braille)污染。逐 cell 输出必须按显示宽度推进 x,否则中文之间
+            // 会冒出空格 / 残留 braille(真终端按 cell 宽渲染看不到,离线 dump 才暴露)。
+            let w = UnicodeWidthStr::width(sym) as u16;
+            x += if w >= 1 { w } else { 1 };
         }
         println!("{}", s.trim_end());
     }

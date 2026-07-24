@@ -695,7 +695,7 @@ impl Panel {
             Panel::Flows => "FLOWS ◐ 编排 DAG",
             Panel::Observe => "OBSERVE ☰ 纵向堆叠",
             Panel::Control => "CONTROL ⌘ orchestrator",
-            Panel::Orchestrate => "ORCHESTRATE ⾢ fork 谱系树",
+            Panel::Orchestrate => "ORCHESTRATE ⑂ fork 谱系树",
         }
     }
     pub fn next(self) -> Self {
