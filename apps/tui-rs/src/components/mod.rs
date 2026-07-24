@@ -50,7 +50,7 @@ use ratatui::{
 pub fn render_popup(f: &mut Frame, screen: Rect, p: &mut Popup) {
     // ADR-3:md_text 优先(markdown 渲染),否则回退 body(Vec<String> 纯文本)。
     // 三路 body:body_lines(styled,按钮色块)→ md_text → body(纯文本)。
-    let body_text = if !p.body_lines.is_empty() {
+    let mut body_text = if !p.body_lines.is_empty() {
         Text::from(p.body_lines.clone())
     } else if let Some(md) = &p.md_text {
         md.clone()
@@ -58,10 +58,22 @@ pub fn render_popup(f: &mut Frame, screen: Rect, p: &mut Popup) {
         let lines: Vec<Line> = p
             .body
             .iter()
-            .map(|s| Line::from(s.as_str()).style(Style::default().fg(Color::Yellow)))
+            .map(|s| Line::from(s.to_string()).style(Style::default().fg(Color::Yellow)))
             .collect();
         Text::from(lines)
     };
+
+    // ADR-2(fix-e2e-bugs):tui-popup 首次渲染按 body.width() 在 screen 居中,body 行过长时
+    // 弹窗宽度撑到全屏,x 落到左侧 session 列表区把 id 切断(e2e-exec-* → e2/80/57)。
+    // 修:centered 弹窗(position=None)把 body 每行按视觉宽截到 width-2(留左右边框),
+    // body.width() ≤ width → tui-popup 弹窗宽 ≤ width,全屏居中 x 不越出对话区。
+    // position=Some(绝对定位)不截——保持调用方原始 body。
+    // ponytail: 截源(body)非截 area;tui-popup centered_rect 忽略 area.x,改 area 会错位
+    // (round1 教训:effective 偏移致 help 漂移 30 列)。改一处全弹窗受益;ceiling=Popup.width。
+    if p.position.is_none() {
+        clamp_text_width(&mut body_text, p.width.saturating_sub(2));
+    }
+
     let popup = tui_popup::Popup::new(body_text)
         .title(Line::from(format!(" {} ", p.title)).style(
             Style::default().fg(crate::theme::DARK.bg).bg(crate::theme::DARK.border_accent),
@@ -69,23 +81,9 @@ pub fn render_popup(f: &mut Frame, screen: Rect, p: &mut Popup) {
         .style(Style::default().bg(crate::theme::DARK.bg_surface))
         .border_style(Style::default().fg(crate::theme::DARK.border_accent));
 
-    // ADR-2(fix-e2e-bugs):tui-popup 首次渲染按 body.width() 居中,body 行过长时
-    // 弹窗宽度撑到全屏,x 落到左侧 session 列表区把 id 切断(e2e-exec-* → e2/80/57)。
-    // 修:centered 弹窗(position=None)把 tui-popup 的可用区收缩到 min(width, screen)
-    // 并全屏居中——body 再宽也被 cap,弹窗 x 不越出对话区。position=Some 绝对定位不动 screen。
-    // ponytail: 改一处全弹窗受益(raw-exec/help/delete/new/props);ceiling=Popup.width
-    // 是调用方声明的期望宽,body 超 width 会按 effective 裁剪(tui-popup 内 min)。
+    // StatefulWidgetRef::render_ref 自带 Clear + Block + area 回填(支持后续 drag)。
     use ratatui::widgets::StatefulWidgetRef;
-    let effective = if p.position.is_none() {
-        let ew = p.width.min(screen.width);
-        let eh = p.height.min(screen.height);
-        let x = screen.x + screen.width.saturating_sub(ew) / 2;
-        let y = screen.y + screen.height.saturating_sub(eh) / 2;
-        Rect::new(x, y, ew, eh)
-    } else {
-        screen
-    };
-    popup.render_ref(effective, f.buffer_mut(), &mut p.state);
+    popup.render_ref(screen, f.buffer_mut(), &mut p.state);
 
     // 绝对定位:首次渲染后 area 已回填,挪到 position(仅一次)。
     if !p.placed {
@@ -95,6 +93,46 @@ pub fn render_popup(f: &mut Frame, screen: Rect, p: &mut Popup) {
             p.state.move_to(cx, cy);
         }
         p.placed = true;
+    }
+}
+
+/// 把 Text 每行按视觉宽截到 max_width(超宽行尾裁掉,不折行)。
+/// ADR-2(fix-e2e-bugs):tui-popup 按 body.width() 居中,超宽行撑爆弹窗越界。
+/// 截源后 body.width() ≤ max_width → 弹窗宽受控。CJK 按显示宽计(unicode-width)。
+fn clamp_text_width(text: &mut Text<'static>, max_width: u16) {
+    use unicode_width::UnicodeWidthStr;
+    let max = max_width as usize;
+    if max == 0 {
+        return;
+    }
+    for line in text.lines.iter_mut() {
+        let mut kept: Vec<ratatui::text::Span<'static>> = Vec::new();
+        let mut w = 0usize;
+        for span in line.spans.drain(..) {
+            let span_w = UnicodeWidthStr::width(span.content.as_ref());
+            if w + span_w <= max {
+                w += span_w;
+                kept.push(span);
+            } else {
+                // 当前 span 超:按字符切到刚好填满 max。
+                let mut buf = String::new();
+                for ch in span.content.chars() {
+                    let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                    if w + cw > max {
+                        break;
+                    }
+                    w += cw;
+                    buf.push(ch);
+                }
+                if !buf.is_empty() {
+                    let mut s = span;
+                    s.content = buf.into();
+                    kept.push(s);
+                }
+                break;
+            }
+        }
+        line.spans = kept;
     }
 }
 
