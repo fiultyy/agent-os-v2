@@ -1,9 +1,10 @@
 """L2: routes.list_ao2_agents — ADR-3 picker source for agent-os-v2 new session.
 
 Pins the fixed contract ``{agents: [{id, name, default}]}`` projected from
-``AgentRegistry._agents``. The TUI new-session flow (worker-C T2) parses this
-exact shape, so any field rename/rename breaks the picker — these tests guard
-the contract end-to-end.
+``AgentRegistry`` via its public accessors ``default_id()`` / ``iter_agents()``
+(ADR-C2 — no private-attr reads in the endpoint). The TUI new-session flow
+(worker-C T2) parses this exact shape, so any field rename/rename breaks the
+picker — these tests guard the contract end-to-end.
 """
 
 import pytest
@@ -12,7 +13,12 @@ from src.harness.routes import list_ao2_agents
 
 
 def _registry(agents, default_id=None):
-    """Build a fake registry mimicking AgentRegistry's _agents/_default_id."""
+    """Build a fake registry exposing AgentRegistry's public accessors.
+
+    ADR-C2: the endpoint now reads ``default_id()`` + ``iter_agents()`` instead
+    of the private ``_default_id`` / ``_agents``. This fake mirrors that public
+    surface so the test exercises the real call path.
+    """
     from src.agent.agent_spec import AgentSpec
 
     class _FakeRegistry:
@@ -21,6 +27,12 @@ def _registry(agents, default_id=None):
             self._default_id = default_id or (
                 next((a["id"] for a in agents if a.get("default")), None)
             )
+
+        def default_id(self):
+            return self._default_id
+
+        def iter_agents(self):
+            return iter(self._agents.items())
     return _FakeRegistry()
 
 

@@ -61,6 +61,98 @@ agents:
 
 
 # =============================================================================
+# 公开访问器(ADR-C2:default_id + iter_agents 替代外部读私有属性)
+# =============================================================================
+class TestPublicAccessors:
+    def test_default_id_returns_default_marker(self, tmp_path):
+        """default_id() 返 _default_id;显式 default:true 的 agent 胜出。"""
+        yaml_path = tmp_path / "agents.yaml"
+        _write_yaml(
+            yaml_path,
+            """
+defaults:
+  model: glm-4.7
+agents:
+  - id: main
+  - id: help
+    default: true
+""",
+        )
+        reg = AgentRegistry.load(str(yaml_path))
+        assert reg.default_id() == "help"
+
+    def test_default_id_none_for_empty_registry(self):
+        """未 load / 空 registry → default_id() None(不 raise)。"""
+        reg = AgentRegistry()
+        assert reg.default_id() is None
+
+    def test_default_id_fallback_first_when_no_explicit_default(self, tmp_path):
+        """无显式 default → load 取首个(agent_registry.py load L84-85)。"""
+        yaml_path = tmp_path / "agents.yaml"
+        _write_yaml(
+            yaml_path,
+            """
+defaults:
+  model: glm-4.7
+agents:
+  - id: alpha
+  - id: beta
+""",
+        )
+        reg = AgentRegistry.load(str(yaml_path))
+        assert reg.default_id() == "alpha"
+
+    def test_iter_agents_yields_id_spec_pairs(self, tmp_path):
+        """iter_agents() 返 (id, AgentSpec) 迭代器,覆盖全部 loaded agent。"""
+        yaml_path = tmp_path / "agents.yaml"
+        _write_yaml(
+            yaml_path,
+            """
+defaults:
+  model: glm-4.7
+agents:
+  - id: main
+    default: true
+  - id: help
+""",
+        )
+        reg = AgentRegistry.load(str(yaml_path))
+        pairs = list(reg.iter_agents())
+        ids = [aid for aid, _ in pairs]
+        assert ids == ["main", "help"]
+        assert all(isinstance(spec, AgentSpec) for _, spec in pairs)
+
+    def test_iter_agents_does_not_leak_mutable_reference(self, tmp_path):
+        """iter_agents() 返独立迭代器;改动返回的 list 不影响 registry 内部。
+
+        ADR-C2 意图:不泄露私有 dict 引用。我们返 iter(items) 而非 items()
+        视图对象本身——items() 视图会 live-reflect dict 改动,iter() 拍快照
+        迭代器更安全。这里测两层:(1) 返回的不是 dict 本身;(2) 遍历后清空
+        caller 自己的 list 不影响后续 iter_agents()。
+        """
+        yaml_path = tmp_path / "agents.yaml"
+        _write_yaml(
+            yaml_path,
+            """
+defaults:
+  model: glm-4.7
+agents:
+  - id: solo
+    default: true
+""",
+        )
+        reg = AgentRegistry.load(str(yaml_path))
+        it = reg.iter_agents()
+        # 不是同一个 dict / items 视图对象本身被返回(iter() 包装过)
+        assert it is not reg._agents
+        first = list(it)
+        assert len(first) == 1
+        # 二次调用仍能拿到完整 agent(iter_agents 无副作用)
+        second = list(reg.iter_agents())
+        assert len(second) == 1
+
+
+# =============================================================================
 # 坏 YAML → 降级单 native(不 raise)
 # =============================================================================
 class TestFallbackDegrade:

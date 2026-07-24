@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -132,6 +133,20 @@ class AgentRegistry:
             return next(iter(self._agents.values()))
         # 空 registry(理论不达:_fallback_native 已填,但防御)
         return AgentSpec(id="native", default=True, cwds=[])
+
+    # ------------------------------------------------------------ accessors
+    # ADR-C2: 公开读取口,替代外部直读 _default_id / _agents(私有)。
+    def default_id(self) -> str | None:
+        """Default agent id (loaded 时已定;空 registry → None)。"""
+        return self._default_id
+
+    def iter_agents(self) -> Iterator[tuple[str, AgentSpec]]:
+        """Iterate (agent_id, AgentSpec) 不泄露私有 dict 引用。
+
+        返回 ``self._agents.items()`` 的迭代器视图(只读遍历);调用方不应
+        据此修改 registry 内部状态。list_ao2_agents 等端点用此替代 ``_agents``。
+        """
+        return iter(self._agents.items())
 
     # -------------------------------------------------------------- resolvers
     def resolve_workspace(self, spec: AgentSpec, state_dir: str | None = None) -> Path:
