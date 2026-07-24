@@ -72,7 +72,14 @@ class TestFallbackDegrade:
         assert reg.default().id == "native"
         assert reg.get("native") is not None
 
-    def test_missing_file_degrades_to_native(self, tmp_path):
+    def test_missing_file_degrades_to_native(self, tmp_path, monkeypatch):
+        # 隔离 env 让 _locate_config 所有候选都不命中,真触发 _fallback_native。
+        # 不隔离的话:git-root 推断(agent_registry.py:99-104)会上溯命中 repo 根真
+        # agents.yaml(B 后=help),返回 help 而非 native → fallback path 测不到。
+        # path 参数只是 candidates 第一项,缺失会继续往后试 env/repo-root/stateDir。
+        monkeypatch.setenv("AO2_REPO_ROOT", str(tmp_path))   # 无 .git 也无 agents.yaml
+        monkeypatch.setenv("AO2_STATE_DIR", str(tmp_path))    # stateDir 也没
+        monkeypatch.delenv("AO2_AGENTS_CONFIG", raising=False)
         nope = tmp_path / "nope.yaml"
         reg = AgentRegistry.load(str(nope))
         assert reg.default().id == "native"

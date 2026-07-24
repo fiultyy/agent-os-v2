@@ -109,17 +109,23 @@ class TestA2aNativeMainE2E:
     def test_main_real_glm_response_and_scope_isolation(self):
         """PRIMARY gate, all three assertions.
 
-        send('main') → real build_native_agent → real AnthropicModel → real
+        send(<default>) → real build_native_agent → real AnthropicModel → real
         GLM. Then assert (1) non-empty identity-reflecting response,
-        (2) observe events carry agent_id='main', (3) memory scoped to 'main'.
+        (2) observe events carry agent_id=<default>, (3) memory scoped to <default>.
+
+        B(commit 600c766)删 main agent,default 改 help(ADR-2:面向终端用户的
+        AO2 新手向导)。help 有 workspace+cwds=[](单 workspace cwd 退化),能测
+        A2A peer capability stack + scope isolation——测试意图保留,只换目标 agent。
+        用 registry.default() 而非硬编码 id,换 default 自动跟上(路由 registry-driven)。
         """
         from src.memory.event_bus import EventType
         from src.memory.hooks import HookPriority, MemoryHook
 
         _state = _init_state()
         assert _state.agent_registry is not None, "AgentRegistry failed to load"
-        main_spec = _state.agent_registry.get("main")
-        assert main_spec is not None, "main agent missing from registry"
+        target_spec = _state.agent_registry.default()
+        target_id = target_spec.id
+        assert target_spec is not None, "default agent missing from registry"
 
         # wire probes BEFORE the send
         observe_probe = _ObserveProbe()
@@ -148,7 +154,7 @@ class TestA2aNativeMainE2E:
             from a2a.transport import LocalTransport
             t = LocalTransport()  # reads _state.agent_registry
             msg = _run(t.send(
-                "main",
+                target_id,
                 "用一句话介绍你的角色/职责(你是谁、主要做什么)。",
             ))
         finally:
@@ -157,48 +163,55 @@ class TestA2aNativeMainE2E:
         text = msg.parts[0].text if msg.parts else ""
         text_lower = text.lower() if text else ""
 
-        # ── Assertion 1: real GLM non-empty, reflects main identity ───────
-        assert text and text.strip(), f"empty response from main: {text!r}"
-        # main 的 AGENTS.md/SOUL.md 身份:总管/委派/助理/管理 subagent。
+        # ── Assertion 1: real GLM non-empty, reflects target identity ──────
+        assert text and text.strip(), f"empty response from {target_id}: {text!r}"
+        # help 的 instructions/SOUL 身份:AO2 新手向导/面向终端用户/中文/带步骤。
         # 宽松匹配(中文或语义关键词任一)——GLM 表述自由,断言"反映了身份"而非固定词。
         identity_hits = sum(
-            1 for kw in ("总管", "委派", "助理", "管理", "协调", "助手", "全能", "subagent", "代理", "指挥")
+            1 for kw in (
+                "向导", "新手", "用户", "帮助", "助手", "助理", "步骤", "中文",
+                "指导", "引导", "教程", "介绍", "help", "ao2",
+            )
             if kw in text or kw in text_lower
         )
         assert identity_hits >= 1, (
-            f"main response does not reflect its identity (总管/委派/助理...); "
+            f"{target_id} response does not reflect its identity (向导/新手/用户...); "
             f"got: {text[:200]!r}"
         )
 
-        # ── Assertion 2: observe events carry agent_id == 'main' (D plumbing) ─
+        # ── Assertion 2: observe events carry agent_id == target_id (D plumbing) ─
         assert observe_probe.events, "no observe events captured (D emit not firing)"
-        main_events = [e for e in observe_probe.events if e.get("agent_id") == "main"]
-        assert main_events, (
-            f"no observe events with agent_id='main'; agent_ids seen: "
+        target_events = [e for e in observe_probe.events if e.get("agent_id") == target_id]
+        assert target_events, (
+            f"no observe events with agent_id={target_id!r}; agent_ids seen: "
             f"{sorted({e.get('agent_id') for e in observe_probe.events})}"
         )
-        # caller identity must NOT leak (no 'native' as the main-turn agent_id)
+        # caller identity must NOT leak (no 'native' as the target-turn agent_id)
         native_leak = [e for e in observe_probe.events if e.get("agent_id") == "native"]
-        assert not native_leak, "caller 'native' agent_id leaked into main turn events"
+        assert not native_leak, "caller 'native' agent_id leaked into target turn events"
 
-        # ── Assertion 3: scope isolation — memory writes scoped to 'main' ───
+        # ── Assertion 3: scope isolation — memory writes scoped to target_id ──
         assert memory_probe.turn_agent_ids, (
-            "no TURN_END captured (memory writer not scoped to main)"
+            f"no TURN_END captured (memory writer not scoped to {target_id})"
         )
-        assert all(aid == "main" for aid in memory_probe.turn_agent_ids), (
-            f"TURN_END agent_id not all 'main': {memory_probe.turn_agent_ids}"
+        assert all(aid == target_id for aid in memory_probe.turn_agent_ids), (
+            f"TURN_END agent_id not all {target_id!r}: {memory_probe.turn_agent_ids}"
         )
         if memory_probe.item_agent_ids:
-            assert all(aid == "main" for aid in memory_probe.item_agent_ids), (
-                f"MemoryItem agent_id not all 'main': {memory_probe.item_agent_ids}"
+            assert all(aid == target_id for aid in memory_probe.item_agent_ids), (
+                f"MemoryItem agent_id not all {target_id!r}: {memory_probe.item_agent_ids}"
             )
 
     def test_main_peer_full_capability_stack(self):
-        """ADR-4: main runs as PEER with full capability stack (not stripped).
+        """ADR-4: default agent runs as PEER with full capability stack (not stripped).
         Verify by intercepting assemble_capabilities — same caps surface as a
         /h session (Observe + MemoryWriter + ToolBridge + Guardrail + ...).
-        Deterministic (no GLM): the consume path must request the full stack."""
+        Deterministic (no GLM): the consume path must request the full stack.
+
+        B 删 main 后 default=help;用 registry.default() 测,意图保留
+        (peer parity 对任何 default agent 都成立)。"""
         _state = _init_state()
+        target_id = _state.agent_registry.default().id
         captured: dict[str, Any] = {}
 
         from src.harness import routes as routes_mod
@@ -222,14 +235,14 @@ class TestA2aNativeMainE2E:
 
             emit_mod.ObserveEmitter = lambda *a, **k: _NoNet()  # type: ignore
             t = LocalTransport()
-            _run(t.send("main", "x"))
+            _run(t.send(target_id, "x"))
         finally:
             routes_mod.assemble_capabilities = _orig  # type: ignore[assignment]
 
         cap_ids = captured.get("cap_ids", [])
-        assert "main" == captured.get("agent_id_for_scope"), "scope not main"
+        assert target_id == captured.get("agent_id_for_scope"), f"scope not {target_id}"
         # peer parity: the same core caps a /h session gets.
         for required in ("observe", "memory_writer", "tool_bridge", "guardrail"):
             assert required in cap_ids, (
-                f"main consumed agent missing peer cap '{required}'; has {cap_ids}"
+                f"{target_id} consumed agent missing peer cap '{required}'; has {cap_ids}"
             )
