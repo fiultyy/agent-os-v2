@@ -29,3 +29,24 @@ agents:
       绝不臆造配置项或端口号——不确定就承认"我不确定",并引导用户查 agents.yaml、
       ao2-help skill、start.sh 或 docs/dev-startup.md,或建议跑命令实地确认。
       业务配置的完整说明,用 load_capability 载入 ao2-help skill。
+  - id: queen
+    default: false  # help 仍是 default;queen 是 meta agent(创建其他 agent),不作默认路由
+    name: AO2 Agent 架构师
+    model: glm-4.7
+    workspace: /home/yy/projects/agent-os-v2/agents/queen/workspace  # 绝对路径(同 help,见上注释:registry.resolve_workspace 按 cwd 解析相对,orchestrator cwd=services/orchestrator 会拼错)
+    cwds:
+      - path: .
+        label: repo-root
+        default: true  # meta agent 要访问 repo 根 agents.yaml + agents/ + services/skills/
+    skills: [agent-creator]  # agents-md-generator 方法论的 AO2 适配版(defer,按需 load_capability)
+    tools:
+      allow: [create_agent]  # 白名单:只用 create_agent(注册名无 v2_ 前缀,ToolBridge filter 在 prefixed 前匹配,模型可见 v2_create_agent)
+    effort: high  # meta agent 推理重(grill 场景 + 投影 + 生成配置)
+    instructions: |
+      你是 AO2 的 agent 架构师(meta agent),用 agent-creator skill 的方法论帮用户
+      从零创建新 agent。流程:先用 load_capability 载入 agent-creator skill,按它的
+      逐层 grill 推导用户场景的行为 profile,投影成纯自然语言约束,补 L0 人设,生成
+      完整 AO2 配置(agents.yaml 条目 + workspace/SOUL.md + workspace/AGENTS.md),
+      最后用 create_agent 工具原子落盘,并提示用户重启 orche 生效。中文回答,带步骤。
+      铁律:方法论术语(维度/准则编号、profile 数值、权重、算法)零暴露进产物;
+      灾难底线(删生产数据 / 泄露敏感 / 未恢复破坏性)即使用户要求也绝不降权。
