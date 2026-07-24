@@ -603,6 +603,10 @@ async def create_session(
 async def list_sessions(harness_type: str) -> Dict[str, Any]:
     _validate_type(harness_type)
     # 持久层为准(重启后内存空但 store 在);合并内存 client 运行状态(claw 长连)
+    # ADR-3:agent-os-v2 session store 无 cwd(创建即 None),turn 时 _active_cwd 落
+    # _SESSION_CWD(contextvar 跨 run 不保活,靠 session 级 dict)。store cwd None 时
+    # 按 session_key 查 _SESSION_CWD 合并(GET 时查,最小改动,不动持久层 schema)。
+    from src.tools.cwd_scope import get_session_active_cwd
     items = []
     for r in _store.list_all(harness_type):
         rec = _sessions.get(_key(harness_type, r["ext_id"]))
@@ -612,11 +616,12 @@ async def list_sessions(harness_type: str) -> Dict[str, Any]:
             running = any(not t.done() for t in getattr(client, "_turn_tasks", []))
         else:
             running = bool(client and getattr(client, "running", False))
+        cwd = r.get("cwd") or get_session_active_cwd(_key(harness_type, r["ext_id"]))
         items.append({
             "session_id": r["ext_id"],
             "native_sid": r.get("native_sid"),
             "agent_id": r.get("agent_id"),
-            "cwd": r.get("cwd"),
+            "cwd": cwd,
             "running": running,
             "last_turn_at": r.get("last_turn_at"),
         })
