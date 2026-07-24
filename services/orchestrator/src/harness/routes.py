@@ -634,13 +634,28 @@ async def trigger_turn(
             # store 有但内存无(restore 孤儿)→ 重建 native agent + 回填持久化 message_history
             row = _store.get(harness_type, session_id)
             if row is None:
-                raise HTTPException(status_code=404, detail="session not found")
-            # §8.5:从 store 取 agent_id 重建对应 spec 的 session(续聊保留 per-agent 配置)
-            rec = await _build_native_session(
-                session_id, messages=_load_native_messages(session_id),
-                agent_id=row.get("agent_id"),
-            )
-            _sessions[_key(harness_type, session_id)] = rec
+                # ADR-1:session 在 _sessions 无 + _store 无(observe-only 来源如
+                # /v1/execute,或 orche 重启后历史 session)→ auto-create,default
+                # agent。复用 create_session 的 build+落库逻辑(§8.1 + §D6);restore
+                # 路径(row 有)仍优先走上面带原 agent_id 分支,不退化为 default。
+                from src.services import _state
+                default_aid = (
+                    _state.agent_registry.default_id()
+                    if _state.agent_registry is not None else None
+                )
+                rec = await _build_native_session(session_id, agent_id=default_aid)
+                _store.create(
+                    session_id, "agent-os-v2",
+                    native_sid=session_id, agent_id=rec["spec_id"],
+                )
+                _sessions[_key(harness_type, session_id)] = rec
+            else:
+                # §8.5:从 store 取 agent_id 重建对应 spec 的 session(续聊保留 per-agent 配置)
+                rec = await _build_native_session(
+                    session_id, messages=_load_native_messages(session_id),
+                    agent_id=row.get("agent_id"),
+                )
+                _sessions[_key(harness_type, session_id)] = rec
         # §7.3:turn 前从 session 持久恢复 _active_cwd(跨 run/跨 turn 保活激活 cwd)。
         from pathlib import Path
         from src.tools.cwd_scope import _active_cwd, get_session_active_cwd

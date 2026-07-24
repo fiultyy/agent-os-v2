@@ -355,10 +355,61 @@ def test_trigger_turn_native_store_only_orphan_rebuilds(store, monkeypatch):
     assert res["status"] == "completed"
 
 
-def test_trigger_turn_native_not_found_404(store):
-    with pytest.raises(HTTPException) as ei:
-        asyncio.run(routes.trigger_turn("agent-os-v2", "ghost", routes.TurnReq(message="hi")))
-    assert ei.value.status_code == 404
+def test_trigger_turn_native_observe_only_auto_creates(store, monkeypatch):
+    """ADR-1:session _sessions 无 + _store 无(observe-only 来源如 /v1/execute,
+    或 orche 重启后历史 session)→ trigger_turn auto-create(default agent)+ 落库 +
+    跑 turn,不再 404。default agent_id 取 registry.default_id()(registry None → None)。"""
+    rec = _mock_native_rec("auto-created")
+    monkeypatch.setattr(routes, "_build_native_session", AsyncMock(return_value=rec))
+    # registry None 分支(_build_native_session 内已兜底,且 trigger_turn auto-create
+    # 仅在 registry 非 None 时读 default_id();None → 默认 agent_id=None)
+    from src.services import _state
+    monkeypatch.setattr(_state, "agent_registry", None)
+    sid = "observe-only-fresh"
+    res = asyncio.run(routes.trigger_turn(
+        "agent-os-v2", sid, routes.TurnReq(message="hi")))
+    assert res["status"] == "completed"
+    assert res["response"] == "auto-created"
+    # auto-created session 落库(后续 turn 走 restore 路径,不退化)
+    row = store.get("agent-os-v2", sid)
+    assert row is not None and row["native_sid"] == sid
+    # _build_native_session 被调用(agent_id=None,因 registry None)
+    routes._build_native_session.assert_awaited_once()
+    _, kwargs = routes._build_native_session.call_args
+    assert kwargs.get("agent_id") is None
+
+
+def test_trigger_turn_native_observe_only_uses_registry_default_id(store, monkeypatch):
+    """registry 非 None → auto-create 取 registry.default_id()(非 hardcode)。"""
+    rec = _mock_native_rec("via-default")
+    monkeypatch.setattr(routes, "_build_native_session", AsyncMock(return_value=rec))
+    reg = MagicMock()
+    reg.default_id.return_value = "help"
+    from src.services import _state
+    monkeypatch.setattr(_state, "agent_registry", reg)
+    sid = "observe-only-default"
+    res = asyncio.run(routes.trigger_turn(
+        "agent-os-v2", sid, routes.TurnReq(message="hi")))
+    assert res["status"] == "completed"
+    reg.default_id.assert_called_once()
+    _, kwargs = routes._build_native_session.call_args
+    assert kwargs.get("agent_id") == "help"
+
+
+def test_trigger_turn_native_auto_creates_async_branch(store, monkeypatch):
+    """ADR-1:async_run=true 分支也走 auto-create(observe-only session → auto-create +
+    返 started,不 404)。"""
+    rec = _mock_native_rec()
+    monkeypatch.setattr(routes, "_build_native_session", AsyncMock(return_value=rec))
+    from src.services import _state
+    monkeypatch.setattr(_state, "agent_registry", None)
+    sid = "observe-only-async"
+    res = asyncio.run(routes.trigger_turn(
+        "agent-os-v2", sid, routes.TurnReq(message="hi", async_run=True)))
+    assert res["status"] == "started"
+    assert "tick_id" in res
+    # auto-created 落库
+    assert store.get("agent-os-v2", sid) is not None
 
 
 def test_delete_native_session_closes_emitter(store, monkeypatch):
