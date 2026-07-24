@@ -57,363 +57,419 @@ from src.services.agent_manager import init_default_agent, restore_agents_from_p
 
 app = FastAPI(title="Agent OS — Orchestrator", version="0.2.0", redirect_slashes=False)
 
-# ── Initialize shared state ────────────────────────────────────────
+# ADR-C1: module-level defaults for the two engine-attribute singletons that
+# bootstrap() populates. Pre-declaring avoids AttributeError if a consumer reads
+# ``engine._tool_registry`` / ``engine._WORKFLOW_TOOLS_AVAILABLE`` before
+# bootstrap() runs (e.g. an introspection at import time). None/False is a safe
+# "not-yet-bootstrapped" sentinel; bootstrap() rebinds both via ``global``.
+_tool_registry = None
+_WORKFLOW_TOOLS_AVAILABLE = False
 
-_state.llm_client = LLMClient()
 
-# side-agent parallel mechanism removed (Part5) — _state.side_* stay None.
-# memory/sideline/* archived, awaiting AO2 capability rewrite.
+# ADR-C1: _state 装配根治。历史上 line 60-416 + observe_client 是模块级装配 ——
+# ``import engine`` 即触发,产 LLMClient/KnowledgeGraph/MemoryService/.../db_watcher/
+# memory_observe_emitter/observe_client 等真实对象 + 后台任务,挂进单例
+# ``src.services._state``。全套件 pytest 时单例跨测试共享:前测试 import engine
+# (装配真 agents.yaml → ``_state.agent_registry`` 含 help/queen)→ 后测试
+# ``_build_native_session`` 拿污染 registry;另 ``db_watcher`` / emitter / write_queue
+# 后台任务跨测试残留致 hang。
+#
+# 根治:把装配整段包成 ``bootstrap(config_path=None)``,``import engine`` 零副作用
+# (字段 None 直到 bootstrap 调用)。生产由 FastAPI startup hook 调 bootstrap(行为
+# 等价);测试经 conftest autouse fixture ``_state.reset()`` + 按需 bootstrap 实现真
+# 隔离。保装配顺序依赖(knowledge_graph 先于 memory_service)+ ``_state.xxx`` 访问
+# 接口不变(只改装配时机,字段名/访问方式不动)。
+def bootstrap(config_path: str | None = None) -> None:
+    """Assemble all ``_state`` singletons + tool register + memory bus.
 
-# Knowledge graph must be created first — MemoryService depends on it.
-_state.knowledge_graph = KnowledgeGraph()
-# NOTE(D-27): FAISS vector_store removed — MemoryService uses KG-based
-# structured recall instead.  FAISSVectorStore class is kept for any
-# external references.
-_state.memory_service = MemoryService(
-    SQLiteStore(), knowledge_graph=_state.knowledge_graph
-)
-
-# Context compression components
-_state.context_monitor = ContextMonitor()
-_state.async_compressor = AsyncCompressor(monitor=_state.context_monitor)
-_state.sync_compressor = SyncCompressor(monitor=_state.context_monitor)
-
-# Memory migration and active forgetting
-_state.memory_migrator = MemoryMigrator(_state.memory_service)
-_state.active_forgetting = ActiveForgetting(_state.memory_service)
-
-_state.context_manager = ContextManager(_state.memory_service)
-_state.context_compiler = ContextCompiler(_state.context_manager)
-
-# ADR-1 + P1(决策 3):Profile 分层 Capability 化 — AgentRegistry load agents.yaml
-# → ProfileRegistry.load_all(registry) per-agent 加载各 workspace 身份文件(AGENTS.md
-# L1+L2 / SOUL.md L0 缺静默跳过)。routes._build_native_session 经 make_profile_capabilities
-# 注入 native Agent。失败降级 None(不阻塞启动);agents.yaml 缺失 AgentRegistry 自降级单 native。
-try:
-    from src.agent.agent_registry import AgentRegistry
-    from src.agent.profile_registry import ProfileRegistry
-    _state.agent_registry = AgentRegistry.load(
-        path=os.getenv("AO2_AGENTS_CONFIG") or os.path.join(os.getcwd(), "agents.yaml"),
-    )
-    _state.profile_registry = ProfileRegistry()
-    _state.profile_registry.load_all(_state.agent_registry)
-    logger.info(
-        "ProfileRegistry wired (agents=%s)",
-        sorted(_state.agent_registry._agents.keys()),
-    )
-except Exception:
-    logger.warning("ProfileRegistry init failed — degrading to None", exc_info=True)
-    _state.profile_registry = None
-    _state.agent_registry = None
-
-# ── Tool register (L2 通电):清单制注册已实现的 primitive+skill 工具 ─────
-# composite(browser_flow_execute / code_review_run)显式跳过 —— 它们重依赖
-# browser / playwright / code 编排链,在最小 wiring 下会拖累启动。import 容错:
-# skill 系统的可选依赖(如 pyyaml)缺失时降级为空 registry,不阻断 engine 启动。
-from src.tools.catalog import ToolLayer
-
-_tool_registry = ToolRegistry()
-try:
-    from src.skills.primitive import (
-        http_get, http_post, http_put, http_delete, http_patch,
-        file_read, file_write, file_delete, file_exists, file_list, file_mkdir,
-        db_query, db_execute, db_transaction, db_schema,
-    )
-    from src.skills.code import code_read, code_write, code_search
-    _SKILL_TOOLS_AVAILABLE = True
-except ImportError as _skill_import_err:
-    logger.warning(
-        "skill tools unavailable (optional deps missing): %s", _skill_import_err,
-    )
-    _SKILL_TOOLS_AVAILABLE = False
-
-if _SKILL_TOOLS_AVAILABLE:
-    # 清单:(name, handler, description, parameters_schema, layer)。注册数由
-    # 清单长度决定 —— 不硬编码(生产应为 15 primitive + 3 skill = 18)。
-    _PRIMITIVE_TOOLS: list[tuple] = [
-        ("http_get", http_get, "HTTP GET 请求",
-         {"type": "object", "properties": {"url": {"type": "string"}, "headers": {"type": "object"}, "timeout": {"type": "integer"}}, "required": ["url"]}, ToolLayer.PRIMITIVE),
-        ("http_post", http_post, "HTTP POST 请求",
-         {"type": "object", "properties": {"url": {"type": "string"}, "body": {"type": "string"}, "headers": {"type": "object"}, "timeout": {"type": "integer"}}, "required": ["url"]}, ToolLayer.PRIMITIVE),
-        ("http_put", http_put, "HTTP PUT 请求",
-         {"type": "object", "properties": {"url": {"type": "string"}, "body": {"type": "string"}, "headers": {"type": "object"}, "timeout": {"type": "integer"}}, "required": ["url"]}, ToolLayer.PRIMITIVE),
-        ("http_delete", http_delete, "HTTP DELETE 请求",
-         {"type": "object", "properties": {"url": {"type": "string"}, "headers": {"type": "object"}, "timeout": {"type": "integer"}}, "required": ["url"]}, ToolLayer.PRIMITIVE),
-        ("http_patch", http_patch, "HTTP PATCH 请求",
-         {"type": "object", "properties": {"url": {"type": "string"}, "body": {"type": "string"}, "headers": {"type": "object"}, "timeout": {"type": "integer"}}, "required": ["url"]}, ToolLayer.PRIMITIVE),
-        ("file_read", file_read, "读取文件内容",
-         {"type": "object", "properties": {"path": {"type": "string"}, "encoding": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["path"]}, ToolLayer.PRIMITIVE),
-        ("file_write", file_write, "写入文件内容",
-         {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}, "encoding": {"type": "string"}, "mode": {"type": "string"}}, "required": ["path", "content"]}, ToolLayer.PRIMITIVE),
-        ("file_delete", file_delete, "删除文件或目录",
-         {"type": "object", "properties": {"path": {"type": "string"}, "recursive": {"type": "boolean"}}, "required": ["path"]}, ToolLayer.PRIMITIVE),
-        ("file_exists", file_exists, "检查路径是否存在",
-         {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}, ToolLayer.PRIMITIVE),
-        ("file_list", file_list, "列出目录内容",
-         {"type": "object", "properties": {"path": {"type": "string"}, "pattern": {"type": "string"}, "recursive": {"type": "boolean"}, "max_depth": {"type": "integer"}}, "required": ["path"]}, ToolLayer.PRIMITIVE),
-        ("file_mkdir", file_mkdir, "创建目录",
-         {"type": "object", "properties": {"path": {"type": "string"}, "parents": {"type": "boolean"}, "exist_ok": {"type": "boolean"}}, "required": ["path"]}, ToolLayer.PRIMITIVE),
-        ("db_query", db_query, "执行 SELECT 查询",
-         {"type": "object", "properties": {"sql": {"type": "string"}, "params": {"type": "array"}, "db_path": {"type": "string"}, "fetch": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["sql"]}, ToolLayer.PRIMITIVE),
-        ("db_execute", db_execute, "执行 INSERT/UPDATE/DELETE",
-         {"type": "object", "properties": {"sql": {"type": "string"}, "params": {"type": "array"}, "db_path": {"type": "string"}, "commit": {"type": "boolean"}}, "required": ["sql"]}, ToolLayer.PRIMITIVE),
-        ("db_transaction", db_transaction, "事务执行多条 SQL",
-         {"type": "object", "properties": {"statements": {"type": "array"}, "db_path": {"type": "string"}}, "required": ["statements"]}, ToolLayer.PRIMITIVE),
-        ("db_schema", db_schema, "获取表结构",
-         {"type": "object", "properties": {"table": {"type": "string"}, "db_path": {"type": "string"}}, "required": ["table"]}, ToolLayer.PRIMITIVE),
-    ]
-    _SKILL_TOOLS: list[tuple] = [
-        ("code_read", code_read, "读取代码文件",
-         {"type": "object", "properties": {"path": {"type": "string"}, "language": {"type": "string"}, "start_line": {"type": "integer"}, "end_line": {"type": "integer"}, "highlight": {"type": "boolean"}}, "required": ["path"]}, ToolLayer.SKILL),
-        ("code_write", code_write, "写入代码文件",
-         {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}, "language": {"type": "string"}, "backup": {"type": "boolean"}, "atomic": {"type": "boolean"}, "encoding": {"type": "string"}}, "required": ["path", "content"]}, ToolLayer.SKILL),
-        ("code_search", code_search, "搜索代码文件",
-         {"type": "object", "properties": {"query": {"type": "string"}, "path": {"type": "string"}, "pattern_type": {"type": "string"}, "file_filter": {"type": "string"}, "case_sensitive": {"type": "boolean"}, "context_lines": {"type": "integer"}, "max_results": {"type": "integer"}, "recursive": {"type": "boolean"}, "max_depth": {"type": "integer"}}, "required": ["query"]}, ToolLayer.SKILL),
-    ]
-    # composite skipped: browser_flow_execute / code_review_run (heavy deps)
-    # workflow_run 通电(W-P0-6):薄桥 handler + JSON schema 来自
-    # tools/composite/v2_workflow.py(W-P0-5)。register 名 **workflow_run**(无
-    # v2_ 前缀!)— ToolBridgeCapability.get_toolset 已 .prefixed("v2")(RK11),
-    # 模型可见名 = v2_workflow_run;若 register 带 v2_ 致 v2_v2_workflow_run。
-    _WORKFLOW_TOOLS_AVAILABLE = False
-    try:
-        from src.tools.composite.v2_workflow import (
-            WORKFLOW_LOOP_SCHEMA,
-            WORKFLOW_RUN_SCHEMA,
-            workflow_loop_handler,
-            workflow_run_handler,
-        )
-        _WORKFLOW_TOOLS_AVAILABLE = True
-    except ImportError as _wf_import_err:
-        logger.warning(
-            "workflow tools unavailable (optional deps missing): %s", _wf_import_err,
+    Called from FastAPI startup hook on production startup. Idempotent-ish: re-run
+    rebuilds singletons (previous instances dropped when nothing refs them; but
+    background tasks like db_watcher/write_queue sweep may leak across re-runs in
+    a single process — tests use ``_state.reset()`` + a fresh process, not
+    re-bootstrap, for isolation). ``config_path`` defaults to env AO2_AGENTS_CONFIG
+    or ``$CWD/agents.yaml``.
+    """
+    if config_path is None:
+        config_path = os.getenv("AO2_AGENTS_CONFIG") or os.path.join(
+            os.getcwd(), "agents.yaml",
         )
 
-    if _WORKFLOW_TOOLS_AVAILABLE:
-        _WORKFLOW_TOOLS: list[tuple] = [
-            ("workflow_run", workflow_run_handler,
-             "Workflow fan-out/fan-in — spawn N sub-agents via build_native_agent, "
-             "gather results (list|merge). Sub-agents inherit ToolBridge, zero memory.",
-             WORKFLOW_RUN_SCHEMA, ToolLayer.COMPOSITE),
-            # workflow_loop 通电(W-P1-4,F6):薄桥调 WorkflowEngine.loop(finder
-            # 每轮产候选 → seen 去重 → dry/budget 早收敛 break)。register 名
-            # **workflow_loop**(无 v2_ 前缀,RK11),ToolBridge 自动加成 v2_workflow_loop。
-            ("workflow_loop", workflow_loop_handler,
-             "Workflow loop — finder sub-agent produces candidates each iteration, "
-             "dedup via seen set, break on dry-streak or budget. Zero memory.",
-             WORKFLOW_LOOP_SCHEMA, ToolLayer.COMPOSITE),
-        ]
-    else:
-        _WORKFLOW_TOOLS = []
+    # ``_tool_registry`` + ``_WORKFLOW_TOOLS_AVAILABLE`` stay module-level names
+    # on ``src.engine`` (tests reference them via ``engine._tool_registry`` /
+    # ``engine._WORKFLOW_TOOLS_AVAILABLE``); declare global so the assignments
+    # below rebind the module attrs, not locals. Other singletons attach to
+    # ``_state`` instead.
+    global _tool_registry, _WORKFLOW_TOOLS_AVAILABLE
 
-    def _bulk_register(registry, items):
-        n = 0
-        for name, handler, desc, params, layer in items:
-            registry.register(
-                name, handler, description=desc, parameters=params, layer=layer,
-            )
-            n += 1
-        return n
+    # ── Initialize shared state ────────────────────────────────────────
 
-    _n_prim = _bulk_register(_tool_registry, _PRIMITIVE_TOOLS)
-    _n_skill = _bulk_register(_tool_registry, _SKILL_TOOLS)
-    _n_wf = _bulk_register(_tool_registry, _WORKFLOW_TOOLS)
+    _state.llm_client = LLMClient()
 
-    # A2A-as-tool(ADR-2 B 形态):a2a_call 工具薄桥。register 名 **a2a_call**(无
-    # v2_ 前缀,RK11)— ToolBridge ``.prefixed("v2")`` 运行时自动加 v2_ 前缀。a2a
-    # 依赖 LocalTransport + agent_registry,二者零网络/纯进程内,无条件挂(与
-    # primitive/skill 同级可见);target 解析在 handler 内 lazy read _state,故注册
-    # 不依赖 registry 已就绪。COMPOSITE 层(委派兄弟 agent,与 workflow_run 同类)。
-    _n_a2a = 0
-    try:
-        from src.a2a.tool import A2A_CALL_SCHEMA, a2a_call_handler
-        _tool_registry.register(
-            "a2a_call", a2a_call_handler,
-            description=(
-                "A2A internal-mesh call — send a message to a sibling agent "
-                "(in-process, zero network) and return its response text. "
-                "Resolve target by agent id; unknown target returns an error."
-            ),
-            parameters=A2A_CALL_SCHEMA, layer=ToolLayer.COMPOSITE,
-        )
-        _n_a2a = 1
-    except ImportError as _a2a_import_err:
-        logger.warning("a2a_call tool unavailable: %s", _a2a_import_err)
+    # side-agent parallel mechanism removed (Part5) — _state.side_* stay None.
+    # memory/sideline/* archived, awaiting AO2 capability rewrite.
 
-    # create_agent(ADR-3):queen 写文件能力。register 名 **create_agent**(无
-    # v2_ 前缀,RK11)— ToolBridgeCapability.get_toolset 已 .prefixed("v2"),
-    # 模型可见名 = v2_create_agent。COMPOSITE 层(创建 agent = 多步文件操作 +
-    # schema 校验,与 workflow_run 同类复杂度)。灾难底线:同名 agent 拒(不覆盖)
-    # + agents.yaml 原子写(临时文件 + os.replace,写错不破坏现有配置)。
-    _n_creator = 0
-    try:
-        from src.tools.agent_creator import CREATE_AGENT_SCHEMA, create_agent
-        _tool_registry.register(
-            "create_agent", create_agent,
-            description=(
-                "Create a new AO2 agent — atomically append to agents.yaml + "
-                "write workspace/SOUL.md + workspace/AGENTS.md (+ optional skill). "
-                "Refuses to overwrite existing agent id (catastrophe guard). "
-                "Returns ok + agent_id + workspace; restart orche to take effect."
-            ),
-            parameters=CREATE_AGENT_SCHEMA, layer=ToolLayer.COMPOSITE,
-        )
-        _n_creator = 1
-    except ImportError as _creator_import_err:
-        logger.warning("create_agent tool unavailable: %s", _creator_import_err)
-
-    logger.info(
-        "tool register: primitive=%d skill=%d workflow=%d a2a=%d creator=%d total=%d | list_tools=%d catalog.count=%d "
-        "(composite skipped: browser_flow/code_review)",
-        _n_prim, _n_skill, _n_wf, _n_a2a, _n_creator,
-        _n_prim + _n_skill + _n_wf + _n_a2a + _n_creator,
-        len(_tool_registry.list_tools()), _tool_registry.get_catalog().count(),
+    # Knowledge graph must be created first — MemoryService depends on it.
+    _state.knowledge_graph = KnowledgeGraph()
+    # NOTE(D-27): FAISS vector_store removed — MemoryService uses KG-based
+    # structured recall instead.  FAISSVectorStore class is kept for any
+    # external references.
+    _state.memory_service = MemoryService(
+        SQLiteStore(), knowledge_graph=_state.knowledge_graph
     )
 
-_state.tool_executor = ToolExecutor(_tool_registry)
-_state.communication_bus = CommunicationBus()
-_state.concurrency_controller = ConcurrencyController()
+    # Context compression components
+    _state.context_monitor = ContextMonitor()
+    _state.async_compressor = AsyncCompressor(monitor=_state.context_monitor)
+    _state.sync_compressor = SyncCompressor(monitor=_state.context_monitor)
 
-# ── 持久化双向(原 L5 并入):PostgresStore 做 agent 持久化 ──────────────
-# 模块级只建 engine(不连池);``await initialize()`` 在 startup hook 执行,失败
-# 降级为 None —— 保留所有 call-site 的 ``is not None`` guard 语义。
-_pg_url = os.getenv("DATABASE_URL") or os.getenv("PG_DATABASE_URL") or ""
-if _pg_url:
+    # Memory migration and active forgetting
+    _state.memory_migrator = MemoryMigrator(_state.memory_service)
+    _state.active_forgetting = ActiveForgetting(_state.memory_service)
+
+    _state.context_manager = ContextManager(_state.memory_service)
+    _state.context_compiler = ContextCompiler(_state.context_manager)
+
+    # ADR-1 + P1(决策 3):Profile 分层 Capability 化 — AgentRegistry load agents.yaml
+    # → ProfileRegistry.load_all(registry) per-agent 加载各 workspace 身份文件(AGENTS.md
+    # L1+L2 / SOUL.md L0 缺静默跳过)。routes._build_native_session 经 make_profile_capabilities
+    # 注入 native Agent。失败降级 None(不阻塞启动);agents.yaml 缺失 AgentRegistry 自降级单 native。
     try:
-        from src.memory.pgstore import PostgresStore
-        _state.pg_store = PostgresStore(_pg_url)
-        logger.info("PostgresStore configured (DATABASE_URL set); initializing on startup")
+        from src.agent.agent_registry import AgentRegistry
+        from src.agent.profile_registry import ProfileRegistry
+        _state.agent_registry = AgentRegistry.load(
+            path=config_path,
+        )
+        _state.profile_registry = ProfileRegistry()
+        _state.profile_registry.load_all(_state.agent_registry)
+        logger.info(
+            "ProfileRegistry wired (agents=%s)",
+            sorted(_state.agent_registry._agents.keys()),
+        )
     except Exception:
-        logger.warning("PostgresStore init failed — degrading pg_store to None", exc_info=True)
+        logger.warning("ProfileRegistry init failed — degrading to None", exc_info=True)
+        _state.profile_registry = None
+        _state.agent_registry = None
+
+    # ── Tool register (L2 通电):清单制注册已实现的 primitive+skill 工具 ─────
+    # composite(browser_flow_execute / code_review_run)显式跳过 —— 它们重依赖
+    # browser / playwright / code 编排链,在最小 wiring 下会拖累启动。import 容错:
+    # skill 系统的可选依赖(如 pyyaml)缺失时降级为空 registry,不阻断 engine 启动。
+    from src.tools.catalog import ToolLayer
+
+    _tool_registry = ToolRegistry()
+    try:
+        from src.skills.primitive import (
+            http_get, http_post, http_put, http_delete, http_patch,
+            file_read, file_write, file_delete, file_exists, file_list, file_mkdir,
+            db_query, db_execute, db_transaction, db_schema,
+        )
+        from src.skills.code import code_read, code_write, code_search
+        _SKILL_TOOLS_AVAILABLE = True
+    except ImportError as _skill_import_err:
+        logger.warning(
+            "skill tools unavailable (optional deps missing): %s", _skill_import_err,
+        )
+        _SKILL_TOOLS_AVAILABLE = False
+
+    if _SKILL_TOOLS_AVAILABLE:
+        # 清单:(name, handler, description, parameters_schema, layer)。注册数由
+        # 清单长度决定 —— 不硬编码(生产应为 15 primitive + 3 skill = 18)。
+        _PRIMITIVE_TOOLS: list[tuple] = [
+            ("http_get", http_get, "HTTP GET 请求",
+             {"type": "object", "properties": {"url": {"type": "string"}, "headers": {"type": "object"}, "timeout": {"type": "integer"}}, "required": ["url"]}, ToolLayer.PRIMITIVE),
+            ("http_post", http_post, "HTTP POST 请求",
+             {"type": "object", "properties": {"url": {"type": "string"}, "body": {"type": "string"}, "headers": {"type": "object"}, "timeout": {"type": "integer"}}, "required": ["url"]}, ToolLayer.PRIMITIVE),
+            ("http_put", http_put, "HTTP PUT 请求",
+             {"type": "object", "properties": {"url": {"type": "string"}, "body": {"type": "string"}, "headers": {"type": "object"}, "timeout": {"type": "integer"}}, "required": ["url"]}, ToolLayer.PRIMITIVE),
+            ("http_delete", http_delete, "HTTP DELETE 请求",
+             {"type": "object", "properties": {"url": {"type": "string"}, "headers": {"type": "object"}, "timeout": {"type": "integer"}}, "required": ["url"]}, ToolLayer.PRIMITIVE),
+            ("http_patch", http_patch, "HTTP PATCH 请求",
+             {"type": "object", "properties": {"url": {"type": "string"}, "body": {"type": "string"}, "headers": {"type": "object"}, "timeout": {"type": "integer"}}, "required": ["url"]}, ToolLayer.PRIMITIVE),
+            ("file_read", file_read, "读取文件内容",
+             {"type": "object", "properties": {"path": {"type": "string"}, "encoding": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["path"]}, ToolLayer.PRIMITIVE),
+            ("file_write", file_write, "写入文件内容",
+             {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}, "encoding": {"type": "string"}, "mode": {"type": "string"}}, "required": ["path", "content"]}, ToolLayer.PRIMITIVE),
+            ("file_delete", file_delete, "删除文件或目录",
+             {"type": "object", "properties": {"path": {"type": "string"}, "recursive": {"type": "boolean"}}, "required": ["path"]}, ToolLayer.PRIMITIVE),
+            ("file_exists", file_exists, "检查路径是否存在",
+             {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}, ToolLayer.PRIMITIVE),
+            ("file_list", file_list, "列出目录内容",
+             {"type": "object", "properties": {"path": {"type": "string"}, "pattern": {"type": "string"}, "recursive": {"type": "boolean"}, "max_depth": {"type": "integer"}}, "required": ["path"]}, ToolLayer.PRIMITIVE),
+            ("file_mkdir", file_mkdir, "创建目录",
+             {"type": "object", "properties": {"path": {"type": "string"}, "parents": {"type": "boolean"}, "exist_ok": {"type": "boolean"}}, "required": ["path"]}, ToolLayer.PRIMITIVE),
+            ("db_query", db_query, "执行 SELECT 查询",
+             {"type": "object", "properties": {"sql": {"type": "string"}, "params": {"type": "array"}, "db_path": {"type": "string"}, "fetch": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["sql"]}, ToolLayer.PRIMITIVE),
+            ("db_execute", db_execute, "执行 INSERT/UPDATE/DELETE",
+             {"type": "object", "properties": {"sql": {"type": "string"}, "params": {"type": "array"}, "db_path": {"type": "string"}, "commit": {"type": "boolean"}}, "required": ["sql"]}, ToolLayer.PRIMITIVE),
+            ("db_transaction", db_transaction, "事务执行多条 SQL",
+             {"type": "object", "properties": {"statements": {"type": "array"}, "db_path": {"type": "string"}}, "required": ["statements"]}, ToolLayer.PRIMITIVE),
+            ("db_schema", db_schema, "获取表结构",
+             {"type": "object", "properties": {"table": {"type": "string"}, "db_path": {"type": "string"}}, "required": ["table"]}, ToolLayer.PRIMITIVE),
+        ]
+        _SKILL_TOOLS: list[tuple] = [
+            ("code_read", code_read, "读取代码文件",
+             {"type": "object", "properties": {"path": {"type": "string"}, "language": {"type": "string"}, "start_line": {"type": "integer"}, "end_line": {"type": "integer"}, "highlight": {"type": "boolean"}}, "required": ["path"]}, ToolLayer.SKILL),
+            ("code_write", code_write, "写入代码文件",
+             {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}, "language": {"type": "string"}, "backup": {"type": "boolean"}, "atomic": {"type": "boolean"}, "encoding": {"type": "string"}}, "required": ["path", "content"]}, ToolLayer.SKILL),
+            ("code_search", code_search, "搜索代码文件",
+             {"type": "object", "properties": {"query": {"type": "string"}, "path": {"type": "string"}, "pattern_type": {"type": "string"}, "file_filter": {"type": "string"}, "case_sensitive": {"type": "boolean"}, "context_lines": {"type": "integer"}, "max_results": {"type": "integer"}, "recursive": {"type": "boolean"}, "max_depth": {"type": "integer"}}, "required": ["query"]}, ToolLayer.SKILL),
+        ]
+        # composite skipped: browser_flow_execute / code_review_run (heavy deps)
+        # workflow_run 通电(W-P0-6):薄桥 handler + JSON schema 来自
+        # tools/composite/v2_workflow.py(W-P0-5)。register 名 **workflow_run**(无
+        # v2_ 前缀!)— ToolBridgeCapability.get_toolset 已 .prefixed("v2")(RK11),
+        # 模型可见名 = v2_workflow_run;若 register 带 v2_ 致 v2_v2_workflow_run。
+        _WORKFLOW_TOOLS_AVAILABLE = False
+        try:
+            from src.tools.composite.v2_workflow import (
+                WORKFLOW_LOOP_SCHEMA,
+                WORKFLOW_RUN_SCHEMA,
+                workflow_loop_handler,
+                workflow_run_handler,
+            )
+            _WORKFLOW_TOOLS_AVAILABLE = True
+        except ImportError as _wf_import_err:
+            logger.warning(
+                "workflow tools unavailable (optional deps missing): %s", _wf_import_err,
+            )
+
+        if _WORKFLOW_TOOLS_AVAILABLE:
+            _WORKFLOW_TOOLS: list[tuple] = [
+                ("workflow_run", workflow_run_handler,
+                 "Workflow fan-out/fan-in — spawn N sub-agents via build_native_agent, "
+                 "gather results (list|merge). Sub-agents inherit ToolBridge, zero memory.",
+                 WORKFLOW_RUN_SCHEMA, ToolLayer.COMPOSITE),
+                # workflow_loop 通电(W-P1-4,F6):薄桥调 WorkflowEngine.loop(finder
+                # 每轮产候选 → seen 去重 → dry/budget 早收敛 break)。register 名
+                # **workflow_loop**(无 v2_ 前缀,RK11),ToolBridge 自动加成 v2_workflow_loop。
+                ("workflow_loop", workflow_loop_handler,
+                 "Workflow loop — finder sub-agent produces candidates each iteration, "
+                 "dedup via seen set, break on dry-streak or budget. Zero memory.",
+                 WORKFLOW_LOOP_SCHEMA, ToolLayer.COMPOSITE),
+            ]
+        else:
+            _WORKFLOW_TOOLS = []
+
+        def _bulk_register(registry, items):
+            n = 0
+            for name, handler, desc, params, layer in items:
+                registry.register(
+                    name, handler, description=desc, parameters=params, layer=layer,
+                )
+                n += 1
+            return n
+
+        _n_prim = _bulk_register(_tool_registry, _PRIMITIVE_TOOLS)
+        _n_skill = _bulk_register(_tool_registry, _SKILL_TOOLS)
+        _n_wf = _bulk_register(_tool_registry, _WORKFLOW_TOOLS)
+
+        # A2A-as-tool(ADR-2 B 形态):a2a_call 工具薄桥。register 名 **a2a_call**(无
+        # v2_ 前缀,RK11)— ToolBridge ``.prefixed("v2")`` 运行时自动加 v2_ 前缀。a2a
+        # 依赖 LocalTransport + agent_registry,二者零网络/纯进程内,无条件挂(与
+        # primitive/skill 同级可见);target 解析在 handler 内 lazy read _state,故注册
+        # 不依赖 registry 已就绪。COMPOSITE 层(委派兄弟 agent,与 workflow_run 同类)。
+        _n_a2a = 0
+        try:
+            from src.a2a.tool import A2A_CALL_SCHEMA, a2a_call_handler
+            _tool_registry.register(
+                "a2a_call", a2a_call_handler,
+                description=(
+                    "A2A internal-mesh call — send a message to a sibling agent "
+                    "(in-process, zero network) and return its response text. "
+                    "Resolve target by agent id; unknown target returns an error."
+                ),
+                parameters=A2A_CALL_SCHEMA, layer=ToolLayer.COMPOSITE,
+            )
+            _n_a2a = 1
+        except ImportError as _a2a_import_err:
+            logger.warning("a2a_call tool unavailable: %s", _a2a_import_err)
+
+        # create_agent(ADR-3):queen 写文件能力。register 名 **create_agent**(无
+        # v2_ 前缀,RK11)— ToolBridgeCapability.get_toolset 已 .prefixed("v2"),
+        # 模型可见名 = v2_create_agent。COMPOSITE 层(创建 agent = 多步文件操作 +
+        # schema 校验,与 workflow_run 同类复杂度)。灾难底线:同名 agent 拒(不覆盖)
+        # + agents.yaml 原子写(临时文件 + os.replace,写错不破坏现有配置)。
+        _n_creator = 0
+        try:
+            from src.tools.agent_creator import CREATE_AGENT_SCHEMA, create_agent
+            _tool_registry.register(
+                "create_agent", create_agent,
+                description=(
+                    "Create a new AO2 agent — atomically append to agents.yaml + "
+                    "write workspace/SOUL.md + workspace/AGENTS.md (+ optional skill). "
+                    "Refuses to overwrite existing agent id (catastrophe guard). "
+                    "Returns ok + agent_id + workspace; restart orche to take effect."
+                ),
+                parameters=CREATE_AGENT_SCHEMA, layer=ToolLayer.COMPOSITE,
+            )
+            _n_creator = 1
+        except ImportError as _creator_import_err:
+            logger.warning("create_agent tool unavailable: %s", _creator_import_err)
+
+        logger.info(
+            "tool register: primitive=%d skill=%d workflow=%d a2a=%d creator=%d total=%d | list_tools=%d catalog.count=%d "
+            "(composite skipped: browser_flow/code_review)",
+            _n_prim, _n_skill, _n_wf, _n_a2a, _n_creator,
+            _n_prim + _n_skill + _n_wf + _n_a2a + _n_creator,
+            len(_tool_registry.list_tools()), _tool_registry.get_catalog().count(),
+        )
+
+    _state.tool_executor = ToolExecutor(_tool_registry)
+    _state.communication_bus = CommunicationBus()
+    _state.concurrency_controller = ConcurrencyController()
+
+    # ── 持久化双向(原 L5 并入):PostgresStore 做 agent 持久化 ──────────────
+    # 模块级只建 engine(不连池);``await initialize()`` 在 startup hook 执行,失败
+    # 降级为 None —— 保留所有 call-site 的 ``is not None`` guard 语义。
+    _pg_url = os.getenv("DATABASE_URL") or os.getenv("PG_DATABASE_URL") or ""
+    if _pg_url:
+        try:
+            from src.memory.pgstore import PostgresStore
+            _state.pg_store = PostgresStore(_pg_url)
+            logger.info("PostgresStore configured (DATABASE_URL set); initializing on startup")
+        except Exception:
+            logger.warning("PostgresStore init failed — degrading pg_store to None", exc_info=True)
+            _state.pg_store = None
+    else:
         _state.pg_store = None
-else:
-    _state.pg_store = None
 
-# PitFail 通电(异步零依赖):模块级实例化 PitfailRegistry。构造即 _init_db 建
-# 表,无需 async initialize(区别于 pg_store 的 startup-hook 模式)。失败降级为
-# None —— chat.py 工具失败分支与 /v1/pitfall API 均 guard ``is not None``。
-try:
-    from src.pitfail import PitfailRegistry
-    _state.pitfail_registry = PitfailRegistry(os.getenv("PITFALLS_DB", "data/pitfalls.db"))
-    logger.info("PitfailRegistry wired (db=%s)", _state.pitfail_registry.db_path)
-except Exception:
-    logger.warning("PitfailRegistry init failed — degrading pitfail_registry to None", exc_info=True)
-    _state.pitfail_registry = None
+    # PitFail 通电(异步零依赖):模块级实例化 PitfailRegistry。构造即 _init_db 建
+    # 表,无需 async initialize(区别于 pg_store 的 startup-hook 模式)。失败降级为
+    # None —— chat.py 工具失败分支与 /v1/pitfall API 均 guard ``is not None``。
+    try:
+        from src.pitfail import PitfailRegistry
+        _state.pitfail_registry = PitfailRegistry(os.getenv("PITFALLS_DB", "data/pitfalls.db"))
+        logger.info("PitfailRegistry wired (db=%s)", _state.pitfail_registry.db_path)
+    except Exception:
+        logger.warning("PitfailRegistry init failed — degrading pitfail_registry to None", exc_info=True)
+        _state.pitfail_registry = None
 
-# Conversation history(通电):对话历史持久化,参照 pitfail 模式。chat.py /execute
-# 完成后 record_turn 落库;/v1/conversations API + call-site 均 is-not-None guard。
-try:
-    from src.conversation import ConversationRegistry
-    _state.conversation_registry = ConversationRegistry(os.getenv("CONVERSATIONS_DB", "data/conversations.db"))
-    logger.info("ConversationRegistry wired (db=%s)", _state.conversation_registry.db_path)
-except Exception:
-    logger.warning("ConversationRegistry init failed — degrading conversation_registry to None", exc_info=True)
-    _state.conversation_registry = None
+    # Conversation history(通电):对话历史持久化,参照 pitfail 模式。chat.py /execute
+    # 完成后 record_turn 落库;/v1/conversations API + call-site 均 is-not-None guard。
+    try:
+        from src.conversation import ConversationRegistry
+        _state.conversation_registry = ConversationRegistry(os.getenv("CONVERSATIONS_DB", "data/conversations.db"))
+        logger.info("ConversationRegistry wired (db=%s)", _state.conversation_registry.db_path)
+    except Exception:
+        logger.warning("ConversationRegistry init failed — degrading conversation_registry to None", exc_info=True)
+        _state.conversation_registry = None
 
-# NOT-WIRED (deferred): ConditionalSpawner 装配块已移除 —— 生产路径
-# /v1/orchestrate 经 routes/orchestrate.py:_agent_manager_shim() +
-# _build_multi_agent_graph() 直接调 agent_manager 模块函数,完全绕过 spawner,
-# 故 .spawn() 全树零生产调用,spawner 实例永远空配置。ConditionalSpawner 类
-# 本身保留(defer 代码,未来 CRON/EVENT/QUEUE 自动触发型 subagent 复用,见
-# docs/multi-agent-poweron-roadmap.md:8(a))。独立 _orchestration_bus 随装配块
-# 一并消失(无其他 reader)。
+    # NOT-WIRED (deferred): ConditionalSpawner 装配块已移除 —— 生产路径
+    # /v1/orchestrate 经 routes/orchestrate.py:_agent_manager_shim() +
+    # _build_multi_agent_graph() 直接调 agent_manager 模块函数,完全绕过 spawner,
+    # 故 .spawn() 全树零生产调用,spawner 实例永远空配置。ConditionalSpawner 类
+    # 本身保留(defer 代码,未来 CRON/EVENT/QUEUE 自动触发型 subagent 复用,见
+    # docs/multi-agent-poweron-roadmap.md:8(a))。独立 _orchestration_bus 随装配块
+    # 一并消失(无其他 reader)。
 
-# P1: memory event bus + default lifecycle hook. chat.py emits lifecycle
-# events instead of calling memory_service/memory_migrator directly.
-_state.memory_event_bus = MemoryEventBus()
+    # P1: memory event bus + default lifecycle hook. chat.py emits lifecycle
+    # events instead of calling memory_service/memory_migrator directly.
+    _state.memory_event_bus = MemoryEventBus()
 
-# W3: bounded-concurrency write pool (multi-agent) + per-agent ordering.
-# DefaultMemoryHook routes every store/migrate/update through it; chat.py's
-# fire-and-forget writes (INGEST/SESSION_END/consolidate) go through fire().
-_state.write_queue = MemoryWriteQueue(
-    concurrency=int(os.getenv("MEMORY_WRITE_CONCURRENCY", "8")),
-    drain_timeout=float(os.getenv("MEMORY_WRITE_DRAIN_TIMEOUT", "5")),
-)
-_state.memory_event_bus.register(
-    DefaultMemoryHook(
-        memory_service=_state.memory_service,
-        memory_migrator=_state.memory_migrator,
-        sync_compressor=_state.sync_compressor,
-        async_compressor=_state.async_compressor,
-        context_monitor=_state.context_monitor,
-        write_queue=_state.write_queue,
-    )
-)
-# Degradation switch: MEMORY_EVENT_BUS_ENABLED=0 keeps only the SYSTEM
-# (DefaultMemoryHook) hooks and skips observer hooks — equivalent to
-# pre-P1 behaviour. chat.py always goes through bus.emit.
-if os.getenv("MEMORY_EVENT_BUS_ENABLED", "1") != "1":
-    _state.memory_event_bus.set_enabled(False)
-
-# P3: deterministic state pruner (zero-LLM-cost膨胀控制).
-_state.state_pruner = TimeBasedStatePruner(_state.memory_service)
-# External-memory watcher: detects external DB writes (other harnesses sharing
-# the sqlite DB) and runs the deterministic maintenance chain. Zero LLM.
-_state.db_watcher = MemoryDBWatcher(
-    _state.memory_service,
-    poll_interval=float(os.getenv("MEMORY_DB_WATCH_INTERVAL", "60")),
-)
-
-# ── Neural field (Part 2) + runtime observer ──────────────────────
-# side agents (ingestor/consolidator/retriever/curator) removed (Part5
-# side-agent archive). neural_field is zero-LLM drift, retained.
-
-from src.memory.event_bus import EventType
-from src.memory.runtime_observer import RuntimeObserverHook
-from src.memory.neural_field import (
-    NeuralFieldEngine,
-    NeuralFieldStore,
-    NeuralFieldRobustness,
-    NeuralHook,
-)
-
-_neural_store = NeuralFieldStore("data/neural_field.db")
-_neural_engine = NeuralFieldEngine()
-_neural_robustness = NeuralFieldRobustness(_neural_store, _neural_engine)
-
-if os.getenv("MEMORY_NEURAL_FIELD_ENABLED", "0") == "1":
-    _state.neural_store = _neural_store
-    _state.neural_engine = _neural_engine
-    _state.neural_hook = NeuralHook(
-        engine=_neural_engine,
-        store=_neural_store,
-        robustness=_neural_robustness,
-        kg=_state.knowledge_graph,
+    # W3: bounded-concurrency write pool (multi-agent) + per-agent ordering.
+    # DefaultMemoryHook routes every store/migrate/update through it; chat.py's
+    # fire-and-forget writes (INGEST/SESSION_END/consolidate) go through fire().
+    _state.write_queue = MemoryWriteQueue(
+        concurrency=int(os.getenv("MEMORY_WRITE_CONCURRENCY", "8")),
+        drain_timeout=float(os.getenv("MEMORY_WRITE_DRAIN_TIMEOUT", "5")),
     )
     _state.memory_event_bus.register(
-        # P0-1 扩展:TURN_END(chat/execute turn)+ INGEST(store_memory/sync_extract
-        # 写入)。后者让 openclaw 沉积路径(不经 chat)也喂 neural drift。NeuralHook
-        # OBSERVER 返回 None,emit 取 last non-None,不覆盖 IngestorHook 的 IngestorResult。
-        _state.neural_hook, EventType.TURN_END, EventType.INGEST,
+        DefaultMemoryHook(
+            memory_service=_state.memory_service,
+            memory_migrator=_state.memory_migrator,
+            sync_compressor=_state.sync_compressor,
+            async_compressor=_state.async_compressor,
+            context_monitor=_state.context_monitor,
+            write_queue=_state.write_queue,
+        )
+    )
+    # Degradation switch: MEMORY_EVENT_BUS_ENABLED=0 keeps only the SYSTEM
+    # (DefaultMemoryHook) hooks and skips observer hooks — equivalent to
+    # pre-P1 behaviour. chat.py always goes through bus.emit.
+    if os.getenv("MEMORY_EVENT_BUS_ENABLED", "1") != "1":
+        _state.memory_event_bus.set_enabled(False)
+
+    # P3: deterministic state pruner (zero-LLM-cost膨胀控制).
+    _state.state_pruner = TimeBasedStatePruner(_state.memory_service)
+    # External-memory watcher: detects external DB writes (other harnesses sharing
+    # the sqlite DB) and runs the deterministic maintenance chain. Zero LLM.
+    _state.db_watcher = MemoryDBWatcher(
+        _state.memory_service,
+        poll_interval=float(os.getenv("MEMORY_DB_WATCH_INTERVAL", "60")),
     )
 
-# Runtime observer hook — introspective observability (error-spike detection).
-# Pure read of _state.execution_log → runtime_observations ring buffer; zero
-# LLM, zero memory writes. Unconditional (non-fatal; auto-skipped under
-# MEMORY_EVENT_BUS_ENABLED=0 degradation). OBSERVER priority, returns None.
-_state.memory_event_bus.register(
-    RuntimeObserverHook(), EventType.TURN_END, EventType.SESSION_END,
-)
+    # ── Neural field (Part 2) + runtime observer ──────────────────────
+    # side agents (ingestor/consolidator/retriever/curator) removed (Part5
+    # side-agent archive). neural_field is zero-LLM drift, retained.
 
-# Part2: memory lifecycle → observe. MemoryObserveHook (OBSERVER) forwards
-# every lifecycle event to observe /ws/ingest via a dedicated emitter. Fixed
-# identity "memory"/"memory" — memory lifecycle is global, not per-session.
-# Fire-and-forget (ADR-7): emit is a no-op when WS is not connected. The
-# emitter is also stored on _state so engine/db_watcher can ship prune/forget/
-# migrate events (which are NOT bus EventTypes — SSE-only sidechannels).
-from src.harness.emit import ObserveEmitter
-from src.memory.observe_hook import MemoryObserveHook, memory_event
+    from src.memory.event_bus import EventType
+    from src.memory.runtime_observer import RuntimeObserverHook
+    from src.memory.neural_field import (
+        NeuralFieldEngine,
+        NeuralFieldStore,
+        NeuralFieldRobustness,
+        NeuralHook,
+    )
 
-_state.memory_observe_emitter = ObserveEmitter(
-    "memory", harness_id="memory_global", session_id="memory",
-)
-_state.memory_event_bus.register(MemoryObserveHook(_state.memory_observe_emitter))
-# emitter.connect() 移到 startup hook(_connect_memory_observe_emitter),非模块级 —
-# 避免 import 时 get_event_loop 创建/污染全局 loop(致测试 event loop 隔离失败)。
-# emit 在 WS 未连时 no-op(ADR-7)。
+    _neural_store = NeuralFieldStore("data/neural_field.db")
+    _neural_engine = NeuralFieldEngine()
+    _neural_robustness = NeuralFieldRobustness(_neural_store, _neural_engine)
 
-# Ensure data directory exists for SQLite databases
-Path("data").mkdir(exist_ok=True)
+    if os.getenv("MEMORY_NEURAL_FIELD_ENABLED", "0") == "1":
+        _state.neural_store = _neural_store
+        _state.neural_engine = _neural_engine
+        _state.neural_hook = NeuralHook(
+            engine=_neural_engine,
+            store=_neural_store,
+            robustness=_neural_robustness,
+            kg=_state.knowledge_graph,
+        )
+        _state.memory_event_bus.register(
+            # P0-1 扩展:TURN_END(chat/execute turn)+ INGEST(store_memory/sync_extract
+            # 写入)。后者让 openclaw 沉积路径(不经 chat)也喂 neural drift。NeuralHook
+            # OBSERVER 返回 None,emit 取 last non-None,不覆盖 IngestorHook 的 IngestorResult。
+            _state.neural_hook, EventType.TURN_END, EventType.INGEST,
+        )
+
+    # Runtime observer hook — introspective observability (error-spike detection).
+    # Pure read of _state.execution_log → runtime_observations ring buffer; zero
+    # LLM, zero memory writes. Unconditional (non-fatal; auto-skipped under
+    # MEMORY_EVENT_BUS_ENABLED=0 degradation). OBSERVER priority, returns None.
+    _state.memory_event_bus.register(
+        RuntimeObserverHook(), EventType.TURN_END, EventType.SESSION_END,
+    )
+
+    # Part2: memory lifecycle → observe. MemoryObserveHook (OBSERVER) forwards
+    # every lifecycle event to observe /ws/ingest via a dedicated emitter. Fixed
+    # identity "memory"/"memory" — memory lifecycle is global, not per-session.
+    # Fire-and-forget (ADR-7): emit is a no-op when WS is not connected. The
+    # emitter is also stored on _state so engine/db_watcher can ship prune/forget/
+    # migrate events (which are NOT bus EventTypes — SSE-only sidechannels).
+    from src.harness.emit import ObserveEmitter
+    from src.memory.observe_hook import MemoryObserveHook, memory_event
+
+    _state.memory_observe_emitter = ObserveEmitter(
+        "memory", harness_id="memory_global", session_id="memory",
+    )
+    _state.memory_event_bus.register(MemoryObserveHook(_state.memory_observe_emitter))
+    # emitter.connect() 移到 startup hook(_connect_memory_observe_emitter),非模块级 —
+    # 避免 import 时 get_event_loop 创建/污染全局 loop(致测试 event loop 隔离失败)。
+    # emit 在 WS 未连时 no-op(ADR-7)。
+
+    # Ensure data directory exists for SQLite databases
+    Path("data").mkdir(exist_ok=True)
+
+    # ── Observe client (T4 multi-harness-observe) ─────────────────────
+    # 初始化 ObserveClient 并暴露到 _state。chat.py /execute + _node_tool 经此推泛化
+    # turn 事件 → observe-service WS ingest。None-guard(observe-service 不可达时
+    # client 内部静默 logger.warning,不 raise)。
+    try:
+        from src.observe.client import ObserveClient
+        _state.observe_client = ObserveClient(harness_id="orchestrator-main")
+    except Exception as e:
+        logger.warning("observe client initialization failed: %s", e)
+        _state.observe_client = None
+
 
 # ── Lifecycle hooks ────────────────────────────────────────────────
 # NOTE: FastAPI runs startup hooks in registration order. The PG hook below
@@ -422,6 +478,23 @@ Path("data").mkdir(exist_ok=True)
 # non-empty _state.agents and skips re-creating the default. If PG is
 # unavailable (pg_store is None) the hook is a no-op and behaviour matches the
 # in-memory baseline.
+#
+# ADR-C1: ``_bootstrap_state`` MUST be registered FIRST — every other hook
+# (memory observe connect, pg_store initialize, init_default_agent, db_watcher,
+# harness session restore) reads ``_state`` fields that bootstrap() assembles.
+# Before C1 assembly ran at import time so hooks saw populated state; now it
+# runs here, so ordering is load-bearing.
+
+
+@app.on_event("startup")
+async def _bootstrap_state() -> None:
+    """Assemble ``_state`` singletons on production startup (ADR-C1).
+
+    Module-level assembly was moved into ``bootstrap()`` to make ``import engine``
+    side-effect-free (test isolation). Production startup runs this hook first so
+    all downstream startup hooks observe the same populated state as before.
+    """
+    bootstrap()
 
 
 @app.on_event("startup")
@@ -551,16 +624,8 @@ from src.api.routes.orchestrate import router as orchestrate_router
 app.include_router(root_router_health)
 
 
-# ── Observe client (T4 multi-harness-observe) ─────────────────────
-# 初始化 ObserveClient 并暴露到 _state。chat.py /execute + _node_tool 经此推泛化
-# turn 事件 → observe-service WS ingest。None-guard(observe-service 不可达时
-# client 内部静默 logger.warning,不 raise)。
-try:
-    from src.observe.client import ObserveClient
-    _state.observe_client = ObserveClient(harness_id="orchestrator-main")
-except Exception as e:
-    logger.warning("observe client initialization failed: %s", e)
-    _state.observe_client = None
+# Observe client assembly moved into bootstrap() above (ADR-C1).
+
 
 # All API routes under /v1 prefix
 app.include_router(memory_router, prefix="/v1")
@@ -629,3 +694,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

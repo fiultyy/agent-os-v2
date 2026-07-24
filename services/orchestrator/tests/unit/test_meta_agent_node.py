@@ -317,10 +317,10 @@ class TestMetaAgentNodeRealExecute:
         patch build_model(TestModel)免真 API;断言 result.output 经组装器返回,且
         memory_event_bus.emit 零调用(R1 守恒:子代理不沉淀记忆)。
 
-        注:_state.memory_event_bus 在 engine.py:278 模块级装配(任何 import src.engine
-        后非 None,如 test_engine_workflow_register),故不能 assert ``is None``(全套
-        必 fail)。改用 monkeypatch 注入 emit spy + 断言 not awaited —— 更准确验证 R1
-        (子代理不触发 memory 副作用),且隔离 engine 装配污染(根治预存全套 flaky)。
+        注:_state.memory_event_bus 经 ADR-C1 后只在 engine.bootstrap() 内装配(import
+        engine 零副作用)。conftest autouse _reset_state 每测前清字段。故本测 monkeypatch
+        注入 emit spy + 断言 not awaited —— 准确验证 R1(子代理不触发 memory 副作用),不
+        依赖 engine 装配时序。
         """
         from unittest.mock import AsyncMock, MagicMock
 

@@ -133,6 +133,89 @@ def record_degrade(agent: str) -> None:
     degraded_stats[agent] += 1
 
 
+# ── ADR-C1: reset() for test isolation ─────────────────────────────
+# ``reset()`` clears all assembled singletons + runtime accumulators back to
+# their module-load defaults. Called from ``tests/conftest.py`` autouse fixture
+# so each test starts from a clean ``_state`` regardless of what earlier tests
+# (or an ``import engine`` in the same process) wired into it. Production never
+# calls reset() — ``bootstrap()`` runs once on FastAPI startup.
+#
+# Two field groups:
+#   1. Assembled singletons (set by engine.bootstrap()): all the ``Any = None``
+#      fields above. Reset → None.
+#   2. Runtime accumulators (agents dict, execution_log, runtime_observations,
+#      degraded_stats): populated at runtime. Reset → empty.
+# This dual reset closes both pollution vectors a full-suite run hits: leaked
+# singletons (db_watcher, memory_observe_emitter background tasks) AND leaked
+# runtime state (agents dict carrying a previous test's sessions).
+
+# Names of assembled-singleton fields (declared ``Any = None`` above) that
+# engine.bootstrap() populates. Kept as an explicit list (not introspected) so
+# adding a new singleton forces a conscious reset() update — silent drift here
+# would quietly break test isolation.
+_ASSEMBLED_SINGLETON_FIELDS: tuple[str, ...] = (
+    "llm_client",
+    "knowledge_graph",
+    "memory_service",
+    "pg_store",
+    "pitfail_registry",
+    "conversation_registry",
+    "observe_client",
+    "context_monitor",
+    "async_compressor",
+    "sync_compressor",
+    "memory_migrator",
+    "active_forgetting",
+    "context_manager",
+    "context_compiler",
+    "tool_executor",
+    "communication_bus",
+    "concurrency_controller",
+    "agent_registry",
+    "profile_registry",
+    "memory_event_bus",
+    "write_queue",
+    "state_pruner",
+    "task_consolidator",
+    "db_watcher",
+    "_db_watch_task",
+    "ingestor",
+    "consolidator",
+    "retriever",
+    "curator",
+    "neural_store",
+    "neural_engine",
+    "neural_hook",
+    "memory_observe_emitter",
+)
+
+
+def reset() -> None:
+    """Reset ``_state`` to module-load defaults (test isolation, ADR-C1).
+
+    Clears assembled singletons (→ None) + runtime accumulators
+    (agents/execution_log/runtime_observations/degraded_stats → empty). Production
+    never calls this; ``engine.bootstrap()`` runs once on startup instead. Tests
+    call it via the autouse fixture in ``tests/conftest.py`` so a leaked singleton
+    or runtime buffer from an earlier test cannot pollute a later one.
+
+    NOTE: this only clears Python references. Background asyncio tasks
+    (db_watcher poll loop, memory_observe_emitter WS reconnect, write_queue
+    drain) created by a previous bootstrap() hold their own references and may
+    keep running in the event loop they were scheduled on. For full hermetic
+    isolation each test should run in a fresh process (pytest default) — reset()
+    covers the cross-test in-process pollution that doesn't involve those tasks.
+    """
+    import sys
+    _self = sys.modules[__name__]  # set attrs on this module object
+    for _name in _ASSEMBLED_SINGLETON_FIELDS:
+        setattr(_self, _name, None)
+    _self.agents = {}
+    _self.execution_log = []
+    _self.runtime_observations = []
+    _self.degraded_stats = defaultdict(int)
+
+
 # ── Execution log ──────────────────────────────────────────────────
 
 execution_log: list[dict[str, Any]] = []

@@ -22,6 +22,11 @@ import pytest
 import yaml
 
 import src.engine as engine_mod
+# ADR-C1: import engine 不再触发装配 — 显式 bootstrap() 构建 _tool_registry +
+# _state.tool_executor(本测验工具清单注册,需要 registry 已 populate)。conftest
+# autouse _state.reset() 每测前清字段,模块级 bootstrap 一次供所有测复用
+# _tool_registry 引用(engine 模块属性,reset 不动)+ _tool_executor(局部持有稳定)。
+engine_mod.bootstrap()
 from src.agent.agent_spec import AgentsConfig
 from src.tools.agent_creator import create_agent
 

@@ -61,13 +61,14 @@ def _run(coro):
 
 
 def _init_state():
-    """Importing src.engine runs the module-level _state bootstrap. Sets
-    AO2_REPO_ROOT so agent_registry finds agents.yaml."""
+    """Bootstrap src.engine's _state (ADR-C1: import is side-effect-free now).
+    Sets AO2_REPO_ROOT so agent_registry finds agents.yaml."""
     _here = os.path.dirname(os.path.abspath(__file__))
     _repo_root = os.path.abspath(os.path.join(_here, "..", "..", "..", ".."))
     os.environ["AO2_REPO_ROOT"] = _repo_root
     os.environ.setdefault("OBSERVE_URL", "http://127.0.0.1:8002")
-    import src.engine  # noqa: F401  (side effect: _state bootstrap)
+    import src.engine
+    src.engine.bootstrap()  # ADR-C1: import no longer assembles; bootstrap explicitly
     from src.services import _state
     return _state
 

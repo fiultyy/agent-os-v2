@@ -26,8 +26,9 @@ from unittest.mock import MagicMock
 import pytest
 import yaml
 
-# 触发 engine 装配(_state.agent_registry / tool_executor / profile_registry)。
-import src.engine as engine_mod  # noqa: F401
+# ADR-C1: import engine 不再装配 _state — 显式 bootstrap() 填 agent_registry /
+# tool_executor / profile_registry(agents.yaml load + tool register + memory bus)。
+import src.engine as engine_mod
 from src.agent.agent_spec import AgentsConfig
 from src.harness.capabilities import (
     ToolBridgeCapability,
@@ -38,6 +39,18 @@ from src.skills.skill_loader import SkillLoader
 from src.tools.agent_creator import create_agent
 
 _state = engine_mod._state
+
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _bootstrap_for_queen():
+    """ADR-C1: tests/conftest.py 的 autouse ``_reset_state`` 每测前清 _state,所以
+    本文件每测前重新 bootstrap(engine.bootstrap() 幂等重建单例)。这是 queen e2e
+    测的固有成本(读真 agents.yaml + 真 tool_registry)。"""
+    engine_mod.bootstrap()
+    yield
 
 
 # ─────────────────────────────────────────────────────────────────────

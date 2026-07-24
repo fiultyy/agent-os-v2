@@ -19,8 +19,13 @@ import asyncio
 import pytest
 
 # ── 导入 engine 模块(通电 _WORKFLOW_TOOLS 注册)──
-# engine 模块 import 会触发 src.services._state + ToolRegistry + 工具清单注册。
+# ADR-C1:import engine 不再触发装配 —— 显式调 bootstrap() 构建 _tool_registry +
+# _state.tool_executor(本测验工具清单注册,需要 registry 已 populate)。conftest
+# autouse fixture 每测前 _state.reset(),故模块级 bootstrap 一次供所有测复用
+# _tool_registry 引用(它是 engine 模块属性,reset 不动;但 _state.tool_executor
+# 被 reset 清空 → 用模块级局部变量持有 ToolExecutor,跨测稳定)。
 import src.engine as engine_mod
+engine_mod.bootstrap()
 from src.harness.capabilities.tool_bridge_capability import ToolBridgeCapability
 from src.tools.catalog import ToolLayer
 
