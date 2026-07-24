@@ -69,9 +69,23 @@ pub fn render_popup(f: &mut Frame, screen: Rect, p: &mut Popup) {
         .style(Style::default().bg(crate::theme::DARK.bg_surface))
         .border_style(Style::default().fg(crate::theme::DARK.border_accent));
 
-    // StatefulWidgetRef::render_ref 自带 Clear + Block + area 回填(支持后续 drag)。
+    // ADR-2(fix-e2e-bugs):tui-popup 首次渲染按 body.width() 居中,body 行过长时
+    // 弹窗宽度撑到全屏,x 落到左侧 session 列表区把 id 切断(e2e-exec-* → e2/80/57)。
+    // 修:centered 弹窗(position=None)把 tui-popup 的可用区收缩到 min(width, screen)
+    // 并全屏居中——body 再宽也被 cap,弹窗 x 不越出对话区。position=Some 绝对定位不动 screen。
+    // ponytail: 改一处全弹窗受益(raw-exec/help/delete/new/props);ceiling=Popup.width
+    // 是调用方声明的期望宽,body 超 width 会按 effective 裁剪(tui-popup 内 min)。
     use ratatui::widgets::StatefulWidgetRef;
-    popup.render_ref(screen, f.buffer_mut(), &mut p.state);
+    let effective = if p.position.is_none() {
+        let ew = p.width.min(screen.width);
+        let eh = p.height.min(screen.height);
+        let x = screen.x + screen.width.saturating_sub(ew) / 2;
+        let y = screen.y + screen.height.saturating_sub(eh) / 2;
+        Rect::new(x, y, ew, eh)
+    } else {
+        screen
+    };
+    popup.render_ref(effective, f.buffer_mut(), &mut p.state);
 
     // 绝对定位:首次渲染后 area 已回填,挪到 position(仅一次)。
     if !p.placed {
