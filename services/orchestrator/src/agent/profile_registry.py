@@ -158,7 +158,7 @@ class ProfileRegistry:
         resolve_workspace(spec)) 并 register。workspace 文件缺失由 load_from_files 静默
         skip(既有行为);单个 agent 加载异常 warning 后跳过,不 raise(不阻塞整体启动)。
         """
-        for spec_id, spec in registry._agents.items():
+        for spec_id, spec in registry.iter_agents():
             try:
                 workspace_path = str(registry.resolve_workspace(spec))
                 profile = self.load_from_files(
