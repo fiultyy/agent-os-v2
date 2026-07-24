@@ -143,7 +143,7 @@ def bootstrap(config_path: str | None = None) -> None:
         _state.profile_registry.load_all(_state.agent_registry)
         logger.info(
             "ProfileRegistry wired (agents=%s)",
-            sorted(_state.agent_registry._agents.keys()),
+            sorted(aid for aid, _ in _state.agent_registry.iter_agents()),
         )
     except Exception:
         logger.warning("ProfileRegistry init failed — degrading to None", exc_info=True)
