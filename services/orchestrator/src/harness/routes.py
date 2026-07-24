@@ -471,6 +471,10 @@ async def _build_native_session(
     from .mcp_config import load_global_mcp_servers
     global_mcp = load_global_mcp_servers()
     agent = build_native_agent(
+        # ADR-1:接 AgentSpec.instructions(79e9e92 引入的 dead 字段)。空串兜底
+        # 维持 default 旧行为;非空透传进 Agent(instructions=...) base 段。cache
+        # 耦合见 native_agent.build_native_agent docstring(instructions 必须静态)。
+        instructions=spec.instructions or "",
         capabilities=caps,
         model_settings={
             "anthropic_cache_instructions": "5m",

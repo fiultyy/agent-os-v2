@@ -644,6 +644,53 @@ def test_build_native_session_skills_filtered_by_spec(monkeypatch, tmp_path):
     assert skill_ids == ["ao2-architecture"], skill_ids
 
 
+def test_build_native_session_wires_spec_instructions(monkeypatch, tmp_path):
+    """ADR-1:AgentSpec.instructions dead 字段接线 → build_native_agent 收到 instructions=。
+
+    两分支:
+      - 非空 spec.instructions → 透传(spec.instructions 原样进 kw)
+      - None spec.instructions → 兜底 ""(维持 default 旧行为,不 crash)
+    """
+    import asyncio
+    from src.agent.agent_registry import AgentRegistry
+    from src.agent.agent_spec import AgentSpec
+    from src.harness import routes as r
+
+    repo = tmp_path / "repo"; repo.mkdir()
+    monkeypatch.setenv("AO2_REPO_ROOT", str(repo))
+
+    captured = {}
+
+    def spy_build(*a, **kw):
+        captured["instructions"] = kw.get("instructions")
+        from unittest.mock import MagicMock
+        ag = MagicMock()
+        ag._cap_instructions = []
+        ag.model_settings = kw.get("model_settings") or {}
+        return ag
+    import src.harness.native_agent as _na
+    monkeypatch.setattr(_na, "build_native_agent", spy_build)
+
+    # 分支 1:非空 instructions 透传
+    spec_nonempty = AgentSpec(id="native", default=True, cwds=[],
+                              instructions="You are a help agent.")
+    from src.agent.agent_registry import AgentRegistry as _AR
+    reg = _AR(); reg._agents = {"native": spec_nonempty}; reg._default_id = "native"
+    _wire_lightweight_native(monkeypatch, agent_registry=reg)
+    asyncio.run(r._build_native_session("sinstr", agent_id="native"))
+    assert captured["instructions"] == "You are a help agent.", captured["instructions"]
+
+    # 分支 2:None instructions → "" 兜底(default 旧行为,不 crash)
+    spec_none = AgentSpec(id="native", default=True, cwds=[], instructions=None)
+    reg2 = _AR(); reg2._agents = {"native": spec_none}; reg2._default_id = "native"
+    import src.services._state as _st
+    monkeypatch.setattr(_st, "agent_registry", reg2)
+    captured.clear()
+    asyncio.run(r._build_native_session("sempty", agent_id="native"))
+    assert captured["instructions"] == "", captured["instructions"]
+
+
+
 def test_resolve_relative_uses_active_cwd_absolute_passthrough(monkeypatch, tmp_path):
     """set_active_cwd(label) 后相对路径 _resolve 走新 cwd;绝对路径直通不变。"""
     from pathlib import Path

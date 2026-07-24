@@ -116,6 +116,14 @@ def build_native_agent(
     覆盖/换文本通道(ADR line114 A/B):去重守卫下,调用方传 ``EngineeringDisciplineCapability``
     实例即覆盖默认(原 ad-hoc override);capability 的 ``enabled`` / ``discipline_text`` 字段
     + ``AO2_DISCIPLINE_DISABLED`` env 旋钮把 ad-hoc 正式化(进程级读一次)。
+
+    cache 隐性耦合(ADR-1):``instructions`` 透传 ``Agent(instructions=...)`` base 段,pydantic-ai
+    ``_get_instructions`` 把 base+cap instructions ``\\n``.join 成单个
+    ``InstructionPart(dynamic=False)``,整体被 ``anthropic_cache_instructions="5m"`` 整段缓存。
+    故 **``instructions`` 必须永远静态字符串** —— 若改 ``dynamic=True``(或换 callable/callable-with-state),
+    整段(含 cap)翻 dynamic 丢 cache 无告警(**传染性**,与 ``EngineeringDisciplineCapability``
+    模块 docstring 同款)。来源 = agents.yaml 静态字段(非文件、非 dynamic),高频变动内容走 defer
+    skill 而非 instructions。
     """
     caps = list(capabilities) if capabilities else []
     if not any(isinstance(c, EngineeringDisciplineCapability) for c in caps):
