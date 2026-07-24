@@ -893,6 +893,33 @@ async def list_claw_agents() -> Dict[str, Any]:
         return {"agents": default_agents, "default": default_default}
 
 
+@router.get("/agent-os-v2/agents")
+async def list_ao2_agents() -> Dict[str, Any]:
+    """List agent-os-v2 registry agents for the TUI new-session picker (ADR-3).
+
+    Returns ``{agents: [{id, name, default}]}`` projected from
+    ``_state.agent_registry._agents`` (id/name/default fields). ``default`` is
+    True only for ``_default_id``. registry None (engine not booted) →
+    ``{agents: []}`` so the TUI degrades gracefully without crashing.
+
+    Contract is fixed (worker-C T1/T2 parallel): front-end parses this exact
+    shape. name None → fall back to id (picker always shows something).
+    """
+    from src.services import _state
+    registry = _state.agent_registry
+    if registry is None:
+        return {"agents": []}
+    default_id = registry._default_id
+    out: list[Dict[str, Any]] = []
+    for aid, spec in registry._agents.items():
+        out.append({
+            "id": aid,
+            "name": spec.name or aid,
+            "default": aid == default_id,
+        })
+    return {"agents": out}
+
+
 @router.get("/claude-code/cwds")
 async def list_cc_cwds() -> Dict[str, Any]:
     """List deduped cwds of registered claude-code sessions for the picker.

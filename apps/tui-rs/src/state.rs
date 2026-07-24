@@ -303,6 +303,18 @@ struct AgentsResp { #[allow(dead_code)] default: Option<String>, agents: Vec<Str
 #[derive(Deserialize)]
 struct CwdsResp { #[allow(dead_code)] default: Option<String>, cwds: Vec<String> }
 
+// ADR-3: agent-os-v2 picker 源。contract {agents:[{id,name,default}]}(与 claw 的
+// AgentsResp 不同——claw 是 [str],ao2 是 [{id,name,default}])。name/default 仅展示用,
+// 提交时只用 id(POST /h/agent-os-v2/sessions {agent_id})。
+#[derive(Deserialize, Clone)]
+pub struct Ao2Agent {
+    pub id: String,
+    pub name: String,
+    pub default: bool,
+}
+#[derive(Deserialize)]
+struct Ao2AgentsResp { agents: Vec<Ao2Agent> }
+
 /// GET /h/claw/agents → agent 列表。失败返 vec!["main"]。
 pub fn fetch_claw_agents() -> Vec<String> {
     ureq::get(&format!("{}/h/claw/agents", ORCH))
@@ -331,6 +343,15 @@ pub fn fetch_cc_cwds() -> Vec<String> {
         .call().ok()
         .and_then(|r| r.into_json::<CwdsResp>().ok())
         .map(|a| a.cwds)
+        .unwrap_or_default()
+}
+/// ADR-3: GET /h/agent-os-v2/agents → registry agent 列表(picker 源)。
+/// 失败返空 Vec(new popup 显空列表提示,不崩)。default 项用于预选。
+pub fn fetch_ao2_agents() -> Vec<Ao2Agent> {
+    ureq::get(&format!("{}/h/agent-os-v2/agents", ORCH))
+        .call().ok()
+        .and_then(|r| r.into_json::<Ao2AgentsResp>().ok())
+        .map(|a| a.agents)
         .unwrap_or_default()
 }
 /// POST /h/claude-code/sessions {cwd} → session_id。失败返 None。
@@ -914,6 +935,10 @@ pub struct App {
     pub new_candidates: Vec<String>,
     /// new 弹窗 picker 选中索引。
     pub new_idx: usize,
+    /// ADR-3:AoV2 picker 候选(GET /h/agent-os-v2/agents)。与 new_candidates
+    /// 并列——claw/cc 用 Vec<String>,ao2 需 name+default 展示,故独立字段。
+    /// new_idx 复用做选中位(与 claw/cc 共享)。
+    pub new_ao2_agents: Vec<Ao2Agent>,
     /// new 弹窗 cc 自由输入 cwd(insert 模式键入)。
     pub new_cc_input: String,
     /// delete 确认弹窗激活态:Some(sid)=开,等待 y/N。
@@ -1044,6 +1069,7 @@ impl App {
             context_menu: None,
             new_candidates: vec![],
             new_idx: 0,
+            new_ao2_agents: vec![],
             new_cc_input: String::new(),
             delete_popup: None,
             popup_clickmap: ClickMap::new(),
@@ -1822,14 +1848,22 @@ impl App {
                 true
             }
             KeyCode::Char('o') => {
-                // 选 agent-os-v2(自研 native harness):无需 agent/cwd,服务端自动生成 sid。
+                // ADR-3:选 agent-os-v2 → 拉 registry agents,预选 default 项。
+                // 不可达时 new_ao2_agents 空,do_new_session 显提示(不崩)。
                 self.new_popup = Some(NewKind::AoV2);
-                self.new_candidates = vec![];
-                self.new_idx = 0;
+                self.new_ao2_agents = fetch_ao2_agents();
+                self.new_idx = self.new_ao2_agents.iter().position(|a| a.default)
+                    .unwrap_or(0);
                 true
             }
             KeyCode::Char('j') | KeyCode::Down => {
-                if self.new_popup.is_some() && self.new_idx + 1 < self.new_candidates.len() {
+                // ADR-3:AoV2 候选在 new_ao2_agents(非 new_candidates),故按 picker
+                // 类型取对应 len,否则 AoV2 永远 len=0 → j/Down 失效(只鼠标能选)。
+                let len = match self.new_popup {
+                    Some(NewKind::AoV2) => self.new_ao2_agents.len(),
+                    _ => self.new_candidates.len(),
+                };
+                if self.new_popup.is_some() && self.new_idx + 1 < len {
                     self.new_idx += 1;
                 }
                 true
@@ -1901,9 +1935,17 @@ impl App {
                 }
             }
             Some(NewKind::AoV2) => {
-                // agent-os-v2:native in-process pydantic-ai Agent(自研 harness)。
-                // POST 空 body,服务端 routes.py 自动生成 12-hex sid(无需 cwd/agent)。
-                if let Some(sid) = create_session("agent-os-v2", None) {
+                // ADR-3:传选中的 agent_id(替换原硬编 None)。服务端 _build_native_session
+                // 用 registry.get(agent_id) 取 spec(per-agent profile/skills/cwd)。
+                // 候选空(或che 不可达)→ 显提示,不盲目 POST(避免服务端 default 兜底创建
+                // 出用户没选的 agent)。
+                let agent_id = self.new_ao2_agents.get(self.new_idx).map(|a| a.id.clone());
+                if agent_id.is_none() {
+                    self.turn_status = Some(
+                        "(无 agent 候选——orche :8001 不可达?按 o 重试)".to_string());
+                    return;
+                }
+                if let Some(sid) = create_session("agent-os-v2", agent_id.as_deref()) {
                     self.turn_status = Some(format!("created ao session: {}", trunc(&sid, 16)));
                     self.close_popup("new");
                     self.new_popup = None;
@@ -1995,10 +2037,11 @@ impl App {
                 self.new_cc_input.clear();
             }
             702 => {
-                // agent-os-v2:native harness,无候选(服务端自动生成 12-hex sid)。
+                // ADR-3:点 ao tab → 拉 registry agents,预选 default 项。
                 self.new_popup = Some(NewKind::AoV2);
-                self.new_candidates = vec![];
-                self.new_idx = 0;
+                self.new_ao2_agents = fetch_ao2_agents();
+                self.new_idx = self.new_ao2_agents.iter().position(|a| a.default)
+                    .unwrap_or(0);
             }
             790 => self.do_new_session(),
             791 => {
@@ -2014,6 +2057,13 @@ impl App {
             n if (720..730).contains(&n) => {
                 let i = n - 720;
                 if i < self.new_candidates.len() {
+                    self.new_idx = i;
+                }
+            }
+            n if (730..740).contains(&n) => {
+                // ADR-3:AoV2 picker 候选行点击(与 claw/cc 同模式:new_idx 选中)。
+                let i = n - 730;
+                if i < self.new_ao2_agents.len() {
                     self.new_idx = i;
                 }
             }
@@ -4459,16 +4509,18 @@ mod tests {
         assert_eq!(app.new_cc_input, "/home/x");
     }
 
-    /// new 弹窗 o=agent-os-v2 选(自研 native harness,无候选,服务端自动生成 sid)。
+    /// new 弹窗 o=agent-os-v2 选(ADR-3:拉 registry agents,orche 离线时 graceful 空)。
     #[test]
-    fn new_popup_ao_pick_sets_no_candidates() {
+    fn new_popup_ao_pick_fetches_agents_or_empty() {
         let mut app = App::new(crate::kitty::detect());
         app.open_new_popup();
         let handled = app.handle_popup_key(&KeyEvent::new(
             KeyCode::Char('o'), crossterm::event::KeyModifiers::empty()));
         assert!(handled, "new 弹窗 o 被消费");
         assert_eq!(app.new_popup, Some(NewKind::AoV2));
-        assert!(app.new_candidates.is_empty(), "ao 无候选");
+        // 单测环境 orche :8001 未启动 → fetch_ao2_agents 返空(graceful,不 panic)。
+        // 真 runtime orche 在线 → new_ao2_agents 含 registry agents(help default)。
+        assert!(app.new_ao2_agents.is_empty(), "orche 离线时 ao 候选空(graceful)");
     }
 
     // ── IT7 ② 弹窗可点击 ────────────────────────────────────────────
@@ -4483,10 +4535,63 @@ mod tests {
         // 701 = 选 cc。
         app.handle_new_popup_click(701);
         assert_eq!(app.new_popup, Some(NewKind::Cc));
-        // 702 = 选 agent-os-v2(自研 native harness,无候选,服务端自动生成 sid)。
+        // 702 = 选 agent-os-v2(ADR-3:拉 registry agents;orche 离线→空)。
         app.handle_new_popup_click(702);
         assert_eq!(app.new_popup, Some(NewKind::AoV2));
-        assert!(app.new_candidates.is_empty(), "ao 无候选");
+        assert!(app.new_ao2_agents.is_empty(), "orche 离线→ao 候选空");
+    }
+
+    /// ADR-3:AoV2 picker 候选行点击(730+i)更新 new_idx;候选空时显提示不 POST。
+    #[test]
+    fn new_popup_aov2_picker_click_and_empty_guard() {
+        let mut app = App::new(crate::kitty::detect());
+        app.open_new_popup();
+        app.new_popup = Some(NewKind::AoV2);
+        // 注入 2 个假候选(orche 离线时 fetch 返空,手动填测 picker 逻辑)。
+        app.new_ao2_agents = vec![
+            Ao2Agent { id: "main".into(), name: "Main".into(), default: true },
+            Ao2Agent { id: "help".into(), name: "向导".into(), default: false },
+        ];
+        app.new_idx = 0; // default 预选 main
+        // 点 731 = 第 2 行(help)→ new_idx 切到 1。
+        app.handle_new_popup_click(731);
+        assert_eq!(app.new_idx, 1, "730+i 点击切换 AoV2 picker 选中");
+        // 点越界 732 → 不崩(idx 不变)。
+        app.handle_new_popup_click(732);
+        assert_eq!(app.new_idx, 1, "越界 730+i 不改 idx");
+        // 候选空时 do_new_session 显提示,不 POST(不创建 session)。
+        app.new_ao2_agents.clear();
+        let before = app.flat.len();
+        app.do_new_session();
+        assert!(app.turn_status.as_deref().unwrap_or("").contains("无 agent 候选"),
+            "候选空→显提示不 POST");
+        assert_eq!(app.flat.len(), before, "候选空→不创建 session");
+    }
+
+    /// ADR-3 regression:AoV2 picker 键盘 j/Down 必须能动(原 bug:new_candidates
+    /// 空致条件永假,j 失效只能鼠标选)。注入 2 候选,j 0→1,k 1→0。
+    #[test]
+    fn new_popup_aov2_jk_moves_picker() {
+        let mut app = App::new(crate::kitty::detect());
+        app.open_new_popup();
+        app.new_popup = Some(NewKind::AoV2);
+        app.new_ao2_agents = vec![
+            Ao2Agent { id: "main".into(), name: "Main".into(), default: true },
+            Ao2Agent { id: "help".into(), name: "向导".into(), default: false },
+        ];
+        app.new_idx = 0;
+        // j → idx 1(能下移;旧 bug 卡在 0)。
+        app.handle_popup_key(&KeyEvent::new(
+            KeyCode::Char('j'), crossterm::event::KeyModifiers::empty()));
+        assert_eq!(app.new_idx, 1, "AoV2 picker j 必须下移(原 bug 失效)");
+        // 再 j → 越界不动(只有 2 候选,idx 1 已末)。
+        app.handle_popup_key(&KeyEvent::new(
+            KeyCode::Char('j'), crossterm::event::KeyModifiers::empty()));
+        assert_eq!(app.new_idx, 1, "末候选 j 越界不动");
+        // k → idx 0(上移)。
+        app.handle_popup_key(&KeyEvent::new(
+            KeyCode::Char('k'), crossterm::event::KeyModifiers::empty()));
+        assert_eq!(app.new_idx, 0, "AoV2 picker k 上移");
     }
 
     #[test]

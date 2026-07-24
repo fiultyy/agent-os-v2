@@ -1325,8 +1325,18 @@ fn update_action_popup_bodies(app: &mut App) {
             }
         }
         Some(NewKind::AoV2) => {
-            lines.push(Line::from("agent-os-v2:自研 native harness(无需 agent/cwd)"));
-            lines.push(Line::from("Enter 创建(服务端自动生成 session_id)"));
+            // ADR-3:列出 registry agents 让用户选(default 预选 + ★ 标记)。
+            // 风格匹配 claw/cc picker(▸ 选中 + 候选行)。空候选 = orche 不可达。
+            lines.push(Line::from("agent-os-v2 agents:"));
+            if app.new_ao2_agents.is_empty() {
+                lines.push(Line::from("(无候选——orche :8001 不可达?重开 tab 重试)"));
+            } else {
+                for (i, a) in app.new_ao2_agents.iter().enumerate() {
+                    let mark = if i == app.new_idx { "▸" } else { " " };
+                    let star = if a.default { " ★" } else { "" };
+                    lines.push(Line::from(format!("{} {}{}  [{}]", mark, a.name, star, a.id)));
+                }
+            }
         }
     }
     // 末行:Create/Cancel(790/791),色块 + 公用描边。
@@ -1378,7 +1388,9 @@ fn register_new_popup_clickmap(app: &mut App) {
         let id = match app.new_popup {
             Some(NewKind::Claw) => 710 + (i - cand_start),
             Some(NewKind::Cc) => 720 + (i - cand_start),
-            Some(NewKind::AoV2) => continue, // ao 无候选行
+            // ADR-3:AoV2 候选行注册 730+i(与 claw 710/cc 720 同模式)。header 行
+            // i=cand_start-1 不含(被 i>=cand_start skip 过滤)。
+            Some(NewKind::AoV2) => 730 + (i - cand_start),
             None => continue,
         };
         app.popup_clickmap.register(Rect::new(inner_x, y, inner_w, 1), id);
