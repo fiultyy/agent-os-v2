@@ -76,3 +76,24 @@ def test_observe_composes_with_other_capability_without_losing_tick_closure() ->
     # observe 仍收到完整闭环(不被 guardrail capability 干扰)
     assert em.emitted[0]["event_type"] == "tick_started"
     assert em.emitted[-1]["event_type"] == "tick_completed"
+
+
+def test_observe_emits_token_delta_during_streaming() -> None:
+    """验证 ObserveCapability 在 Agent.run() 中 emit token_delta。
+
+    TestModel 返回多段 delta，每个 delta 应触发一条 token_delta 事件。
+    """
+    em = _StubEmitter()
+    agent = Agent(
+        TestModel(),
+        capabilities=[ObserveCapability(emitter=em, harness_id="h", session_id="s")],
+    )
+    result = asyncio.run(agent.run("用三个词说你好"))
+    # 验证 token_delta 事件存在（TestModel 模拟流式返回）
+    delta_events = [e for e in em.emitted if e["event_type"] == "token_delta"]
+    assert len(delta_events) > 0, "应至少有一条 token_delta"
+    # 验证 delta_text 非空
+    assert all(e["data"]["delta_text"] for e in delta_events)
+    # 验证 tick_completed 包含完整 response
+    completed = [e for e in em.emitted if e["event_type"] == "tick_completed"][0]
+    assert completed["data"]["response"] == result.output
