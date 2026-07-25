@@ -14,7 +14,6 @@ import pytest
 from src.tools.guardrail import Guardrail
 from src.tools.executor import ToolExecutor
 from src.tools.registry import ToolRegistry
-from src.tools.catalog import ToolLayer
 
 
 # ── Guardrail.check_output dict redaction (was: non-str → return True) ──
@@ -84,7 +83,7 @@ async def test_executor_runs_registered_file_read_with_path_arg() -> None:
     registry = ToolRegistry()
     registry.register(
         "file_read", file_tool.file_read,
-        description="read", parameters={"path": {}}, layer=ToolLayer.PRIMITIVE,
+        description="read", parameters={"path": {}},
     )
     executor = ToolExecutor(registry)
 
@@ -92,23 +91,3 @@ async def test_executor_runs_registered_file_read_with_path_arg() -> None:
     assert result["status"] == "success"            # tool ran (file-missing is internal)
     assert result["output"]["success"] is False
     assert result["error"] is None
-
-
-# ── ToolRegistry catalog mirror (the mechanism the清单制 register depends on) ──
-
-
-def test_registry_register_mirrors_into_catalog() -> None:
-    """engine.py relies on register() also populating the L3.4 catalog so the
-    logged list_tools/catalog counts agree."""
-    registry = ToolRegistry()
-
-    async def _noop(**_):
-        return {}
-
-    registry.register("t1", _noop, layer=ToolLayer.PRIMITIVE)
-    registry.register("t2", _noop, layer=ToolLayer.SKILL)
-
-    assert len(registry.list_tools()) == 2
-    assert registry.get_catalog().count() == 2
-    layers = {e.layer for e in registry.get_catalog().list_all()}
-    assert layers == {ToolLayer.PRIMITIVE, ToolLayer.SKILL}

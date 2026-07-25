@@ -27,7 +27,6 @@ import pytest
 import src.engine as engine_mod
 engine_mod.bootstrap()
 from src.harness.capabilities.tool_bridge_capability import ToolBridgeCapability
-from src.tools.catalog import ToolLayer
 
 _tool_registry = engine_mod._tool_registry
 _tool_executor = engine_mod._state.tool_executor
@@ -45,16 +44,6 @@ def test_workflow_run_registered_unprefixed():
     params = tool["parameters"]
     assert params["required"] == ["nodes"]
     assert params["properties"]["nodes"]["minItems"] == 1
-
-
-def test_workflow_run_registered_at_composite_layer():
-    """layer = ToolLayer.COMPOSITE(L3.3)。catalog.entries 是 dict(name → entry)。"""
-    entries = _tool_registry.get_catalog().entries
-    wf_entry = entries.get("workflow_run")
-    assert wf_entry is not None, "workflow_run not in catalog"
-    assert wf_entry.layer == ToolLayer.COMPOSITE, (
-        f"workflow_run layer={wf_entry.layer} expected COMPOSITE"
-    )
 
 
 def test_v2_prefixed_name_not_registered():
@@ -202,14 +191,6 @@ def test_workflow_loop_registered_unprefixed():
     # max_iter / dry_limit / seen_key_fn 约束来自 WORKFLOW_LOOP_SCHEMA(design §2.2.2)
     assert params["properties"]["max_iter"]["maximum"] == 100
     assert params["properties"]["seen_key_fn"]["enum"] == ["content_hash", "label"]
-
-
-def test_workflow_loop_registered_at_composite_layer():
-    """layer = ToolLayer.COMPOSITE(与 workflow_run 同层)。"""
-    entries = _tool_registry.get_catalog().entries
-    wf_entry = entries.get("workflow_loop")
-    assert wf_entry is not None, "workflow_loop not in catalog"
-    assert wf_entry.layer == ToolLayer.COMPOSITE
 
 
 def test_workflow_loop_v2_prefixed_name_not_registered():
