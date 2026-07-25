@@ -171,14 +171,62 @@ impl WsManager {
     }
 }
 
-/// 单 key WS 读循环(子线程)。阻塞 read → 解析 → mpsc send。
-/// 连接断开/出错 → 发 WsMsg::Error → 线程退出(manager 已移除 key 不重连,
-/// 主 loop 下次 subscribe 同 key 会重建)。
+/// 单 key WS 读循环(子线程)。断连自动重连(指数 backoff 封顶 30s,曾连上则重置);
+/// closing flag → 退出(unsubscribe)。线程不退出除非 closing/主 loop 断 → subs[key] 持续
+/// 有效(修 zombie JoinHandle:旧版断连线程退但 manager 不 remove key → 再 subscribe 被
+/// idempotent skip 永不重连;注释"下次 subscribe 重建"与 idempotent 矛盾)。
 fn ws_loop(harness_type: &str, session_id: &str, key: &str, tx: &Sender<WsMsg>, closing: Arc<AtomicBool>) {
     let url = format!(
         "{}/ws/subscribe?harness_type={}&session_id={}",
         OBSERVE_WS, harness_type, session_id
     );
+    // ponytail: 分流按 harness_type 字符串匹配(observe 广播同 ht 订阅;第 4 类再抽枚举)。
+    let is_flow = harness_type == "flow";
+    let is_memory = harness_type == "memory";
+    let is_orch = harness_type == "orchestrate";
+    let flow_id = session_id.to_string();
+    let mut backoff = Duration::from_secs(1);
+    loop {
+        if closing.load(Ordering::Relaxed) {
+            break;
+        }
+        let (end, connected_once) = run_ws_session(
+            &url, key, tx, &closing, is_flow, is_memory, is_orch, &flow_id, session_id,
+        );
+        if connected_once {
+            backoff = Duration::from_secs(1); // 曾连上(网络抖动),重置 backoff
+        }
+        match end {
+            SessionEnd::Closed => break, // closing/user unsubscribe/主 loop 断
+            SessionEnd::Disconnected => {
+                // 断连/连接失败,backoff 后重连(发 Error 让主 loop 知;不退出线程)。
+                let _ = tx.send(WsMsg::Error {
+                    key: key.to_string(),
+                    msg: format!("disconnected, reconnect in {:?}", backoff),
+                });
+            }
+        }
+        if closing.load(Ordering::Relaxed) {
+            break;
+        }
+        sleep_with_cancel(backoff, &closing);
+        backoff = next_backoff(backoff);
+    }
+}
+
+/// 单次 WS 会话:connect + read 循环。返(结束原因, 是否曾连上收到消息)。
+/// 断连返 Disconnected(外层 backoff 重连);closing/主 loop 断返 Closed(外层退出)。
+fn run_ws_session(
+    url: &str,
+    key: &str,
+    tx: &Sender<WsMsg>,
+    closing: &AtomicBool,
+    is_flow: bool,
+    is_memory: bool,
+    is_orch: bool,
+    flow_id: &str,
+    session_id: &str,
+) -> (SessionEnd, bool) {
     // 手动建 TcpStream + set_read_timeout(绕过 connect 的 MaybeTlsStream,拿底层
     // TcpStream 控制 → read 可中断检查 closing/ping)。修复 P3 minor 1/2。
     // ponytail: host 硬编码 localhost:8002(与 OBSERVE_WS 一致;改 OBSERVE_WS 需同步)。
@@ -186,36 +234,32 @@ fn ws_loop(harness_type: &str, session_id: &str, key: &str, tx: &Sender<WsMsg>, 
         Ok(t) => t,
         Err(e) => {
             let _ = tx.send(WsMsg::Error { key: key.to_string(), msg: format!("tcp connect: {}", e) });
-            return;
+            return (SessionEnd::Disconnected, false);
         }
     };
     let _ = tcp.set_read_timeout(Some(Duration::from_millis(500)));
-    let (mut socket, _resp) = match client::client(&url, tcp) {
+    let (mut socket, _resp) = match client::client(url, tcp) {
         Ok(p) => p,
         Err(e) => {
             let _ = tx.send(WsMsg::Error { key: key.to_string(), msg: format!("ws connect: {}", e) });
-            return;
+            return (SessionEnd::Disconnected, false);
         }
     };
-    // ponytail: 分流按 harness_type 字符串匹配(observe 广播同 ht 订阅;第 4 类再抽枚举)。
-    let is_flow = harness_type == "flow";
-    let is_memory = harness_type == "memory";
-    let is_orch = harness_type == "orchestrate";
-    let flow_id = session_id.to_string();
     let mut last_ping = Instant::now();
-
+    let mut connected_once = false;
     loop {
         if closing.load(Ordering::Relaxed) {
-            break; // unsubscribe → graceful close(socket drop 发 close frame)
+            return (SessionEnd::Closed, connected_once); // unsubscribe → graceful close
         }
         match socket.read() {
             Ok(msg) => {
+                connected_once = true;
                 // tungstenite 0.26: into_text() → Result<Utf8Bytes, Error>。
                 if let Ok(text) = msg.into_text() {
                     if let Ok(p) = serde_json::from_str::<WsPayload>(&text) {
                         let ev: ObserveEvent = p.into();
                         let m = if is_flow {
-                            WsMsg::FlowEvent { flow_id: flow_id.clone(), ev }
+                            WsMsg::FlowEvent { flow_id: flow_id.to_string(), ev }
                         } else if is_memory {
                             WsMsg::MemoryEvent { ev }
                         } else if is_orch {
@@ -224,20 +268,22 @@ fn ws_loop(harness_type: &str, session_id: &str, key: &str, tx: &Sender<WsMsg>, 
                             WsMsg::Event { key: key.to_string(), ev }
                         };
                         if tx.send(m).is_err() {
-                            break; // 主 loop 退出(channel 断)
+                            return (SessionEnd::Closed, connected_once); // 主 loop 退出(channel 断)
                         }
                     }
                     // 非 ObserveEvent JSON(如 {"type":"pong"})忽略。
                 }
             }
-            Err(tungstenite::Error::ConnectionClosed) | Err(tungstenite::Error::AlreadyClosed) => break,
+            Err(tungstenite::Error::ConnectionClosed) | Err(tungstenite::Error::AlreadyClosed) => {
+                return (SessionEnd::Disconnected, connected_once);
+            }
             Err(tungstenite::Error::Io(ref e))
                 if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut =>
             {
                 // read 超时(set_read_timeout)→ 检查 closing + ping 交错。
                 if closing.load(Ordering::Relaxed) {
-                    break;
+                    return (SessionEnd::Closed, connected_once);
                 }
                 if last_ping.elapsed() >= PING_INTERVAL {
                     let _ = socket.send(Message::Ping(vec![].into()));
@@ -250,9 +296,35 @@ fn ws_loop(harness_type: &str, session_id: &str, key: &str, tx: &Sender<WsMsg>, 
                     key: key.to_string(),
                     msg: format!("read: {}", e),
                 });
-                break;
+                return (SessionEnd::Disconnected, connected_once);
             }
         }
+    }
+}
+
+/// WS 会话结束原因。
+enum SessionEnd {
+    /// closing/user unsubscribe/主 loop 退出(不重连)。
+    Closed,
+    /// 断连/连接失败(外层 backoff 重连)。
+    Disconnected,
+}
+
+/// 指数 backoff(1→2→4→8→16→30 封顶;防 observe 长断后重连风暴)。
+fn next_backoff(current: Duration) -> Duration {
+    (current * 2).min(Duration::from_secs(30))
+}
+
+/// backoff sleep,可被 closing 中断(500ms 粒度;unsubscribe 快速响应)。
+fn sleep_with_cancel(d: Duration, closing: &AtomicBool) {
+    let step = Duration::from_millis(500);
+    let mut slept = Duration::ZERO;
+    while slept < d {
+        if closing.load(Ordering::Relaxed) {
+            break;
+        }
+        thread::sleep(step.min(d - slept));
+        slept += step;
     }
 }
 
@@ -303,6 +375,25 @@ mod tests {
             let (cmd_tx, _cmd_rx) = mpsc::channel::<WsCmd>();
             Self { cmd_tx, rx, handle: None }
         }
+    }
+
+    #[test]
+    fn next_backoff_caps_at_30s() {
+        // 指数退避:1→2→4→8→16→30(封顶)→30。
+        assert_eq!(next_backoff(Duration::from_secs(1)), Duration::from_secs(2));
+        assert_eq!(next_backoff(Duration::from_secs(8)), Duration::from_secs(16));
+        assert_eq!(next_backoff(Duration::from_secs(16)), Duration::from_secs(30));
+        assert_eq!(next_backoff(Duration::from_secs(30)), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn sleep_with_cancel_interrupts_on_closing() {
+        // closing=true → 首个 while 检查即 break(不 sleep)。
+        let closing = Arc::new(AtomicBool::new(true));
+        let start = Instant::now();
+        sleep_with_cancel(Duration::from_secs(30), &closing);
+        assert!(start.elapsed() < Duration::from_secs(1),
+            "closing=true 应立即中断 sleep,elapsed={:?}", start.elapsed());
     }
 
     #[test]
