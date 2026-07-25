@@ -119,8 +119,21 @@ def test_ensure_client_lazy_restores_store_only(store, monkeypatch):
 
 
 def test_ensure_client_returns_none_when_not_in_store(store):
-    # store 也无 → None(调用方 404)
+    # store 也无 → None(调用方 404)。cc 保持显式 create(subprocess-per-turn 不宜静默 spawn)
     assert asyncio.run(routes._ensure_client("claude-code", "ghost")) is None
+
+
+def test_ensure_client_claw_not_in_store_auto_creates(store, monkeypatch):
+    # claw + store 也无(observe-only session_id,gateway 有但未记录)→ 委托 _reconnect_claw
+    # auto-create(补 native 已有兜底到 claw 路径;turn/spawn/fork 共用 _ensure_client 均受益)
+    reconnected = {}
+    async def fake_reconnect(sid):
+        reconnected["sid"] = sid
+        return MagicMock(running=True)
+    monkeypatch.setattr(routes, "_reconnect_claw", fake_reconnect)
+    client = asyncio.run(routes._ensure_client("claw", "agent:foo:main"))
+    assert client is not None
+    assert reconnected["sid"] == "agent:foo:main"
 
 
 def test_delete_store_only_orphan_cleans_store(store, monkeypatch):

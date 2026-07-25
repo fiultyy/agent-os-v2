@@ -114,6 +114,14 @@ async def _ensure_client(harness_type: str, session_id: str) -> Optional[Any]:
         return client
     row = _store.get(harness_type, session_id)
     if row is None:
+        # store 无(observe-only session_id,gateway 有但未记录)→ claw 惰性 auto-create
+        # via _reconnect_claw(推断 agent + _create_claw + 落库,见其 docstring 同款
+        # observe-only 场景);cc 保持显式 create(返 None → 404,subprocess-per-turn
+        # 不宜静默 spawn)。补 native 已有的 auto-create 兜底(routes.py trigger_turn
+        # native 分支)到 claw 路径 — _ensure_client 是 turn/spawn/fork 共用 chokepoint,
+        # 一处改所有调用方受益。
+        if harness_type == "claw":
+            return await _reconnect_claw(session_id)
         return None
     try:
         if harness_type == "claude-code":
