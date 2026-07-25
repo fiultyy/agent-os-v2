@@ -74,7 +74,7 @@ async def store_memory(req: StoreMemoryRequest, origin: str = "foreground") -> d
             session_id=req.session_id,
             origin=mem_origin.value,
         )
-        result = await _state.memory_event_bus.emit(EventType.INGEST, ctx)
+        result = await _state.fire(EventType.INGEST, ctx)
         if result is not None:
             # Mark the just-ingested memory ``metadata.extracted=True`` so the
             # idle-trigger IngestorAgent pass does not re-extract it as pending.
@@ -165,7 +165,7 @@ async def list_memories(
         ctx = RecallContext(
             query=query, agent_id=agent_id, session_id=session_id, scope=scope, top_k=top_k,
         )
-        ranked = await _state.memory_event_bus.emit(EventType.RECALL, ctx)
+        ranked = await _state.fire(EventType.RECALL, ctx)
         if ranked is not None:
             return [
                 _mem_to_dict(r["item"], score=r["score"]) for r in ranked
@@ -696,7 +696,7 @@ async def notify_maintenance(req: MemoryNotifyRequest) -> dict:
         agent_ids = [req.agent_id] if req.agent_id else list(_state.agents.keys())
         for aid in agent_ids:
             ctx = CurateContext(agent_id=aid, scope="all")
-            asyncio.create_task(_state.memory_event_bus.emit(EventType.CURATE, ctx))
+            asyncio.create_task(_state.fire(EventType.CURATE, ctx))
         curate_triggered = bool(agent_ids)
 
     return {

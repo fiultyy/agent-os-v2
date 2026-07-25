@@ -685,11 +685,11 @@ async def trigger_turn(
         # ADR-2 H2:TURN_SUBMIT(入口,最早)+ TURN_START(run 前,与 /v1 对称)。
         _agent_id = rec.get("spec_id", "")
         from src.services import _state
-        await _state.memory_event_bus.emit(
+        await _state.fire(
             EventType.TURN_SUBMIT,
             TurnContext(agent_id=_agent_id, session_id=session_id),
         )
-        await _state.memory_event_bus.emit(
+        await _state.fire(
             EventType.TURN_START,
             TurnContext(agent_id=_agent_id, session_id=session_id),
         )

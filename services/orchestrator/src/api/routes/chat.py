@@ -240,7 +240,7 @@ async def chat(req: ChatRequest) -> dict:
         scope=MemoryScope.AGENT,
     )
     # store the turn as session memory via the event bus
-    await _state.memory_event_bus.emit(
+    await _state.fire(
         EventType.TURN_END,
         TurnContext(agent_id=agent_id, session_id=session_id, conversation_item=conversation_item),
     )
@@ -248,7 +248,7 @@ async def chat(req: ChatRequest) -> dict:
     # session→episodic migration, fire-and-forget (was: _migrate_and_emit)
     _fire_write(
         agent_id,
-        lambda: _state.memory_event_bus.emit(
+        lambda: _state.fire(
             EventType.SESSION_END,
             SessionContext(agent_id=agent_id, session_id=session_id),
         ),
@@ -280,13 +280,13 @@ async def execute(req: ExecuteRequest) -> StreamingResponse:
 
     session_id = req.session_id or str(uuid.uuid4())
     # ADR-2 H2:TURN_SUBMIT 最早 fire(用户 prompt 入口,pre-execution)。
-    await _state.memory_event_bus.emit(
+    await _state.fire(
         EventType.TURN_SUBMIT,
         TurnContext(agent_id=req.agent_id, session_id=session_id),
     )
     # 通信桥:把执行 agent 注册进 session,使 broadcast 收件人非空。
     _state.communication_bus.register_agent(req.agent_id, session_id)
-    await _state.memory_event_bus.emit(
+    await _state.fire(
         EventType.SESSION_START,
         SessionContext(agent_id=req.agent_id, session_id=session_id),
     )
@@ -331,7 +331,7 @@ async def execute(req: ExecuteRequest) -> StreamingResponse:
             except Exception:
                 logger.warning("execute emitter connect failed (%s)", harness_id)
             # ADR-2 H2:TURN_START(agent.run 前;reserved 接 fire,recall 注入点保留)。
-            await _state.memory_event_bus.emit(
+            await _state.fire(
                 EventType.TURN_START,
                 TurnContext(agent_id=req.agent_id, session_id=session_id),
             )

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 # ── Agent state ────────────────────────────────────────────────────
@@ -89,6 +92,22 @@ profile_registry: Any = None
 # (SYSTEM) owns memory side-effects; MemoryObserveHook (OBSERVER) forwards
 # lifecycle events to observe-service (Part2).
 memory_event_bus: Any = None
+
+
+async def fire(event: Any, ctx: Any) -> None:
+    """Best-effort emit on memory_event_bus. No-op if bus is None (e.g. unit
+    tests that never bootstrap engine); swallows emit errors so a bus/hook
+    failure never breaks the caller's main flow (fire-and-forget, matches
+    ObserveEmitter style)."""
+    # ponytail: None-guard + swallow — test env has bus=None, prod has it wired;
+    # emit failures must not drag down turn/tool main flow.
+    bus = memory_event_bus
+    if bus is None:
+        return
+    try:
+        await bus.emit(event, ctx)
+    except Exception:
+        logger.warning("memory_event_bus.emit(%s) failed (non-fatal)", event, exc_info=True)
 
 # W3: bounded-concurrency memory write pool (multi-agent + per-agent
 # ordering + drain). DefaultMemoryHook submits writes through it; chat.py

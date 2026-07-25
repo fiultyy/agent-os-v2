@@ -452,7 +452,7 @@ class MemoryDBWatcher:
                         trigger="idle_poll",
                         top_k=20,
                     )
-                    await _state.memory_event_bus.emit(EventType.CONSOLIDATE, ctx)
+                    await _state.fire(EventType.CONSOLIDATE, ctx)
                     self.last_consolidate_ts[agent_id] = _now_ts()
                     result["consolidate"] = {"status": "ok", "trigger": "idle_poll"}
                 except Exception as exc:
