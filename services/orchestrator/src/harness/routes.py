@@ -30,6 +30,9 @@ from pydantic import BaseModel
 
 from .openclaw import OpenClawClient
 from .claude import ClaudeClient
+from .native_agent import run_agent_turn_with_stop
+from src.memory.event_bus import EventType
+from src.memory.hooks import TurnContext
 
 logger = logging.getLogger(__name__)
 
@@ -507,8 +510,12 @@ async def _run_native_turn_async(
     同一个 tick_id(单域);cancel 端点 emit 的 tick_completed(cancelled) 同 tick_id。
     """
     try:
-        result = await rec["agent"].run(
-            message, message_history=rec["messages"], metadata={"tick_id": tick_id},
+        from src.services import _state
+        result = await run_agent_turn_with_stop(  # fire STOP(完成,native_agent.py)
+            rec["agent"], message,
+            session_id=session_id, agent_id=rec.get("spec_id", ""),
+            bus=_state.memory_event_bus, message_history=rec["messages"],
+            metadata={"tick_id": tick_id},
         )
         rec["messages"] = result.all_messages()
         _store.touch(session_id)
@@ -675,6 +682,17 @@ async def trigger_turn(
                                scope[0].path_abs if scope else None)
             if default_cwd:
                 _active_cwd.set(Path(default_cwd))
+        # ADR-2 H2:TURN_SUBMIT(入口,最早)+ TURN_START(run 前,与 /v1 对称)。
+        _agent_id = rec.get("spec_id", "")
+        from src.services import _state
+        await _state.memory_event_bus.emit(
+            EventType.TURN_SUBMIT,
+            TurnContext(agent_id=_agent_id, session_id=session_id),
+        )
+        await _state.memory_event_bus.emit(
+            EventType.TURN_START,
+            TurnContext(agent_id=_agent_id, session_id=session_id),
+        )
         # in-process Agent run:ObserveCapability 自动推 observe,guardrail 自动护
         if req.async_run:
             # F2(ADR-S4):异步 fire-and-forget。create_task 包整 turn → HTTP 立返
@@ -687,7 +705,11 @@ async def trigger_turn(
             _async_turn_tasks[tick_id] = task
             task.add_done_callback(lambda t, k=tick_id: _async_turn_tasks.pop(k, None))
             return {"session_id": session_id, "status": "started", "tick_id": tick_id}
-        result = await rec["agent"].run(req.message, message_history=rec["messages"])
+        result = await run_agent_turn_with_stop(  # fire STOP(完成,native_agent.py)
+            rec["agent"], req.message,
+            session_id=session_id, agent_id=rec.get("spec_id", ""),
+            bus=_state.memory_event_bus, message_history=rec["messages"],
+        )
         rec["messages"] = result.all_messages()
         _store.touch(session_id)
         _persist_native_messages(session_id, rec["messages"])  # 续聊持久化(重启不丢)
