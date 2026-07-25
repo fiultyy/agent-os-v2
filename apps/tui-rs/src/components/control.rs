@@ -218,7 +218,7 @@ pub fn stack_event_line(e: &ObserveEvent) -> Line<'static> {
 }
 
 /// 把 markdown 文本渲染成带缩进的 Lines(assistant cell 复用)。
-fn md_indented_lines(response: &str, prefix_spans: &[Span<'static>]) -> Vec<Line<'static>> {
+pub fn md_indented_lines(response: &str, prefix_spans: &[Span<'static>]) -> Vec<Line<'static>> {
     if response.is_empty() {
         return vec![Line::from(prefix_spans.to_vec())];
     }

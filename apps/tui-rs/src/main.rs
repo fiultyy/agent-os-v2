@@ -376,7 +376,7 @@ fn run_dump() {
     if let Some(s) = app.flat.get(app.cursor) {
         let key = format!("{}/{}", s.harness_type, s.session_id);
         app.streaming_text.insert(key,
-            "配置📖学架构:我一步步带你走,先看 orchestrator 的作用,再看 observe 和 TUI 三大组件。".to_string());
+            "## AO2 三大组件\n- **orchestrator**:调度中枢(端口 8001)\n- **observe**:观测层(端口 8002)\n- **TUI**:终端 UI\n\n启动: `./start.sh dev-tui`".to_string());
         terminal.draw(|f| render::draw(f, &mut app)).unwrap();
         println!("\n═══ streaming · token_delta 累积行(cursor session 流式中)═══");
         print_buffer(&terminal);

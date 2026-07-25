@@ -957,19 +957,13 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
                 if !txt.is_empty() {
                     use crate::components::control::SPINNER;
                     let sp = SPINNER[app.spinner_frame % SPINNER.len()];
-                    let w = body_area.width.saturating_sub(2) as usize;
-                    for (i, line) in wrap_streaming(txt, w).iter().enumerate() {
-                        if i == 0 {
-                            ev_lines.push(Line::from(vec![
-                                Span::styled(format!("{} ", sp),
-                                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                                Span::styled(line.clone(), Style::default().fg(Color::White)),
-                            ]));
-                        } else {
-                            ev_lines.push(Line::from(format!("  {}", line))
-                                .style(Style::default().fg(Color::White)));
-                        }
-                    }
+                    let prefix = vec![Span::styled(
+                        format!("{} ", sp),
+                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    )];
+                    // markdown 渲染 streaming(半截容错;md_to_text 解析未闭合语法当普通文本,
+                    // 完整 response 来后 tick_completed 用同款 md_to_text 替换,视觉一致)。
+                    ev_lines.extend(crate::components::control::md_indented_lines(txt, &prefix));
                 }
             }
             app.control_chat_scroll.set_content(ev_lines);
@@ -1002,20 +996,7 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
     control::render_input_bar(f, input_inner, app);
 }
 
-/// 流式 token_delta 文本按显示宽 wrap(CJK 友好;textwrap 0.16 word=grapheme 每字可断)。
-/// ponytail: 用 textwrap::wrap(已依赖)非手写;width=0 或空文本兜底返原文。
-fn wrap_streaming(text: &str, width: usize) -> Vec<String> {
-    if width == 0 || text.is_empty() {
-        return vec![text.to_string()];
-    }
-    // FirstFit 同 textarea(高频 streaming 优化性能);默认 OptimalFit 也行。
-    let opts = textwrap::Options::new(width)
-        .wrap_algorithm(textwrap::WrapAlgorithm::FirstFit);
-    textwrap::wrap(text, &opts)
-        .into_iter()
-        .map(|c| c.into_owned())
-        .collect()
-}
+
 
 /// 属性区:cursor session 详情(sid/harness/实例/事件数/last turn)。读 app 业务字段,不改业务方法。
 /// 标题由 region_block 边框给出,本函数只返回字段行。
