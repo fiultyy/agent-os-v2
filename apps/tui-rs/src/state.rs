@@ -915,6 +915,9 @@ pub struct App {
     /// 不进 events(防撑 cap=200 挤掉历史 turn);render 在 ev_lines 末尾 append streaming 行
     /// (pending_turn 同款 cache 外每帧变)。openclaw turn 边收边显;native 不发 token_delta 故空。
     pub streaming_text: std::collections::HashMap<String, String>,
+    /// WS 重连指示:key→最近 WsMsg::Error 时间(drain_ws Error 记,Event 收到清);
+    /// status_spans 查 cursor session elapsed<60s 显"⚠WS重连"。
+    pub ws_errors: std::collections::HashMap<String, std::time::Instant>,
     /// 后台 fetch 全量回传:do_turn spawn trigger_turn+fetch_events → tx 发 (key, Option<events>),
     /// Tick drain rx → events 全量替换 + 清 pending(去 spinner,user msg 由全量无缝接管)。非阻塞 UI。
     pub fetch_tx: std::sync::mpsc::Sender<(String, Option<Vec<ObserveEvent>>)>,
@@ -1074,6 +1077,7 @@ impl App {
             pending_since: None,
             spinner_frame: 0,
             streaming_text: std::collections::HashMap::new(),
+            ws_errors: std::collections::HashMap::new(),
             fetch_tx, fetch_rx,
             insert_mode: true,
             textarea: crate::components::textarea::Textarea::new(),
@@ -3070,6 +3074,8 @@ impl App {
         for msg in msgs {
             match msg {
                 crate::ws::WsMsg::Event { key, ev } => {
+                    // 收到事件 = WS 连通(重连成功)→ 清 ws_errors[key]。
+                    self.ws_errors.remove(&key);
                     // tick_started(cursor session)且 request == pending msg = 本次 user msg 确认 → 清 pending。
                     // 必须匹配 pending msg:observe 双源(空+非空)+ 历史 tick_started request 非空但不本次,
                     // 只匹配本次 msg 才清(避免历史/空 request 误清致 spinner 提前停)。
@@ -3155,9 +3161,14 @@ impl App {
                     self.apply_orch_event(&session_id, &ev);
                 }
                 crate::ws::WsMsg::Error { key, .. } => {
-                    // 连接断;不重连(WS manager idempotent,主 loop 下次 subscribe 重建)。
-                    // ponytail: 自动重连 defer。保留 key 在 subs(已 detach)。
-                    let _ = key;
+                    // WS 断/重连失败(ws_loop 自管 backoff 重连,见 ws.rs);记最近 error 时间,
+                    // status_spans 显"⚠WS重连"(重连成功收到 Event 自动清 ws_errors[key])。
+                    self.ws_errors.insert(key.clone(), std::time::Instant::now());
+                }
+                crate::ws::WsMsg::Reconnected { key } => {
+                    // WS connect OK(重连成功)→ 清 ws_errors(不依赖新 Event;
+                    // observe 重启后无新广播时 ws_errors 靠此清)。
+                    self.ws_errors.remove(&key);
                 }
             }
         }

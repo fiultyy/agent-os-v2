@@ -126,6 +126,15 @@ pub fn status_spans(app: &App) -> Vec<Span<'static>> {
             ));
         }
     }
+    // WS 重连指示:cursor session 最近(<60s)有 ws error = 重连中(backoff)。
+    if let Some(t) = app.ws_errors.get(&key) {
+        if t.elapsed().as_secs() < 60 {
+            spans.push(Span::styled(
+                " ⚠WS重连",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ));
+        }
+    }
     spans
 }
 

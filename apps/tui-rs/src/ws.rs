@@ -61,6 +61,8 @@ pub enum WsMsg {
     /// WS 连接错误(主 loop 可忽略,manager 会保留 key 不重连避免风暴;
     /// ponytail: 自动重连 defer,简单 backoff 由子线程退出后 key 移除体现)。
     Error { key: String, #[allow(dead_code)] msg: String },
+    /// WS 重连成功(ws_loop connect OK 后发;主 loop 清 ws_errors[key],不依赖新 Event)。
+    Reconnected { key: String },
 }
 
 /// observe broadcast 的 JSON 形状(ObserveEvent.to_dict,见 events.py:48)。
@@ -239,7 +241,12 @@ fn run_ws_session(
     };
     let _ = tcp.set_read_timeout(Some(Duration::from_millis(500)));
     let (mut socket, _resp) = match client::client(url, tcp) {
-        Ok(p) => p,
+        Ok(p) => {
+            // connect 成功 = 重连(或首次连);发 Reconnected 让主 loop 清 ws_errors[key]
+            // (不依赖新 Event;observe 重启后无新广播时 ws_errors 靠此清,否则"⚠WS重连"永驻)。
+            let _ = tx.send(WsMsg::Reconnected { key: key.to_string() });
+            p
+        }
         Err(e) => {
             let _ = tx.send(WsMsg::Error { key: key.to_string(), msg: format!("ws connect: {}", e) });
             return (SessionEnd::Disconnected, false);
