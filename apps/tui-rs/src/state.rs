@@ -911,6 +911,10 @@ pub struct App {
     pub pending_since: Option<std::time::Instant>,
     /// spinner 动画帧(Tick 递增,render 取 SPINNER[frame % len]);pending 时 poll 缩 80ms 流畅。
     pub spinner_frame: usize,
+    /// 流式 token_delta 累积(drain_ws 收 token_delta → buffer;tick_completed/failed 清)。
+    /// 不进 events(防撑 cap=200 挤掉历史 turn);render 在 ev_lines 末尾 append streaming 行
+    /// (pending_turn 同款 cache 外每帧变)。openclaw turn 边收边显;native 不发 token_delta 故空。
+    pub streaming_text: std::collections::HashMap<String, String>,
     /// 后台 fetch 全量回传:do_turn spawn trigger_turn+fetch_events → tx 发 (key, Option<events>),
     /// Tick drain rx → events 全量替换 + 清 pending(去 spinner,user msg 由全量无缝接管)。非阻塞 UI。
     pub fetch_tx: std::sync::mpsc::Sender<(String, Option<Vec<ObserveEvent>>)>,
@@ -1069,6 +1073,7 @@ impl App {
             pending_turn: None,
             pending_since: None,
             spinner_frame: 0,
+            streaming_text: std::collections::HashMap::new(),
             fetch_tx, fetch_rx,
             insert_mode: true,
             textarea: crate::components::textarea::Textarea::new(),
@@ -3086,6 +3091,8 @@ impl App {
                                 self.clear_pending();
                             }
                         }
+                        // turn 终态:清流式 buffer(response 进 events 替代 streaming 行)。
+                        self.streaming_text.remove(&key);
                     }
                     // 累积 turn 事件(同 fetch_events 效果:events[key].push + 实例去重计数)。
                     // ADR-O1:Orchestrate tab 实时刷新——agent-os-v2 fork/tick 事件转发给 fork 树。
@@ -3099,6 +3106,13 @@ impl App {
                     // token_delta 流式 token 不存 app.events(撑爆 cap=200 挤掉历史 turn 结构;
                     // render 用 tick_completed.response,流式 token P2 defer)
                     if ev.event_type == "token_delta" {
+                        // 流式累积到 buffer(不进 events 防 cap=200);tick_completed/failed 清。
+                        // render 在 ev_lines 末尾 append streaming 行(pending_turn 同款)。
+                        if let Some(delta) = ev.data.get("delta_text").and_then(|v| v.as_str()) {
+                            if !delta.is_empty() {
+                                self.streaming_text.entry(key.clone()).or_default().push_str(delta);
+                            }
+                        }
                         continue;
                     }
                     let evs = self.events.entry(key.clone()).or_default();
@@ -3753,6 +3767,66 @@ mod tests {
 
     /// IT7:空 event_id 同 (event_type, tick_id, harness_id) 复合键 → 去重(REST+WS 双源
     /// 重复渲染同 turn 的治本点;event_id 缺失时按复合键兜底)。
+    /// 流式 token_delta 累积到 streaming_text(非 events);events 不含 token_delta(cap 安全)。
+    #[test]
+    fn drain_ws_token_delta_accumulates_to_streaming_buffer() {
+        use crate::ws::{WsManager, WsMsg};
+        use std::sync::mpsc;
+        let (tx, rx) = mpsc::channel::<WsMsg>();
+        let mut app = App::new(crate::kitty::detect());
+        app.ws = Some(WsManager::mock(rx));
+        let key = "openclaw/agent:main".to_string();
+        // 推 3 个 token_delta(delta_text 累积)。
+        for d in ["Hello", ", ", "AO2"] {
+            let mut data = HashMap::new();
+            data.insert("delta_text".to_string(), serde_json::Value::String(d.to_string()));
+            tx.send(WsMsg::Event {
+                key: key.clone(),
+                ev: ObserveEvent {
+                    event_type: "token_delta".to_string(),
+                    tick_id: "t1".to_string(),
+                    harness_id: "h1".to_string(),
+                    data,
+                    event_id: "".to_string(),
+                },
+            }).unwrap();
+        }
+        app.drain_ws();
+        // 累积到 streaming_text(非 events)。
+        assert_eq!(app.streaming_text.get(&key).map(|s| s.as_str()), Some("Hello, AO2"));
+        // events 不含 token_delta(cap=200 安全,防撑爆挤掉历史 turn 结构)。
+        let no_delta = app.events.get(&key)
+            .map_or(true, |evs| evs.iter().all(|e| e.event_type != "token_delta"));
+        assert!(no_delta, "token_delta 不应进 events");
+    }
+
+    /// tick_completed/tick_failed 清 streaming buffer(response 进 events 替代 streaming 行)。
+    #[test]
+    fn drain_ws_tick_terminal_clears_streaming_buffer() {
+        use crate::ws::{WsManager, WsMsg};
+        use std::sync::mpsc;
+        let (tx, rx) = mpsc::channel::<WsMsg>();
+        let mut app = App::new(crate::kitty::detect());
+        app.ws = Some(WsManager::mock(rx));
+        let key = "openclaw/agent:main".to_string();
+        // 预置流式 buffer(模拟 token_delta 已累积)。
+        app.streaming_text.insert(key.clone(), "partial response".to_string());
+        // tick_completed → 清 streaming。
+        tx.send(WsMsg::Event {
+            key: key.clone(),
+            ev: ObserveEvent {
+                event_type: "tick_completed".to_string(),
+                tick_id: "t1".to_string(),
+                harness_id: "h1".to_string(),
+                data: HashMap::new(),
+                event_id: "e1".to_string(),
+            },
+        }).unwrap();
+        app.drain_ws();
+        assert!(!app.streaming_text.contains_key(&key), "tick_completed 清 streaming buffer");
+        assert_eq!(app.events[&key].len(), 1, "tick_completed 进 events");
+    }
+
     #[test]
     fn drain_ws_dedups_empty_event_id_by_composite_key() {
         use crate::ws::{WsManager, WsMsg};

@@ -951,6 +951,27 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
                     ]));
                 }
             }
+            // 流式 token_delta 累积行(紧跟 pending;openclaw turn 边收边显,native 不发故空)。
+            // 每帧变(token 累积),cache 外(同 pending_turn);tick_completed 清 buffer + response 进 events 替代。
+            if let Some(txt) = cur_key.as_deref().and_then(|k| app.streaming_text.get(k)) {
+                if !txt.is_empty() {
+                    use crate::components::control::SPINNER;
+                    let sp = SPINNER[app.spinner_frame % SPINNER.len()];
+                    let w = body_area.width.saturating_sub(2) as usize;
+                    for (i, line) in wrap_streaming(txt, w).iter().enumerate() {
+                        if i == 0 {
+                            ev_lines.push(Line::from(vec![
+                                Span::styled(format!("{} ", sp),
+                                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                                Span::styled(line.clone(), Style::default().fg(Color::White)),
+                            ]));
+                        } else {
+                            ev_lines.push(Line::from(format!("  {}", line))
+                                .style(Style::default().fg(Color::White)));
+                        }
+                    }
+                }
+            }
             app.control_chat_scroll.set_content(ev_lines);
             // ScrollView.render 内部按 follow_tail_flag 自动追底(内容超视口→最后一页,不超→从顶)。
             app.control_chat_scroll.follow_tail_flag = app.chat_follow_tail;
@@ -979,6 +1000,21 @@ pub fn draw_control(f: &mut Frame, area: Rect, app: &mut App) {
     let input_inner = input_block.inner(input_area);
     f.render_widget(input_block, input_area);
     control::render_input_bar(f, input_inner, app);
+}
+
+/// 流式 token_delta 文本按显示宽 wrap(CJK 友好;textwrap 0.16 word=grapheme 每字可断)。
+/// ponytail: 用 textwrap::wrap(已依赖)非手写;width=0 或空文本兜底返原文。
+fn wrap_streaming(text: &str, width: usize) -> Vec<String> {
+    if width == 0 || text.is_empty() {
+        return vec![text.to_string()];
+    }
+    // FirstFit 同 textarea(高频 streaming 优化性能);默认 OptimalFit 也行。
+    let opts = textwrap::Options::new(width)
+        .wrap_algorithm(textwrap::WrapAlgorithm::FirstFit);
+    textwrap::wrap(text, &opts)
+        .into_iter()
+        .map(|c| c.into_owned())
+        .collect()
 }
 
 /// 属性区:cursor session 详情(sid/harness/实例/事件数/last turn)。读 app 业务字段,不改业务方法。

@@ -369,6 +369,20 @@ fn run_dump() {
         "  {}",
         components::raw_exec::describe(components::raw_exec::Harness::Claw, None)
     );
+
+    // 5. streaming 渲染(token_delta 累积行;cursor session 流式中,spinner + wrap 连续文本)。
+    app.panel = state::Panel::Control;
+    app.popups.clear();
+    if let Some(s) = app.flat.get(app.cursor) {
+        let key = format!("{}/{}", s.harness_type, s.session_id);
+        app.streaming_text.insert(key,
+            "配置📖学架构:我一步步带你走,先看 orchestrator 的作用,再看 observe 和 TUI 三大组件。".to_string());
+        terminal.draw(|f| render::draw(f, &mut app)).unwrap();
+        println!("\n═══ streaming · token_delta 累积行(cursor session 流式中)═══");
+        print_buffer(&terminal);
+    } else {
+        println!("\n═══ streaming · (observe 离线 flat 空,skip)═══");
+    }
 }
 
 fn print_buffer(term: &Terminal<ratatui::backend::TestBackend>) {
