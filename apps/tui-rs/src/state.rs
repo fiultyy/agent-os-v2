@@ -2877,11 +2877,12 @@ impl App {
                     // ADR-O1:Orchestrate j/k 跨层级 DFS 序移动光标。
                     self.orch_cursor_down();
                 } else if self.panel == Panel::Control {
-                    // F3:Control 方向键——大纲区(ControlSession)切 cursor;输入栏(ControlButton)切按钮。
-                    match self.focus {
-                        FocusTarget::ControlSession(_) => { self.cursor_down(); self.focus = FocusTarget::ControlSession(self.cursor); }
-                        _ => { let next = match self.focus { FocusTarget::ControlButton(i) => (i + 1).min(CONTROL_BUTTON_COUNT - 1), _ => 0 }; self.focus = FocusTarget::ControlButton(next); }
-                    }
+                    // ADR-4:Control tab 非 insert_mode 时 j/Down 直接切 session cursor(主交互),
+                    // 不再依赖 BackTab cycle 到 ControlSession 焦点(BackTab 在 tmux/无鼠标不可靠)。
+                    // ControlButton 焦点导航 tradeoff 退到鼠标/快捷键(t/s/r/e/f/G/D/R)。
+                    // insert_mode 分支(line ~2590)提前 return,textarea 行移/历史不破坏。
+                    self.cursor_down();
+                    self.focus = FocusTarget::ControlSession(self.cursor);
                 } else {
                     self.cursor_down();
                     self.focus = FocusTarget::ObserveSession;
@@ -2898,11 +2899,9 @@ impl App {
                 } else if self.panel == Panel::Orchestrate {
                     self.orch_cursor_up();
                 } else if self.panel == Panel::Control {
-                    // F3:Control 方向键——大纲区(ControlSession)切 cursor;输入栏(ControlButton)切按钮。
-                    match self.focus {
-                        FocusTarget::ControlSession(_) => { self.cursor_up(); self.focus = FocusTarget::ControlSession(self.cursor); }
-                        _ => { let prev = match self.focus { FocusTarget::ControlButton(i) => i.saturating_sub(1), _ => 0 }; self.focus = FocusTarget::ControlButton(prev); }
-                    }
+                    // ADR-4:Control tab 非 insert_mode 时 k/Up 直接切 session cursor(见 j/Down 分支 ADR-4)。
+                    self.cursor_up();
+                    self.focus = FocusTarget::ControlSession(self.cursor);
                 } else {
                     self.cursor_up();
                     self.focus = FocusTarget::ObserveSession;
@@ -3783,20 +3782,29 @@ mod tests {
         assert!(app.action_loading("trigger"), "click should mark trigger as loading");
     }
 
-    /// ADR-3:Control 方向键(normal 模式)切 focus(ControlButton idx 在 0..CONTROL_BUTTON_COUNT 间)。
-    /// insert 模式下 ↑↓ 翻历史(ADR-7),故此测 focus 移动须 normal 模式。
+    /// ADR-4:Control 方向键(normal 模式)直接切 session cursor + 焦点归 ControlSession,
+    /// 不再依赖 BackTab cycle 到 ControlSession(BackTab 在 tmux/无鼠标不可靠)。
+    /// insert 模式下 ↑↓ 翻历史/textarea 行移(ADR-7),故此测 focus 移动须 normal 模式。
+    /// ControlButton 焦点导航 tradeoff 退到鼠标/快捷键(t/s/r/e/f/G/D/R)。
     #[test]
-    fn control_arrow_keys_move_focus() {
+    fn control_arrow_keys_move_session_cursor() {
         let mut app = App::new(crate::kitty::detect());
         app.panel = Panel::Control;
-        app.insert_mode = false; // normal 模式:↑↓ 移 focus(非翻历史)
-        app.focus = FocusTarget::ControlButton(0);
-        // Down:j 方向键 → ControlButton(1)。
+        app.insert_mode = false; // normal 模式:↑↓ 切 session cursor(非翻历史)
+        app.flat = vec![
+            Session { harness_type: "claw".into(), session_id: "sess-a".into(), harness_id: "h1".into(), cwd: None, running: false },
+            Session { harness_type: "claw".into(), session_id: "sess-b".into(), harness_id: "h2".into(), cwd: None, running: false },
+        ];
+        app.cursor = 0;
+        app.focus = FocusTarget::ControlButton(0); // 起始焦点在按钮(验证不依赖 focus 入口)
+        // Down:j 方向键 → cursor 1 + 焦点 ControlSession(1)。
         app.handle_base_key(&KeyEvent::new(KeyCode::Down, crossterm::event::KeyModifiers::empty()));
-        assert_eq!(app.focus, FocusTarget::ControlButton(1));
-        // Up:k 方向键 → 回 ControlButton(0)。
+        assert_eq!(app.cursor, 1);
+        assert_eq!(app.focus, FocusTarget::ControlSession(1));
+        // Up:k 方向键 → cursor 0 + 焦点 ControlSession(0)。
         app.handle_base_key(&KeyEvent::new(KeyCode::Up, crossterm::event::KeyModifiers::empty()));
-        assert_eq!(app.focus, FocusTarget::ControlButton(0));
+        assert_eq!(app.cursor, 0);
+        assert_eq!(app.focus, FocusTarget::ControlSession(0));
     }
 
     /// ADR-3:fetch_orche_health 函数存在且不 panic(orche 离线时返 false,不 crash)。
