@@ -11,14 +11,24 @@ import json
 import re
 from typing import Any
 
+from src.memory.hooks import HookPriority, MemoryHook, ToolContext
 
-class Guardrail:
+
+class Guardrail(MemoryHook):
     """Pre- and post-execution safety checks for tool calls.
 
     Provides two-phase validation:
     1. Input check — validates arguments before execution
     2. Output check — validates results after execution
+
+    ADR-3: registered as a :class:`MemoryHook` (SYSTEM priority, runs first)
+    on ``TOOL_PRE`` / ``TOOL_POST``. ``on_tool_pre`` returns
+    ``{"allow", "reason"}``; the emitter (ToolExecutor) reads that decision
+    and short-circuits. ``check`` / ``check_output`` stay callable directly
+    (GuardrailCapability still uses them).
     """
+
+    priority = HookPriority.SYSTEM
 
     # Patterns that indicate dangerous operations
     DANGEROUS_PATTERNS: list[re.Pattern[str]] = [
@@ -102,3 +112,15 @@ class Guardrail:
                 )
 
         return True, ""
+
+    # ── MemoryHook bridge (ADR-3 H3) ─────────────────────────────────
+    # TOOL_PRE/TOOL_POST consumers. Return {"allow","reason"} so the emitter
+    # (ToolExecutor) can decide; returning None would mean "no decision".
+
+    async def on_tool_pre(self, ctx: ToolContext) -> dict[str, Any]:
+        allowed, reason = await self.check(ctx.tool_name, ctx.arguments)
+        return {"allow": allowed, "reason": reason}
+
+    async def on_tool_post(self, ctx: ToolContext) -> dict[str, Any]:
+        allowed, reason = await self.check_output(ctx.result)
+        return {"allow": allowed, "reason": reason}

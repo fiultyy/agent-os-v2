@@ -312,7 +312,24 @@ def bootstrap(config_path: str | None = None) -> None:
             len(_tool_registry.list_tools()),
         )
 
-    _state.tool_executor = ToolExecutor(_tool_registry)
+    # P1: memory event bus + default lifecycle hook. chat.py emits lifecycle
+    # events instead of calling memory_service/memory_migrator directly.
+    # Created early (before ToolExecutor) so ToolExecutor can fire tool
+    # lifecycle events (ADR-2/ADR-3 H3). The DefaultMemoryHook + observers
+    # register below; guardrail registers here so TOOL_PRE/TOOL_POST are live
+    # by the time any tool runs.
+    _state.memory_event_bus = MemoryEventBus()
+
+    from src.memory.event_bus import EventType as _EventType
+    from src.tools.guardrail import Guardrail as _Guardrail
+    # ADR-3 H3: guardrail registered as SYSTEM-priority MemoryHook on
+    # TOOL_PRE/TOOL_POST; ToolExecutor reads the emit return value and
+    # short-circuits (no more hard-coded guardrail.check in executor).
+    _state.memory_event_bus.register(
+        _Guardrail(), _EventType.TOOL_PRE, _EventType.TOOL_POST,
+    )
+
+    _state.tool_executor = ToolExecutor(_tool_registry, bus=_state.memory_event_bus)
     _state.communication_bus = CommunicationBus()
     _state.concurrency_controller = ConcurrencyController()
 
@@ -360,9 +377,10 @@ def bootstrap(config_path: str | None = None) -> None:
     # docs/multi-agent-poweron-roadmap.md:8(a))。独立 _orchestration_bus 随装配块
     # 一并消失(无其他 reader)。
 
-    # P1: memory event bus + default lifecycle hook. chat.py emits lifecycle
+    # P1: memory event bus default lifecycle hook. chat.py emits lifecycle
     # events instead of calling memory_service/memory_migrator directly.
-    _state.memory_event_bus = MemoryEventBus()
+    # (The bus itself was created above, before ToolExecutor, so TOOL_PRE/
+    # TOOL_POST fire live; only the DefaultMemoryHook + observers register here.)
 
     # W3: bounded-concurrency write pool (multi-agent) + per-agent ordering.
     # DefaultMemoryHook routes every store/migrate/update through it; chat.py's
