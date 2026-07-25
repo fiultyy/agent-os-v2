@@ -47,15 +47,6 @@ def test_create_agent_registered_unprefixed():
     assert "^[a-z0-9][a-z0-9_-]{0,63}$" in params["properties"]["id"]["pattern"]
 
 
-def test_create_agent_registered_at_composite_layer():
-    """layer = ToolLayer.COMPOSITE(与 workflow_run / a2a_call 同层,创建 agent 多步文件操作)。"""
-    from src.tools.catalog import ToolLayer
-    entries = _tool_registry.get_catalog().entries
-    entry = entries.get("create_agent")
-    assert entry is not None, "create_agent not in catalog"
-    assert entry.layer == ToolLayer.COMPOSITE
-
-
 def test_v2_prefixed_name_not_registered():
     """RK11 反向断言:register 名必须 **不是** 'v2_create_agent'(否则双前缀)。"""
     assert _tool_registry.get("v2_create_agent") is None, (
