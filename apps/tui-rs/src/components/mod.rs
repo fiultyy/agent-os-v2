@@ -89,7 +89,14 @@ pub fn render_popup(f: &mut Frame, screen: Rect, p: &mut Popup) {
     if !p.placed {
         if let Some((x, y)) = p.position {
             let cx = x.min(screen.right().saturating_sub(p.width.max(1)));
-            let cy = y.min(screen.bottom().saturating_sub(p.height.max(1)));
+            // y:光标下方放得下则下放;放不下(靠近屏底)则向上展开(y - height),避免硬 clamp
+            // 到屏顶致菜单跳离光标很远找不到。saturating_sub 防 underflow。
+            let bottom_room = screen.bottom().saturating_sub(y);
+            let cy = if bottom_room >= p.height {
+                y
+            } else {
+                y.saturating_sub(p.height)
+            };
             p.state.move_to(cx, cy);
         }
         p.placed = true;
@@ -170,22 +177,4 @@ pub fn render_image_preview(f: &mut Frame, screen: Rect, term: &TermCap) {
         Line::raw(" 真实图:Picker::new_resize_protocol").style(Style::default().fg(Color::DarkGray)),
     ];
     f.render_widget(Paragraph::new(body), inner);
-}
-
-/// 右键 context menu 入口(ratatui-interact ContextMenuState 演示)。
-///
-/// 主流程里 base panel 右键已开 help 弹窗;本函数演示如何用 interact 的
-/// ContextMenuState 做真实菜单:open_at(x,y) → render_stateful(items, state) →
-/// handle_context_menu_mouse/key。ponytail: 当前 help 弹窗已够,菜单逻辑留入口。
-#[allow(dead_code)]
-pub fn build_context_menu_items() -> Vec<ratatui_interact::components::context_menu::ContextMenuItem> {
-    use ratatui_interact::components::context_menu::ContextMenuItem;
-    vec![
-        ContextMenuItem::action("flow", "FLOW 横向轨道"),
-        ContextMenuItem::action("stack", "STACK 纵向堆叠"),
-        ContextMenuItem::action("control", "CONTROL orchestrator"),
-        ContextMenuItem::separator(),
-        ContextMenuItem::action("help", "Help / 架构"),
-        ContextMenuItem::action("quit", "Quit"),
-    ]
 }

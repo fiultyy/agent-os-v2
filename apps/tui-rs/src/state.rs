@@ -615,13 +615,27 @@ pub fn norm_ht(h: &str) -> String {
     }
 }
 
+/// 按 unicode-width 截断到 n 列宽(留 ellipsis 位)。CJK/emoji 按显示宽计,避免
+/// chars().count() 把宽字符算 1 致列对齐错位(状态栏/footer/列表行)。逐 char 累加
+/// width,不切 char 中间(无乱码/panic)。~17 调用点自动受益(ASCII 调用点 char=width 不变)。
 pub fn trunc(s: &str, n: usize) -> String {
-    let cnt = s.chars().count();
-    if cnt <= n {
-        s.to_string()
-    } else {
-        format!("{}…", s.chars().take(n).collect::<String>())
+    use unicode_width::UnicodeWidthStr;
+    let w = UnicodeWidthStr::width(s);
+    if w <= n {
+        return s.to_string();
     }
+    let budget = n.saturating_sub(1); // 留 1 列给 …
+    let mut out = String::new();
+    let mut acc = 0usize;
+    for ch in s.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if acc + cw > budget {
+            break;
+        }
+        acc += cw;
+        out.push(ch);
+    }
+    format!("{}…", out)
 }
 
 /// harness_type → (2 字母色块标签, 色)。左大纲色块列用。
@@ -1203,7 +1217,9 @@ impl App {
     }
     /// IT4:chat offset 是否在接近底部(tail 跟随判定:PgDn 滚到近底→重新跟尾)。
     fn near_bottom(&self) -> bool {
-        let total = self.control_chat_scroll.lines.len();
+        // 折行后行数(wrap_cache 已建):未 wrap lines.len() 在长行折行后低估,致 PgDn 滚到
+        // 近底判定不准(不重新 follow_tail → 新消息不滚底)。
+        let total = self.control_chat_scroll.display_total();
         total <= 1 || self.control_chat_scroll.offset + self.page_viewport() >= total.saturating_sub(1)
     }
 
@@ -1981,6 +1997,16 @@ impl App {
     /// 弹窗栈顶消费 mouse:tui-popup PopupState.handle_mouse_event(拖拽)。
     /// IT7 ②:new 弹窗左键点击优先 popup_clickmap hit-test(700/701/710+i/720+i/790/791)。
     fn handle_popup_mouse(&mut self, m: &MouseEvent) {
+        // modal 期间也跟光标(否则菜单激活时 mouse.track 不调 → MouseCursor 渲染冻结)。
+        self.mouse.track(*m);
+        // 菜单激活时再右键:关旧菜单 + 新坐标重开(常见 GUI 行为;否则 modal 拦截 Right Down
+        // 走 popup 路径不处理 → 右键别处无反应,菜单钉死原位)。
+        if m.kind == MouseEventKind::Down(MouseButton::Right) {
+            let target = self.classify_right_click(m.column, m.row);
+            self.close_context_menu();
+            self.open_context_menu((m.column, m.row), target);
+            return;
+        }
         if m.kind == MouseEventKind::Down(MouseButton::Left)
             && self.popups.last().map(|p| p.id == "new").unwrap_or(false)
         {
@@ -3051,6 +3077,15 @@ impl App {
                                 self.clear_pending();
                             }
                         }
+                    } else if ev.event_type == "tick_completed" || ev.event_type == "tick_failed" {
+                        // 兜底清 pending:tick_started 的 starts_with 匹配可能因 server 截断/重写
+                        // request 失配(tick_started 漏/丢)致 spinner 卡到 60s 兜底;终态事件到 =
+                        // turn 已完成,同 key 直接清(治 turn 完成但 spinner 跑满 60s 的失真)。
+                        if let Some((pk, _)) = &self.pending_turn {
+                            if pk == &key {
+                                self.clear_pending();
+                            }
+                        }
                     }
                     // 累积 turn 事件(同 fetch_events 效果:events[key].push + 实例去重计数)。
                     // ADR-O1:Orchestrate tab 实时刷新——agent-os-v2 fork/tick 事件转发给 fork 树。
@@ -3067,12 +3102,19 @@ impl App {
                         continue;
                     }
                     let evs = self.events.entry(key.clone()).or_default();
-                    // IT7:去重——REST fetch_events(替换)+ WS drain_ws(追加)时序重叠时,
-                    // 同 event_id 事件会重复。非空 event_id 已存在则 skip(continue)。
-                    // 空 event_id(旧数据/无 id)不过滤,保持兼容。
-                    if !ev.event_id.is_empty()
-                        && evs.iter().any(|e| e.event_id == ev.event_id)
-                    {
+                    // IT7:去重——REST fetch_events(替换)+ WS drain_ws(追加)时序重叠会重复。
+                    // 非空 event_id:按 event_id 精确去重。空 event_id(旧数据/无 id):按
+                    // (event_type, tick_id, harness_id) 复合键去重(治 REST+WS 双源空 event_id
+                    // 重复渲染同 turn;含 harness_id 区分多实例同 turn,不误并)。
+                    let dup = if !ev.event_id.is_empty() {
+                        evs.iter().any(|e| e.event_id == ev.event_id)
+                    } else {
+                        evs.iter().any(|e| e.event_id.is_empty()
+                            && e.event_type == ev.event_type
+                            && e.tick_id == ev.tick_id
+                            && e.harness_id == ev.harness_id)
+                    };
+                    if dup {
                         continue;
                     }
                     // 限制单 key 事件数(同 REST limit=50 语义,防无限增长)。
@@ -3691,7 +3733,8 @@ mod tests {
         assert!(evs.iter().all(|e| e.event_id != "e1" || evs.iter().filter(|x| x.event_id == "e1").count() == 1));
     }
 
-    /// IT7:空 event_id(旧数据)不去重,保持兼容(每个都 push)。
+    /// IT7:空 event_id(旧数据)按 (event_type, tick_id, harness_id) 复合键去重;
+    /// 不同 harness_id 的同 turn(多实例)不误并(h1/h2 保留 2 条)。
     #[test]
     fn drain_ws_keeps_empty_event_id() {
         use crate::ws::{WsManager, WsMsg};
@@ -3703,9 +3746,44 @@ mod tests {
         tx.send(WsMsg::Event { key: key.clone(), ev: ev_with("", "h1") }).unwrap();
         tx.send(WsMsg::Event { key: key.clone(), ev: ev_with("", "h2") }).unwrap();
         app.drain_ws();
-        assert_eq!(app.events[&key].len(), 2, "空 event_id 不过滤,两条都保留");
+        assert_eq!(app.events[&key].len(), 2, "不同 harness_id 不误并,两条都保留");
         // 多实例计数仍按 harness_id 去重(h1+h2=2)。
         assert_eq!(app.instances.get(&key).copied().unwrap_or(0), 2);
+    }
+
+    /// IT7:空 event_id 同 (event_type, tick_id, harness_id) 复合键 → 去重(REST+WS 双源
+    /// 重复渲染同 turn 的治本点;event_id 缺失时按复合键兜底)。
+    #[test]
+    fn drain_ws_dedups_empty_event_id_by_composite_key() {
+        use crate::ws::{WsManager, WsMsg};
+        use std::sync::mpsc;
+        let (tx, rx) = mpsc::channel::<WsMsg>();
+        let mut app = App::new(crate::kitty::detect());
+        app.ws = Some(WsManager::mock(rx));
+        let key = "claude-code/s1".to_string();
+        // 预置 REST 已拉到的空 event_id 事件(模拟 fetch_events)。
+        app.events.entry(key.clone()).or_default().push(ev_with("", "h1"));
+        // WS 推同 (event_type, tick_id, harness_id) 的重复 → 去重。
+        tx.send(WsMsg::Event { key: key.clone(), ev: ev_with("", "h1") }).unwrap();
+        app.drain_ws();
+        assert_eq!(app.events[&key].len(), 1, "同复合键空 event_id 去重为 1 条");
+    }
+
+    /// trunc 按 unicode-width 截断(非 chars().count):CJK 按显示宽计,列对齐准确;
+    /// 不切 char 中间(无乱码);留 ellipsis 位。
+    #[test]
+    fn trunc_uses_unicode_width_not_char_count() {
+        // ASCII:width = char count,行为不变
+        assert_eq!(trunc("hello world", 5), "hell…");
+        assert_eq!(trunc("hi", 5), "hi");           // 不超宽,原样
+        // CJK 每字 2 列宽:trunc(s,5) 留 4 列(2 CJK)+ …,非 5 char(会超宽 10 列)
+        assert_eq!(trunc("中文字符测试", 5), "中文…");
+        // 混合 ASCII+CJK 按显示宽累加
+        assert_eq!(trunc("ab中文", 5), "ab中…");     // ab(2)+中(2)=4,+…=5 列
+        // 不切 char 中间:budget=2(留 … 位),c 后停(中 2 列超预算)
+        assert_eq!(trunc("abc中", 3), "ab…");
+        // 空串
+        assert_eq!(trunc("", 5), "");
     }
 
     // ── T1/T2 自测(ADR-1/ADR-2/ADR-3:焦点循环 + loading + UI 状态)──────

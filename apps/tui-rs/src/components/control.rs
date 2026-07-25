@@ -221,7 +221,7 @@ fn md_indented_lines(response: &str, prefix_spans: &[Span<'static>]) -> Vec<Line
             let mut spans: Vec<Span<'static>> = if i == 0 {
                 prefix_spans.to_vec()
             } else {
-                vec![Span::raw("   ")] // 续行缩进 2 空格宽(3 char 视觉对齐前缀)
+                vec![Span::raw("  ")]  // 续行对齐 prefix "• "(bullet+space=2 cell;原 3 空格多缩 1)
             };
             spans.extend(line.spans);
             Line::from(spans)

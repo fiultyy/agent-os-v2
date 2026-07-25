@@ -85,6 +85,12 @@ impl ScrollView {
     fn total(&self) -> usize {
         self.lines.len()
     }
+    /// 折行后总行数(wrap_cache 已建取折行 len,否则未 wrap 行数)。
+    /// near_bottom / follow_tail 判定用:未 wrap 行数在长行折行后低估,致 PgDn 滚到近底
+    /// 判定不准(不重新跟尾)。
+    pub fn display_total(&self) -> usize {
+        self.wrap_cache.as_ref().map_or(self.lines.len(), |(_, d)| d.len())
+    }
     /// 按 width 字符流折行(unicode-width,保留 span style)。render 用同逻辑 slice 显示 →
     /// 行数精确,scroll 能到真底。ponytail: 不 word-break(英文词可拆);CJK 每字可断精确。
     /// 旧版用 ratatui Paragraph::Wrap 显示但自算行数,word-break 不一致 → 滚不到真底。
