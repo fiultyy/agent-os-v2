@@ -235,11 +235,13 @@ class TestA2aNativeMainE2E:
                 async def close(self): pass
                 async def emit(self, event): pass
 
+            _orig_emitter = emit_mod.ObserveEmitter
             emit_mod.ObserveEmitter = lambda *a, **k: _NoNet()  # type: ignore
             t = LocalTransport()
             _run(t.send(target_id, "x"))
         finally:
             routes_mod.assemble_capabilities = _orig  # type: ignore[assignment]
+            emit_mod.ObserveEmitter = _orig_emitter  # type: ignore[assignment]
 
         cap_ids = captured.get("cap_ids", [])
         assert target_id == captured.get("agent_id_for_scope"), f"scope not {target_id}"

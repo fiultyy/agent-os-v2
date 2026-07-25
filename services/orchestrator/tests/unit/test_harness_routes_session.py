@@ -818,7 +818,7 @@ def test_trigger_turn_restore_rebuilds_same_spec_session(monkeypatch, tmp_path):
     # agent.run mock 成(避免真 LLM 调用)
     captured = {}
 
-    async def fake_run(msg, message_history=None):
+    async def fake_run(msg, message_history=None, metadata=None):
         captured["msg"] = msg
         from pydantic_ai.messages import ModelResponse, TextPart
         from unittest.mock import MagicMock
