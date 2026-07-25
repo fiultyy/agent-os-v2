@@ -219,3 +219,79 @@ async def test_run_flow_404_when_missing() -> None:
     with pytest.raises(HTTPException) as ei:
         await routes.run_flow("flow_does_not_exist")
     assert ei.value.status_code == 404
+
+
+# ── cancel(): idempotent state transition + run() cancelled path ────────
+
+def test_cancel_marks_running_and_is_idempotent() -> None:
+    """cancel() on a running flow → status='cancelled' + True; on any finished
+    state (completed/failed/cancelled) → False (no-op)."""
+    s = FlowScheduler(FlowDef(nodes=[{"id": "A", "harness": "claw", "message": "m"}]), "f")
+    s.state.status = "running"
+    assert s.cancel() is True
+    assert s.state.status == "cancelled"
+    # idempotent: already cancelled → False
+    assert s.cancel() is False
+    # completed/failed also no-op
+    for done in ("completed", "failed"):
+        s2 = FlowScheduler(FlowDef(nodes=[{"id": "A", "harness": "claw", "message": "m"}]), "f2")
+        s2.state.status = done
+        assert s2.cancel() is False
+        assert s2.state.status == done
+
+
+@pytest.mark.asyncio
+async def test_run_cancelled_marks_inflight_cancelled_and_unreached_skipped(monkeypatch) -> None:
+    """cancel() mid-run → in-flight node→cancelled, unreached dependent→skipped,
+    flow status='cancelled'; run() itself is NOT cancelled (no CancelledError
+    escapes) so its finish/cleanup block runs intact."""
+    monkeypatch.setattr(flow_mod, "ObserveEmitter", lambda **kw: _FakeEmitter())
+    fd = FlowDef(
+        nodes=[{"id": "A", "harness": "claw", "message": "m"},
+               {"id": "B", "harness": "claw", "message": "n"}],
+        edges=[{"from": "A", "to": "B"}])
+    fd.validate_graph()
+    s = FlowScheduler(fd, "f")
+
+    # A hangs forever at "running" (until cancel() cancels its task); B never starts.
+    started = asyncio.Event()
+
+    async def hang_node(node) -> None:
+        s.state.nodes[node.id]["status"] = "running"
+        started.set()
+        await asyncio.Event().wait()   # never set → blocks until task cancelled
+
+    s._run_node = hang_node  # type: ignore[method-assign]
+
+    task = asyncio.create_task(s.run())
+    await started.wait()            # A entered "running"
+    await asyncio.sleep(0.01)       # let run()'s drain reach the gather await
+    assert s.cancel() is True       # cancel in-flight A; drain then sees it done
+
+    await task                      # run() finishes via cancelled-finish branch
+    assert s.state.status == "cancelled"
+    assert s.state.nodes["A"]["status"] == "cancelled"   # running → cancelled
+    assert s.state.nodes["B"]["status"] == "skipped"     # never reached → skipped
+    assert s.state.finished_at is not None
+
+
+@pytest.mark.asyncio
+async def test_cancel_flow_endpoint_marks_and_409_on_finished() -> None:
+    from src.harness import routes
+    fd = FlowDef(nodes=[{"id": "A", "harness": "claw", "message": "m"}])
+    fid = (await routes.create_flow(fd))["flow_id"]
+    rec = routes.get_flow(fid)
+    assert rec is not None
+    rec["scheduler"].state.status = "running"   # simulate a running flow
+
+    r = await routes.cancel_flow(fid)
+    assert r == {"flow_id": fid, "status": "cancelled"}
+    assert rec["scheduler"].state.status == "cancelled"
+
+    with pytest.raises(HTTPException) as ei:    # idempotent → 409
+        await routes.cancel_flow(fid)
+    assert ei.value.status_code == 409
+
+    with pytest.raises(HTTPException) as ei:    # missing → 404
+        await routes.cancel_flow("flow_does_not_exist")
+    assert ei.value.status_code == 404

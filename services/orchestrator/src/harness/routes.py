@@ -1252,6 +1252,23 @@ async def get_flow_status(flow_id: str) -> Dict[str, Any]:
     return rec["state"].to_dict()
 
 
+@router.post("/flows/{flow_id}/cancel")
+async def cancel_flow(flow_id: str) -> Dict[str, Any]:
+    """Cancel a running flow best-effort. In-flight node turns' asyncio tasks
+    are cancelled (the sent harness message can't be revoked); run() emits
+    flow_completed(status=cancelled). 404 if flow unknown, 409 if finished."""
+    rec = get_flow(flow_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="flow not found")
+    scheduler: FlowScheduler = rec["scheduler"]
+    if not scheduler.cancel():
+        raise HTTPException(
+            status_code=409,
+            detail=f"flow already finished (status={scheduler.state.status})",
+        )
+    return {"flow_id": flow_id, "status": "cancelled"}
+
+
 # ── switch (no prefix — mounted at app root as /switch) ───────────────
 # Exposed via a separate include so it sits at POST /switch, not /h/switch.
 

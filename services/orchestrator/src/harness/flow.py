@@ -132,7 +132,7 @@ class FlowState:
 
     def __init__(self, flow_def: FlowDef, flow_id: str):
         self.flow_id = flow_id
-        self.status = "pending"   # pending | running | completed | failed
+        self.status = "pending"   # pending | running | completed | failed | cancelled
         self.nodes: Dict[str, Dict[str, Any]] = {
             n.id: {"id": n.id, "status": "pending", "response": "",
                    "status_code": "", "error": ""}
@@ -423,15 +423,27 @@ class FlowScheduler:
             # drains (hit on fan-out: A→{B,C} with no merge).
             self._node_tasks -= {t for t in list(self._node_tasks) if t.done()}
 
-        # any node that never got reached (branch dead-end / DAG left behind)
-        for node in self.flow_def.nodes:
-            if self.state.nodes[node.id]["status"] == "pending":
-                self.state.nodes[node.id]["status"] = "skipped"
-
-        self.state.status = "failed" if any(
-            self.state.nodes[n.id]["status"] == "failed"
-            for n in self.flow_def.nodes
-        ) else "completed"
+        # drain done — all node tasks finished (incl. cancelled via cancel()).
+        # cancel() set state.status="cancelled" + cancelled in-flight node tasks;
+        # their _run_node raised CancelledError at its await → gather collected
+        # it → task discarded → drain exited. Finish block marks nodes + emits.
+        if self.state.status == "cancelled":
+            # in-flight nodes → cancelled; unreached → skipped
+            for node in self.flow_def.nodes:
+                st = self.state.nodes[node.id]["status"]
+                if st == "running":
+                    self.state.nodes[node.id]["status"] = "cancelled"
+                elif st == "pending":
+                    self.state.nodes[node.id]["status"] = "skipped"
+        else:
+            # normal finish: unreached nodes (branch dead-end / DAG left behind)
+            for node in self.flow_def.nodes:
+                if self.state.nodes[node.id]["status"] == "pending":
+                    self.state.nodes[node.id]["status"] = "skipped"
+            self.state.status = "failed" if any(
+                self.state.nodes[n.id]["status"] == "failed"
+                for n in self.flow_def.nodes
+            ) else "completed"
         self.state.finished_at = _now()
 
         await self._emit_flow("flow_completed", {
@@ -447,6 +459,26 @@ class FlowScheduler:
         loop = asyncio.get_event_loop()
         self._task = loop.create_task(self.run())
         return self._task
+
+    def cancel(self) -> bool:
+        """Cancel a running flow best-effort. Idempotent.
+
+        Cancels in-flight node tasks at their next await point; run()'s drain
+        loop then sees them done, exits, and the cancelled-finish branch marks
+        running→cancelled / pending→skipped + emits flow_completed(status=
+        cancelled). The sent harness message (claw/cc) can't be revoked — the
+        server may still process it — but no more flow_* events fire and no
+        dependents are scheduled. No-op (returns False) on an already-finished
+        flow; run() is untouched (no CancelledError injected into it) so its
+        finish/cleanup block always runs intact.
+        """
+        if self.state.status in ("completed", "failed", "cancelled"):
+            return False
+        self.state.status = "cancelled"
+        for t in list(self._node_tasks):
+            if not t.done():
+                t.cancel()
+        return True
 
     # ── flow-level event push ──────────────────────────────────────
 
