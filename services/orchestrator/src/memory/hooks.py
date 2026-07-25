@@ -172,6 +172,61 @@ class CurateContext:
     scope: str = "all"  # all / episodic / semantic
 
 
+# ── Tool / Stop / Subagent contexts (ADR-1 H1) ─────────────────────
+
+
+@dataclass
+class ToolContext:
+    """Payload for ``EventType.TOOL_PRE`` / ``TOOL_POST`` / ``TOOL_POST_FAIL``.
+
+    Carries the tool name + arguments, plus the outcome on POST/POST_FAIL:
+
+    * ``TOOL_PRE``  : ``result``/``error`` are ``None``; a hook (e.g.
+      guardrail) MAY return ``{"allow": False, "reason": ...}`` to veto the
+      run — the emitter (ToolExecutor, node B) decides the short-circuit.
+    * ``TOOL_POST`` : ``result`` set, ``error`` ``None``.
+    * ``TOOL_POST_FAIL`` : ``error`` set (the exception), ``result`` ``None``.
+
+    ``allow``/``reason`` are populated only on TOOL_PRE round-trips (the
+    hook's *decision* echoed back for observability); they are left ``None``
+    by the emitter on POST/POST_FAIL.
+    """
+
+    tool_name: str
+    arguments: dict[str, Any] = field(default_factory=dict)
+    agent_id: str = ""
+    session_id: str = ""
+    result: Any = None  # populated on TOOL_POST
+    error: Any = None  # populated on TOOL_POST_FAIL (Exception/value)
+    # Decision echo: filled by a TOOL_PRE consumer's return value, not by
+    # the emitter. Default-allowed (``allow=True``) so an absent consumer
+    # means "no veto".
+    allow: bool = True
+    reason: str = ""
+
+
+@dataclass
+class StopContext:
+    """Payload for ``EventType.STOP`` (session/agent stop)."""
+
+    session_id: str
+    agent_id: str = ""
+    reason: str = ""  # user / error / shutdown / …
+
+
+@dataclass
+class SubagentContext:
+    """Payload for ``EventType.SUBAGENT_STOP`` (workflow / a2a subagent end).
+
+    ``parent_session_id`` carries the orchestrating session so streaming
+    fan-out (fork/async-explore) can correlate completion back to its root.
+    """
+
+    agent_id: str
+    session_id: str
+    parent_session_id: str = ""
+
+
 # ── Hook contract ──────────────────────────────────────────────────
 
 
@@ -220,4 +275,32 @@ class MemoryHook(ABC):
         ...
 
     async def on_curate(self, ctx: CurateContext) -> None:
+        ...
+
+    # ── Tool / Turn / Stop / Subagent events (ADR-1 H1) ─────────────
+    # Fire points land in H2 (node B); these no-ops let the bus getattr
+    # any on_* handler safely for hooks that don't participate. A TOOL_PRE
+    # consumer MAY return {"allow": bool, "reason": str} to surface a veto
+    # decision; every other handler returns None (void).
+
+    async def on_tool_pre(self, ctx: ToolContext) -> None:
+        # May be overridden to return {"allow": False, "reason": ...};
+        # returning None == no veto.
+        ...
+
+    async def on_tool_post(self, ctx: ToolContext) -> None:
+        ...
+
+    async def on_tool_post_fail(self, ctx: ToolContext) -> None:
+        ...
+
+    async def on_turn_submit(self, ctx: TurnContext) -> None:
+        # TURN_SUBMIT reuses TurnContext (ADR-1): same agent/session/item
+        # shape, fire point is the user-prompt submit (pre-execution).
+        ...
+
+    async def on_stop(self, ctx: StopContext) -> None:
+        ...
+
+    async def on_subagent_stop(self, ctx: SubagentContext) -> None:
         ...

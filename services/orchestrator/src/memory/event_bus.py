@@ -1,10 +1,13 @@
-"""MemoryEventBus — lifecycle event dispatch for the memory subsystem.
+"""MemoryEventBus — full lifecycle event dispatch (not just memory).
 
-``chat.py`` emits lifecycle events (``session_start`` / ``turn_end`` /
-``pre_compress`` / ``session_end``); registered hooks react in priority
-order. This decouples the chat route from direct
-``memory_service`` / ``memory_migrator`` calls and gives P2 (cache) and
-P3 (state machine) clean insertion points.
+Despite the legacy ``Memory`` name (kept per ADR-4 to avoid a wide import
+rename), this bus now carries the *whole agent lifecycle*: memory events
+(``session_start`` / ``turn_end`` / ``pre_compress`` / …) *and* the
+tool/turn/stop/subagent lifecycle (``tool_pre`` / ``tool_post`` /
+``tool_post_fail`` / ``turn_submit`` / ``stop`` / ``subagent_stop``).
+Registered hooks react in priority order. This decouples the chat route
+and other emitters from direct ``memory_service`` / ``memory_migrator``
+calls and gives P2 (cache) and P3 (state machine) clean insertion points.
 
 Degradation switch: with ``MEMORY_EVENT_BUS_ENABLED=0`` (see engine.py),
 :meth:`emit` keeps only ``SYSTEM``-priority hooks (``DefaultMemoryHook``)
@@ -29,6 +32,9 @@ from src.memory.hooks import (
     MemoryHook,
     RecallContext,
     SessionContext,
+    StopContext,
+    SubagentContext,
+    ToolContext,
     TurnContext,
 )
 
@@ -36,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 
 class EventType(str, Enum):
-    """Memory lifecycle event types."""
+    """Full agent lifecycle event types (memory + tool/turn/stop/subagent)."""
 
     SESSION_START = "session_start"
     TURN_START = "turn_start"  # reserved (recall injection, P2)
@@ -51,6 +57,16 @@ class EventType(str, Enum):
     CONSOLIDATE = "consolidate"  # ConsolidatorAgent: episodic → semantic merge
     RECALL = "recall"  # RetrieverAgent: match × lif_weight ranking
     CURATE = "curate"  # CuratorAgent: offline LLM QA (archive/merge/correct)
+    # -- Tool / Turn / Stop / Subagent lifecycle (ADR-1 H1) ------------
+    # Fire points land in H2 (node B); the bus only defines + dispatches
+    # them. TOOL_PRE consumers (e.g. guardrail) may return {allow, reason}
+    # to short-circuit; the emitter decides what to do with that.
+    TOOL_PRE = "tool_pre"  # before ToolExecutor runs a tool
+    TOOL_POST = "tool_post"  # after a successful tool run
+    TOOL_POST_FAIL = "tool_post_fail"  # tool run raised (observe-able)
+    TURN_SUBMIT = "turn_submit"  # user prompt submitted, pre-execution
+    STOP = "stop"  # session/agent stop
+    SUBAGENT_STOP = "subagent_stop"  # subagent (workflow/a2a) finished
 
 
 _ALL_EVENTS: tuple[EventType, ...] = tuple(EventType)
@@ -67,6 +83,12 @@ _EVENT_CONTEXT: dict[EventType, type] = {
     EventType.CONSOLIDATE: ConsolidateContext,
     EventType.RECALL: RecallContext,
     EventType.CURATE: CurateContext,
+    EventType.TOOL_PRE: ToolContext,
+    EventType.TOOL_POST: ToolContext,
+    EventType.TOOL_POST_FAIL: ToolContext,
+    EventType.TURN_SUBMIT: TurnContext,
+    EventType.STOP: StopContext,
+    EventType.SUBAGENT_STOP: SubagentContext,
 }
 
 
