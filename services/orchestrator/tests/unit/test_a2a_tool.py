@@ -272,3 +272,89 @@ class TestSchema:
         assert set(A2A_CALL_SCHEMA["required"]) == {"target_agent_id", "message"}
         assert A2A_CALL_SCHEMA["properties"]["target_agent_id"]["type"] == "string"
         assert A2A_CALL_SCHEMA["properties"]["message"]["type"] == "string"
+
+
+# --- H2 ADR-2 (4): consumed peer agent 结束 fire SUBAGENT_STOP ----------------
+
+class TestFireSubagentStop:
+    """a2a_call_handler 在 send 成功后 fire SUBAGENT_STOP(consumed=target);
+    bus 缺席 / hook 异常均 fire-and-forget(run 不崩,返值不变)。"""
+
+    def _bus_with_recorder(self):
+        from src.memory.event_bus import EventType, MemoryEventBus
+        from src.memory.hooks import HookPriority, MemoryHook, SubagentContext
+
+        class _Rec(MemoryHook):
+            priority = HookPriority.OBSERVER
+
+            def __init__(self):
+                self.stops = []
+
+            async def on_subagent_stop(self, ctx):
+                self.stops.append(ctx)
+
+        bus = MemoryEventBus()
+        rec = _Rec()
+        bus.register(rec, EventType.SUBAGENT_STOP)
+        return bus, rec
+
+    def test_send_success_fires_subagent_stop_with_target_agent_id(self, monkeypatch):
+        from src.services import _state
+        bus, rec = self._bus_with_recorder()
+        monkeypatch.setattr(_state, "memory_event_bus", bus)
+
+        reg = _make_registry()
+        tport = _FakeTransport("peer done")
+        result = _run(a2a_call_handler(
+            "main", "hello peer", transport=tport, registry=reg))
+
+        assert result == {"status": "success", "output": "peer done"}
+        assert len(rec.stops) == 1
+        assert rec.stops[0].agent_id == "main"
+        assert rec.stops[0].session_id == ""
+        assert rec.stops[0].parent_session_id == ""
+
+    def test_no_bus_skips_fire_silently_run_unaffected(self, monkeypatch):
+        from src.services import _state
+        monkeypatch.setattr(_state, "memory_event_bus", None)
+
+        reg = _make_registry()
+        result = _run(a2a_call_handler(
+            "native", "ping", transport=_FakeTransport("ok"), registry=reg))
+        assert result == {"status": "success", "output": "ok"}
+
+    def test_send_failure_does_not_fire_subagent_stop(self, monkeypatch):
+        from src.services import _state
+        bus, rec = self._bus_with_recorder()
+        monkeypatch.setattr(_state, "memory_event_bus", bus)
+
+        class _BoomTransport:
+            async def send(self, target, msg):
+                raise RuntimeError("transport down")
+
+        reg = _make_registry()
+        result = _run(a2a_call_handler(
+            "main", "hi", transport=_BoomTransport(), registry=reg))
+        assert result["status"] == "error"
+        assert "transport down" in result["error"]
+        assert rec.stops == []
+
+    def test_hook_raise_is_fire_and_forget_run_unaffected(self, monkeypatch):
+        from src.memory.event_bus import EventType, MemoryEventBus
+        from src.memory.hooks import HookPriority, MemoryHook
+        from src.services import _state
+
+        class _Boom(MemoryHook):
+            priority = HookPriority.SYSTEM
+
+            async def on_subagent_stop(self, ctx):
+                raise RuntimeError("hook boom")
+
+        bus = MemoryEventBus()
+        bus.register(_Boom(), EventType.SUBAGENT_STOP)
+        monkeypatch.setattr(_state, "memory_event_bus", bus)
+
+        reg = _make_registry()
+        result = _run(a2a_call_handler(
+            "native", "ping", transport=_FakeTransport("ok"), registry=reg))
+        assert result == {"status": "success", "output": "ok"}

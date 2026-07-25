@@ -679,3 +679,123 @@ def test_run_handler_aexit_releases_unreleased_worktree(tmp_path, monkeypatch):
     assert result["status"] == "error"
     assert len(rm_calls) >= 1, \
         "F6: agent.run raise 时 release(finally)应调 git worktree remove --force"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# H2 ADR-2 (4): workflow_run_handler / workflow_loop_handler 成功后,
+# 每个 consumed sub-agent fire SUBAGENT_STOP(agent_id=node.agent_id,
+# parent_session_id=ctx.session_id)。bus 缺席 / hook 异常 fire-and-forget。
+# ─────────────────────────────────────────────────────────────────────
+def _bus_with_recorder():
+    from src.memory.event_bus import EventType, MemoryEventBus
+    from src.memory.hooks import HookPriority, MemoryHook, SubagentContext
+
+    class _Rec(MemoryHook):
+        priority = HookPriority.OBSERVER
+
+        def __init__(self):
+            self.stops = []
+
+        async def on_subagent_stop(self, ctx):
+            self.stops.append(ctx)
+
+    bus = MemoryEventBus()
+    rec = _Rec()
+    bus.register(rec, EventType.SUBAGENT_STOP)
+    return bus, rec
+
+
+def test_run_handler_fires_subagent_stop_per_consumed_node(monkeypatch):
+    from src.services import _state
+    bus, rec = _bus_with_recorder()
+    monkeypatch.setattr(_state, "memory_event_bus", bus)
+
+    restore = _patch_engine_run(fake_result=_fake_result(status="success", n=2))
+    try:
+        result = run_async(workflow_run_handler(nodes=[{"prompt": "t1"}, {"prompt": "t2"}]))
+    finally:
+        restore()
+
+    assert result["status"] == "success"
+    assert len(rec.stops) == 2
+    fired_ids = {s.agent_id for s in rec.stops}
+    assert fired_ids == {"wf_abc_00000000", "wf_abc_00000001"}
+    for s in rec.stops:
+        assert s.parent_session_id == "workflow"
+        assert s.session_id == "workflow"
+
+
+def test_loop_handler_fires_subagent_stop_per_consumed_node(monkeypatch):
+    from src.services import _state
+    bus, rec = _bus_with_recorder()
+    monkeypatch.setattr(_state, "memory_event_bus", bus)
+
+    restore = _patch_engine_loop(fake_result=_fake_result(status="success", n=1))
+    try:
+        result = run_async(workflow_loop_handler(finder_spec={"prompt": "find"}))
+    finally:
+        restore()
+
+    assert result["status"] == "success"
+    assert len(rec.stops) == 1
+    assert rec.stops[0].agent_id == "wf_abc_00000000"
+    assert rec.stops[0].parent_session_id == "workflow"
+
+
+def test_run_handler_no_bus_skips_fire_silently(monkeypatch):
+    from src.services import _state
+    monkeypatch.setattr(_state, "memory_event_bus", None)
+
+    restore = _patch_engine_run(fake_result=_fake_result(status="success", n=2))
+    try:
+        result = run_async(workflow_run_handler(nodes=[{"prompt": "x"}]))
+    finally:
+        restore()
+
+    assert result["status"] == "success"
+    assert len(result["output"]["node_results"]) == 2
+
+
+def test_run_handler_engine_failure_does_not_fire_subagent_stop(monkeypatch):
+    from src.services import _state
+    bus, rec = _bus_with_recorder()
+    monkeypatch.setattr(_state, "memory_event_bus", bus)
+
+    orig = wf_mod.WorkflowEngine.run
+
+    async def _raise(self, spec, ctx):
+        raise RuntimeError("engine boom")
+
+    wf_mod.WorkflowEngine.run = _raise
+    v2_workflow._build_journal = lambda: None
+    try:
+        result = run_async(workflow_run_handler(nodes=[{"prompt": "x"}]))
+    finally:
+        wf_mod.WorkflowEngine.run = orig
+
+    assert result["status"] == "error"
+    assert rec.stops == []
+
+
+def test_run_handler_hook_raise_is_fire_and_forget(monkeypatch):
+    from src.memory.event_bus import EventType, MemoryEventBus
+    from src.memory.hooks import HookPriority, MemoryHook
+    from src.services import _state
+
+    class _Boom(MemoryHook):
+        priority = HookPriority.SYSTEM
+
+        async def on_subagent_stop(self, ctx):
+            raise RuntimeError("hook boom")
+
+    bus = MemoryEventBus()
+    bus.register(_Boom(), EventType.SUBAGENT_STOP)
+    monkeypatch.setattr(_state, "memory_event_bus", bus)
+
+    restore = _patch_engine_run(fake_result=_fake_result(status="success", n=1))
+    try:
+        result = run_async(workflow_run_handler(nodes=[{"prompt": "x"}]))
+    finally:
+        restore()
+
+    assert result["status"] == "success"

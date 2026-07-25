@@ -17,6 +17,7 @@ LLM 接入 env:``ANTHROPIC_BASE_URL`` / ``ANTHROPIC_AUTH_TOKEN`` / ``ANTHROPIC_M
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any, Sequence
 
@@ -27,6 +28,8 @@ from pydantic_ai.providers.anthropic import AnthropicProvider
 
 from .capabilities.engineering_discipline_capability import EngineeringDisciplineCapability
 from .mcp_config import build_mcp_toolset, build_mcp_toolsets, load_global_mcp_servers
+
+logger = logging.getLogger(__name__)
 
 HARNESS_TYPE = "agent-os-v2"  # 与 observe/client.py 对齐(agent-os-v2 harness)
 
@@ -152,6 +155,45 @@ def build_native_agent(
         toolsets=ts,
         model_settings=model_settings or {},
     )
+
+
+
+async def run_agent_turn_with_stop(
+    agent: Agent,
+    prompt: str,
+    *,
+    session_id: str,
+    agent_id: str,
+    bus: Any = None,
+    message_history: Any = None,
+    metadata: dict[str, Any] | None = None,
+) -> Any:
+    """Run a native ``Agent.run`` and fire ``STOP`` on completion (ADR-2 H2).
+
+    Thin lifecycle wrapper: every native agent turn (harness ``/h turn`` sync
+    + async, ``/v1/execute``) routes through here so the STOP event has one
+    fire point (in ``native_agent``), not three duplicated ones scattered in
+    the route layer. ``bus`` is the orchestrator ``MemoryEventBus``
+    (``_state.memory_event_bus``); ``None`` skips the STOP fire (e.g. the
+    ``__main__`` smoke / unit tests that build a bare agent).
+
+    STOP fires *after* ``agent.run`` returns, best-effort; a failed turn
+    propagates to the caller without a STOP fire (no completed run).
+    """
+    result = await agent.run(
+        prompt, message_history=message_history, metadata=metadata or {},
+    )
+    if bus is not None:
+        try:
+            from src.memory.event_bus import EventType
+            from src.memory.hooks import StopContext
+            await bus.emit(
+                EventType.STOP,
+                StopContext(session_id=session_id, agent_id=agent_id),
+            )
+        except Exception:
+            logger.warning("STOP event fire failed (non-fatal)", exc_info=True)
+    return result
 
 
 if __name__ == "__main__":

@@ -279,6 +279,11 @@ async def execute(req: ExecuteRequest) -> StreamingResponse:
         return JSONResponse({"error": "Agent not found"}, status_code=404)
 
     session_id = req.session_id or str(uuid.uuid4())
+    # ADR-2 H2:TURN_SUBMIT 最早 fire(用户 prompt 入口,pre-execution)。
+    await _state.memory_event_bus.emit(
+        EventType.TURN_SUBMIT,
+        TurnContext(agent_id=req.agent_id, session_id=session_id),
+    )
     # 通信桥:把执行 agent 注册进 session,使 broadcast 收件人非空。
     _state.communication_bus.register_agent(req.agent_id, session_id)
     await _state.memory_event_bus.emit(
@@ -287,7 +292,7 @@ async def execute(req: ExecuteRequest) -> StreamingResponse:
     )
 
     # native Agent:全 capability 横切 + AnthropicModel cache(R2 替代 ContextCompiler/static_count)
-    from src.harness.native_agent import build_native_agent
+    from src.harness.native_agent import build_native_agent, run_agent_turn_with_stop
     from src.harness.capabilities import (
         GuardrailCapability, MemoryWriterCapability, ObserveCapability, ToolBridgeCapability,
     )
@@ -325,7 +330,16 @@ async def execute(req: ExecuteRequest) -> StreamingResponse:
                 await emitter.connect()  # best-effort(observe 断不影响 run,ADR-7)
             except Exception:
                 logger.warning("execute emitter connect failed (%s)", harness_id)
-            result = await native_agent.run(req.input)
+            # ADR-2 H2:TURN_START(agent.run 前;reserved 接 fire,recall 注入点保留)。
+            await _state.memory_event_bus.emit(
+                EventType.TURN_START,
+                TurnContext(agent_id=req.agent_id, session_id=session_id),
+            )
+            result = await run_agent_turn_with_stop(  # fire STOP(完成,native_agent.py)
+                native_agent, req.input,
+                session_id=session_id, agent_id=req.agent_id,
+                bus=_state.memory_event_bus,
+            )
             agent["status"] = "idle"
             yield _sse("agent_status", {"agent_id": req.agent_id, "status": "idle"})
             yield _sse("execution_complete", {

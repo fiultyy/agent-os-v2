@@ -95,8 +95,45 @@ async def a2a_call_handler(
         logger.warning("a2a_call_handler: send failed (%s): %s", target_agent_id, exc)
         return {"status": "error", "error": f"a2a send: {exc}"}
 
+    # ── H2 ADR-2 (4):consumed peer agent.run 完成后 fire SUBAGENT_STOP(流式
+    #    编排收口,observe 可观测每 peer 的完成)。agent_id = target(consumed)。
+    #    session_id / parent_session_id 留空:transport 内部 a2a_call_id 不暴露给
+    #    caller(Message 接口不加字段 defer),caller session P0 无透传(handler
+    #    签名无 request ctx,对位 v2_workflow P0 默认)。fire-and-forget。
+    await _fire_subagent_stop(target_agent_id)
+
     text = msg.parts[0].text if msg.parts else ""
     return {"status": "success", "output": text}
+
+
+async def _fire_subagent_stop(agent_id: str) -> None:
+    """H2 ADR-2 (4):consumed peer agent 结束后 fire ``SUBAGENT_STOP``。
+
+    consumed agent_id = target;``session_id`` / ``parent_session_id`` 留空
+    (transport 内部 a2a_call_id 不暴露给 caller,caller session P0 无透传 —
+    对位 v2_workflow P0 默认;defer:transport 暴露 consumed session 或 handler
+    透传 caller session 时再填)。bus 不可用 / emit raise 均 fire-and-forget
+    跳过(R5:observe 缺席或 hook 异常不影响 send 返值)。
+    """
+    try:
+        from src.services import _state
+    except Exception:  # noqa: BLE001 — lazy import 失败等同 bus 缺席
+        return
+    bus = getattr(_state, "memory_event_bus", None)
+    if bus is None:
+        return
+    from src.memory.event_bus import EventType
+    from src.memory.hooks import SubagentContext
+    try:
+        await bus.emit(
+            EventType.SUBAGENT_STOP,
+            SubagentContext(agent_id=agent_id, session_id=""),
+        )
+    except Exception:  # noqa: BLE001 — R5 fire-and-forget
+        logger.warning(
+            "a2a_call_handler: SUBAGENT_STOP fire failed for agent=%s", agent_id,
+            exc_info=True,
+        )
 
 
 __all__ = ["A2A_CALL_SCHEMA", "a2a_call_handler"]

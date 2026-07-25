@@ -187,6 +187,48 @@ def _build_engine() -> WorkflowEngine:
     )
 
 
+async def _fire_subagent_stops(node_results: Any, *, parent_session_id: str) -> None:
+    """H2 ADR-2 (4):per consumed workflow sub-agent fire ``SUBAGENT_STOP``.
+
+    每跑完一个 fan-out node(``NodeResult.agent_id`` 是 consumed agent id),fire
+    一个 ``SubagentContext``;``session_id`` 用 workflow session(子 agent 经
+    engine.py:335 ``session_id=ctx.session_id`` 共用 caller session),``parent_session_id``
+    同为 caller session(orchestrating turn)。bus 不可用 / 单次 emit raise 均
+    fire-and-forget 跳过(对位 R5,observe 缺席或 hook 异常不影响 run 返值)。
+
+    ponytail:per-node 串行 await 而非 gather —— emit 是 fan-out + 非阻塞契约,
+    串行更可观测且 N 小(concurrency cap 默认 8);gather 收益不足其复杂度。
+    """
+    try:
+        from src.services import _state
+    except Exception:  # noqa: BLE001 — lazy import 失败等同 bus 缺席
+        return
+    bus = getattr(_state, "memory_event_bus", None)
+    if bus is None:
+        return
+    from src.memory.event_bus import EventType
+    from src.memory.hooks import SubagentContext
+
+    for nr in node_results or []:
+        agent_id = getattr(nr, "agent_id", "") or ""
+        if not agent_id:
+            continue
+        try:
+            await bus.emit(
+                EventType.SUBAGENT_STOP,
+                SubagentContext(
+                    agent_id=agent_id,
+                    session_id=parent_session_id,
+                    parent_session_id=parent_session_id,
+                ),
+            )
+        except Exception:  # noqa: BLE001 — R5 fire-and-forget
+            logger.warning(
+                "v2_workflow: SUBAGENT_STOP fire failed for agent=%s", agent_id,
+                exc_info=True,
+            )
+
+
 async def workflow_run_handler(
     nodes: list[dict],
     fan_in: str = "list",
@@ -252,6 +294,11 @@ async def workflow_run_handler(
             "workflow_run_handler: engine.run failed (run=%s): %s", run_id, exc,
         )
         return {"status": "error", "output": None, "error": f"engine.run: {exc}"}
+
+    # ── H2 ADR-2 (4):fan-out N sub-agent 跑完后,每个 consumed agent 结束 fire
+    #    SUBAGENT_STOP(parent=caller session=ctx.session_id)。fire-and-forget:bus
+    #    不可用(observe 未起 / R5 degradation)→ 跳过,run 不崩。
+    await _fire_subagent_stops(result.node_results, parent_session_id=ctx.session_id)
 
     return {
         "status": result.status,
@@ -319,6 +366,10 @@ async def workflow_loop_handler(
             "workflow_loop_handler: engine.loop failed (run=%s): %s", run_id, exc,
         )
         return {"status": "error", "output": None, "error": f"engine.loop: {exc}"}
+
+    # ── H2 ADR-2 (4):loop finder 每轮 spawn consumed sub-agent,跑完后同样
+    #    fire SUBAGENT_STOP(对位 workflow_run_handler)。
+    await _fire_subagent_stops(result.node_results, parent_session_id=ctx.session_id)
 
     return {
         "status": result.status,
