@@ -94,20 +94,29 @@ profile_registry: Any = None
 memory_event_bus: Any = None
 
 
-async def fire(event: Any, ctx: Any) -> None:
-    """Best-effort emit on memory_event_bus. No-op if bus is None (e.g. unit
-    tests that never bootstrap engine); swallows emit errors so a bus/hook
-    failure never breaks the caller's main flow (fire-and-forget, matches
-    ObserveEmitter style)."""
+async def fire(event: Any, ctx: Any) -> Any:
+    """Best-effort emit on memory_event_bus. Returns the hook result (last
+    non-None from ``bus.emit``), or None if bus is unset / emit errored.
+
+    Callers needing scored/ranked output read the return value (e.g.
+    ``GET /v1/memories`` RECALL → RetrieverHook ranked, ``POST /v1/memories``
+    INGEST → IngestorResult). Fire-and-forget callers ignore it (no behavior
+    change). Swallows emit errors so a bus/hook failure never breaks the
+    caller's main flow.
+
+    ponytail: pre-fix (2c560c5) fire was ``-> None`` and discarded emit's
+    return → RetrieverHook scored path unreachable via /v1/memories (always
+    fell back to service.recall). Returning emit's result closes that gap."""
     # ponytail: None-guard + swallow — test env has bus=None, prod has it wired;
     # emit failures must not drag down turn/tool main flow.
     bus = memory_event_bus
     if bus is None:
-        return
+        return None
     try:
-        await bus.emit(event, ctx)
+        return await bus.emit(event, ctx)
     except Exception:
         logger.warning("memory_event_bus.emit(%s) failed (non-fatal)", event, exc_info=True)
+        return None
 
 # W3: bounded-concurrency memory write pool (multi-agent + per-agent
 # ordering + drain). DefaultMemoryHook submits writes through it; chat.py
@@ -131,6 +140,9 @@ ingestor: Any = None
 consolidator: Any = None
 retriever: Any = None
 curator: Any = None
+# Side-agent 专用 LLM 实例(SIDE_LLM_ENABLED gate)。None → side agent fallback
+# 主 llm_client(engine.py: _side_llm = side_llm_client or llm_client)。
+side_llm_client: Any = None
 neural_store: Any = None
 neural_engine: Any = None
 neural_hook: Any = None
@@ -174,6 +186,7 @@ def record_degrade(agent: str) -> None:
 # would quietly break test isolation.
 _ASSEMBLED_SINGLETON_FIELDS: tuple[str, ...] = (
     "llm_client",
+    "side_llm_client",
     "knowledge_graph",
     "memory_service",
     "pg_store",

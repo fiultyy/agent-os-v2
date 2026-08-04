@@ -41,6 +41,8 @@ from src.memory.compressor import AsyncCompressor, SyncCompressor, ContextMonito
 from src.memory.migrator import MemoryMigrator
 from src.memory.forgetting import ActiveForgetting
 from src.memory.state_pruner import TimeBasedStatePruner
+from src.memory.sideline.task_consolidator import TaskConsolidationAgent
+from src.memory.sideline.backward_writer import BackwardWriter
 from src.memory.db_watcher import MemoryDBWatcher
 from src.memory.write_queue import MemoryWriteQueue
 from src.communication.bus import CommunicationBus
@@ -105,8 +107,42 @@ def bootstrap(config_path: str | None = None) -> None:
 
     _state.llm_client = LLMClient()
 
-    # side-agent parallel mechanism removed (Part5) — _state.side_* stay None.
-    # memory/sideline/* archived, awaiting AO2 capability rewrite.
+    # #4: side-agent 专用 LLM 实例(记忆提炼/整合/curator 等)。SIDE_LLM_ENABLED=1
+    # 时装配;未启用 → None,side agent fallback 到主 llm_client,灰度安全。
+    # format-aware:anthropic 通道(默认,glm-4.7)或 openai 兼容(paas/v4)二选一。
+    # _chat_anthropic 用 self.anthropic_model,故 anthropic 分支必须配 anthropic_* 字段。
+    if os.getenv("SIDE_LLM_ENABLED", "0") == "1":
+        _side_fmt = os.getenv("SIDE_LLM_API_FORMAT", "anthropic").lower()
+        if _side_fmt == "anthropic":
+            _state.side_llm_client = LLMClient(
+                format="anthropic",
+                anthropic_model=os.getenv("SIDE_LLM_MODEL", "glm-4.7"),
+                anthropic_base_url=os.getenv(
+                    "SIDE_LLM_ANTHROPIC_BASE_URL",
+                    os.environ.get("ANTHROPIC_BASE_URL", "https://open.bigmodel.cn/api/anthropic"),
+                ),
+                anthropic_api_key=os.getenv(
+                    "SIDE_LLM_ANTHROPIC_API_KEY",
+                    os.environ.get("ANTHROPIC_AUTH_TOKEN", ""),
+                ),
+            )
+        else:
+            _state.side_llm_client = LLMClient(
+                format="openai",
+                base_url=os.getenv("SIDE_LLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4"),
+                api_key=os.getenv("SIDE_LLM_API_KEY", os.environ.get("ANTHROPIC_AUTH_TOKEN", "")),
+                default_model=os.getenv("SIDE_LLM_MODEL", "glm-4-flash"),
+            )
+        logger.info(
+            "side-agent LLM wired: format=%s model=%s",
+            _state.side_llm_client.format,
+            getattr(_state.side_llm_client, "anthropic_model", None)
+            or _state.side_llm_client.default_model,
+        )
+    else:
+        _state.side_llm_client = None
+    # side agent 注入源:启用 side 实例则用它,否则 fallback 主 client(行为等同改动前)。
+    _side_llm = _state.side_llm_client or _state.llm_client
 
     # Knowledge graph must be created first — MemoryService depends on it.
     _state.knowledge_graph = KnowledgeGraph()
@@ -405,8 +441,14 @@ def bootstrap(config_path: str | None = None) -> None:
     if os.getenv("MEMORY_EVENT_BUS_ENABLED", "1") != "1":
         _state.memory_event_bus.set_enabled(False)
 
-    # P3: deterministic state pruner (zero-LLM-cost膨胀控制).
+    # P3: deterministic state pruner (zero-LLM-cost膨胀控制) + task-post
+    # consolidator (background_review style online consolidation).
     _state.state_pruner = TimeBasedStatePruner(_state.memory_service)
+    _state.task_consolidator = TaskConsolidationAgent(
+        _state.memory_service,
+        _side_llm,
+        BackwardWriter(_state.memory_service, _side_llm),
+    )
     # External-memory watcher: detects external DB writes (other harnesses sharing
     # the sqlite DB) and runs the deterministic maintenance chain. Zero LLM.
     _state.db_watcher = MemoryDBWatcher(
@@ -414,11 +456,62 @@ def bootstrap(config_path: str | None = None) -> None:
         poll_interval=float(os.getenv("MEMORY_DB_WATCH_INTERVAL", "60")),
     )
 
-    # ── Neural field (Part 2) + runtime observer ──────────────────────
-    # side agents (ingestor/consolidator/retriever/curator) removed (Part5
-    # side-agent archive). neural_field is zero-LLM drift, retained.
+    # ── Memory-kernel side agents (Part 1) + neural field (Part 2) ─────
+    # Five feature-gated singletons. Each is default-OFF (grey-rollout):
+    #  MEMORY_INGESTOR_ENABLED / MEMORY_CONSOLIDATOR_ENABLED /
+    #  MEMORY_RETRIEVER_ENABLED / MEMORY_CURATOR_ENABLED /
+    #  MEMORY_NEURAL_FIELD_ENABLED. When off the hook is not registered, so the
+    # bus emit for that event is a no-op and behaviour matches the deterministic
+    # baseline (zero regression). Each hook registered explicitly for ONE event
+    # — never the default all-events mount (would fan all 10 events to every hook).
 
     from src.memory.event_bus import EventType
+    from src.memory.sideline.ingestor_agent import IngestorAgent, IngestorHook
+    from src.memory.sideline.consolidator_agent import ConsolidatorAgent, ConsolidatorHook
+    from src.memory.sideline.retriever_agent import RetrieverAgent, RetrieverHook
+    from src.memory.sideline.curator_agent import CuratorAgent, CuratorHook
+
+    if os.getenv("MEMORY_INGESTOR_ENABLED", "0") == "1":
+        _state.ingestor = IngestorAgent(
+            memory_service=_state.memory_service,
+            llm_client=_side_llm,
+            kg=_state.knowledge_graph,
+        )
+        _state.memory_event_bus.register(
+            IngestorHook(_state.ingestor), EventType.INGEST
+        )
+
+    if os.getenv("MEMORY_CONSOLIDATOR_ENABLED", "0") == "1":
+        _state.consolidator = ConsolidatorAgent(
+            memory_service=_state.memory_service,
+            llm_client=_side_llm,
+        )
+        _state.memory_event_bus.register(
+            ConsolidatorHook(_state.consolidator),
+            EventType.CONSOLIDATE,
+            EventType.SESSION_END,
+        )
+
+    if os.getenv("MEMORY_RETRIEVER_ENABLED", "0") == "1":
+        _state.retriever = RetrieverAgent(
+            memory_service=_state.memory_service,
+            kg=_state.knowledge_graph,
+        )
+        _state.memory_event_bus.register(
+            RetrieverHook(_state.retriever), EventType.RECALL
+        )
+
+    if os.getenv("MEMORY_CURATOR_ENABLED", "0") == "1":
+        _state.curator = CuratorAgent(
+            memory_service=_state.memory_service,
+            llm_client=_side_llm,
+        )
+        _state.memory_event_bus.register(
+            CuratorHook(_state.curator), EventType.CURATE
+        )
+
+    # ── Neural field (Part 2) + runtime observer ──────────────────────
+    # neural_field is zero-LLM drift, retained (own gate below).
     from src.memory.runtime_observer import RuntimeObserverHook
     from src.memory.neural_field import (
         NeuralFieldEngine,
