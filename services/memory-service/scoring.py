@@ -122,6 +122,7 @@ def score_fact(
     query: str,
     *,
     centrality: float = 0.0,
+    weights: tuple[float, float, float] | None = None,
 ) -> dict[str, Any]:
     """Score one Fact: ``score = α·match + β·centrality + γ·LIF`` (ADR-4v2).
 
@@ -129,11 +130,20 @@ def score_fact(
     passes the fact's entity pagerank (ADR-2v2); callers without a graph
     degrade to α·match + γ·LIF (the v1 signal subset, no zeroing).
 
+    ``weights`` (ADR-4v2 调参): optional ``(α, β, γ)`` override; None ⇒ module
+    defaults ``ALPHA_MATCH/BETA_CENTRALITY/GAMMA_LIF``. Grid search (eval_recall)
+    passes candidate triples here without monkey-patching module constants.
+    ponytail: tuple not dataclass — three floats, no method, no payload worth a
+    class. Weights are NOT renormalized (caller controls); the grid freely
+    explores un-normalized regions to confirm normalization is irrelevant to
+    the blind-spot conclusion.
+
     Args:
         fact: Decoded Fact dict (must carry ``value`` and ``LIF`` keys).
         query: Recall query text.
         centrality: PageRank of the fact's most-central connected entity,
             normalized to ``[0,1]`` (built on-the-fly by ``recall``).
+        weights: Optional ``(α, β, γ)`` fusion weights; None ⇒ ADR-4v2 defaults.
 
     Returns:
         ``{"fact": fact, "match": float, "centrality": float, "lif": float,
@@ -147,7 +157,8 @@ def score_fact(
     # ranking, wrong for a static trust scalar.
     lif = float(fact.get("LIF") or 0.0)
     c = float(centrality or 0.0)
-    score = ALPHA_MATCH * m + BETA_CENTRALITY * c + GAMMA_LIF * lif
+    alpha, beta, gamma = weights if weights is not None else (ALPHA_MATCH, BETA_CENTRALITY, GAMMA_LIF)
+    score = alpha * m + beta * c + gamma * lif
     return {"fact": fact, "match": m, "centrality": c, "lif": lif, "score": float(score)}
 
 
@@ -188,6 +199,7 @@ def compute_lif(
     *,
     now: datetime | None = None,
     source_override: float | None = None,
+    lif_weights: dict[str, float] | None = None,
 ) -> dict[str, float]:
     """Compose LIF from five non-LLM dimensions (ADR-8v2).
 
@@ -228,6 +240,10 @@ def compute_lif(
             (clamped) instead of deriving from ``extractor``. ADR-8v2:
             ``original_lif`` is the source-dim fallback — consolidate passes
             it here for facts with no extractor.
+        lif_weights: Optional override for the five composite dim weights
+            (keys: freq/recency/spread/coherence/source). None ⇒ LIF_WEIGHTS.
+            ADR-4v2 调参 — eval_recall grid 可传候选 dict 不 monkey-patch
+            模块常量。Missing keys fall back to LIF_WEIGHTS (partial override).
 
     Returns:
         ``{"LIF": float, "lif_freq": float, "lif_recency": float,
@@ -279,12 +295,17 @@ def compute_lif(
     else:
         source = SOURCE_WEIGHT.get(fact.get("extractor") or "regex", 0.4)
 
+    # ponytail: dict merge for partial override — copy + update avoids
+    # "mutate module global" footgun and lets grid pass sparse overrides.
+    w = dict(LIF_WEIGHTS)
+    if lif_weights:
+        w.update({k: float(v) for k, v in lif_weights.items()})
     lif = (
-        LIF_WEIGHTS["freq"] * freq
-        + LIF_WEIGHTS["recency"] * recency
-        + LIF_WEIGHTS["spread"] * spread
-        + LIF_WEIGHTS["coherence"] * coherence
-        + LIF_WEIGHTS["source"] * source
+        w["freq"] * freq
+        + w["recency"] * recency
+        + w["spread"] * spread
+        + w["coherence"] * coherence
+        + w["source"] * source
     )
     return {
         "LIF": float(max(0.0, min(1.0, lif))),

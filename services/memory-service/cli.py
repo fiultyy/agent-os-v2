@@ -107,7 +107,8 @@ def _ensure_entity(name: str, cache: dict[str, str]) -> str | None:
 # ── recall ──────────────────────────────────────────────────────────
 
 def recall(query: str, verbose: bool = False,
-           session_id: str | None = None, boost: bool = True) -> list[dict[str, Any]]:
+           session_id: str | None = None, boost: bool = True,
+           weights=None) -> list[dict[str, Any]]:
     """Return Facts relevant to ``query``, ordered by α·match+β·centrality+γ·LIF
     加权排序 (ADR-4v2).
 
@@ -120,7 +121,8 @@ def recall(query: str, verbose: bool = False,
     LIF refresh on recall (boost=False for a pure read). ``session_id`` drives
     lif_spread on the refresh.
     """
-    return recall_mod.recall(query, verbose=verbose, session_id=session_id, boost=boost)
+    return recall_mod.recall(query, verbose=verbose, session_id=session_id,
+                             boost=boost, weights=weights)
 
 
 # ── consolidate ────────────────────────────────────────────────────
