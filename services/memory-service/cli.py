@@ -106,7 +106,8 @@ def _ensure_entity(name: str, cache: dict[str, str]) -> str | None:
 
 # ── recall ──────────────────────────────────────────────────────────
 
-def recall(query: str, verbose: bool = False) -> list[dict[str, Any]]:
+def recall(query: str, verbose: bool = False,
+           session_id: str | None = None, boost: bool = True) -> list[dict[str, Any]]:
     """Return Facts relevant to ``query``, ordered by α·match+β·centrality+γ·LIF
     加权排序 (ADR-4v2).
 
@@ -114,8 +115,12 @@ def recall(query: str, verbose: bool = False) -> list[dict[str, Any]]:
     BETA_CENTRALITY·pagerank + GAMMA_LIF·LIF). Spec §6 seam — the cli
     subcommand and ``cli.recall(...)`` drive the same pipeline as the
     deepened module.
+
+    Recall reinforcement (ADR-8v2) defaults on: hit facts' access stats +
+    LIF refresh on recall (boost=False for a pure read). ``session_id`` drives
+    lif_spread on the refresh.
     """
-    return recall_mod.recall(query, verbose=verbose)
+    return recall_mod.recall(query, verbose=verbose, session_id=session_id, boost=boost)
 
 
 # ── consolidate ────────────────────────────────────────────────────
