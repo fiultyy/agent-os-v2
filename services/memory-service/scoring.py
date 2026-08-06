@@ -325,14 +325,21 @@ def refresh_lif_on_recall(
         sessions.append(session_id)
     distinct_sessions = len(sessions)
 
-    # coherence: read current subject siblings (exclude self). ponytail: linear
+    # coherence: read current subject siblings, INCLUDING self — a fact's own
+    # predicate pairs against its siblings (uses+avoids are conflicting only
+    # when both the fact and a sibling hold one of the pair). Excluding self
+    # drops half of every pair, so contradictions never fire. ponytail: linear
     # scan of subject's active facts — consolidate recomputes authoritatively,
     # recall only needs a cheap approximation for the spread/freq/recency refresh.
     sib_rows = conn.execute(
         "SELECT predicate FROM fact WHERE subject_id = ? AND id != ? AND status = 'active'",
         (fact["subject_id"], fact_id),
     ).fetchall()
-    neighbors = [{"predicate": r["predicate"]} for r in sib_rows]
+    own_pred = fact.get("predicate")
+    neighbors = (
+        ([{"predicate": own_pred}] if own_pred else [])
+        + [{"predicate": r["predicate"]} for r in sib_rows]
+    )
 
     dims = compute_lif(
         fact,
