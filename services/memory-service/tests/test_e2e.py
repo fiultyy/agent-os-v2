@@ -3,7 +3,7 @@
 Drives the top seams end-to-end against an isolated per-test SQLite file:
 
 - ``cli.ingest`` (Node B) extracts entities+facts via the regex EntityExtractor
-  and persists them; ``recall.recall`` (Node C) navigates the KG, scores
+  and persists them; ``cli.recall`` (Spec §6 seam) navigates the KG, scores
   ``match × lif`` (ADR-4) and returns Facts ordered desc.
 - Schema cross-table join consistency: every returned Fact's ``subject_id`` /
   ``object_id`` resolves to a row in ``entity`` (FK holds), and Fact columns
@@ -28,7 +28,6 @@ if _SRV_DIR not in sys.path:
 
 import cli  # noqa: E402
 import db  # noqa: E402
-import recall  # noqa: E402
 import store  # noqa: E402
 
 
@@ -77,7 +76,7 @@ def test_ingest_then_recall_literal_hit(fresh_db):
     assert summary["facts"], "ingest produced no facts"
     assert summary["entities"] >= 1
 
-    hits = recall.recall("rust")
+    hits = cli.recall("rust")
     assert hits, "recall returned no facts for a literal hit"
     assert any(h["value"] == "rust" for h in hits), _fact_values(hits)
 
@@ -99,9 +98,9 @@ def test_multi_ingest_recall_each_query(fresh_db):
     cli.ingest("FastAPI uses Pydantic.")            # value='Pydantic'
     cli.ingest("Logseq 是笔记工具")                 # value='笔记工具'
 
-    rust = recall.recall("rust")
-    pyd = recall.recall("Pydantic")
-    log = recall.recall("笔记")
+    rust = cli.recall("rust")
+    pyd = cli.recall("Pydantic")
+    log = cli.recall("笔记")
 
     assert any("rust" == h["value"] for h in rust), _fact_values(rust)
     assert any("Pydantic" == h["value"] for h in pyd), _fact_values(pyd)
@@ -129,14 +128,14 @@ def test_recall_orders_by_match_times_lif(fresh_db):
         LIF=0.9, extractor="regex",
     )
 
-    hits = recall.recall("rust")
+    hits = cli.recall("rust")
     assert len(hits) >= 2, [h["value"] for h in hits]
     # Both literal-hit 'rust' ⇒ higher LIF ranks first.
     assert hits[0]["LIF"] >= hits[1]["LIF"]
     assert hits[0]["value"] == "rust for backend"
 
     # Verbose path exposes match/lif/score (debug surface, Spec §4 story 3).
-    detail = recall.recall("rust", verbose=True)
+    detail = cli.recall("rust", verbose=True)
     assert all("score" in d and "match" in d and "lif" in d for d in detail)
     scores = [d["score"] for d in detail]
     assert scores == sorted(scores, reverse=True), scores
@@ -153,7 +152,7 @@ def test_recall_zero_lif_filtered(fresh_db):
     bob = store.put_entity("Bob", "person")
     store.put_fact(bob, "uses", value="rust buried", LIF=0.0, extractor="regex")
 
-    hits = recall.recall("rust")
+    hits = cli.recall("rust")
     # The LIF=0 fact is filtered (score=0); the LIF=0.5 cli fact remains.
     assert all(h["LIF"] > 0.0 for h in hits), [h["LIF"] for h in hits]
     assert any(h["value"] == "rust" for h in hits)
@@ -175,7 +174,7 @@ def test_schema_fact_entity_join_consistent(fresh_db):
         "LIF", "extractor", "status", "created_at",
     }
     for q in ("rust", "Pydantic", "笔记"):
-        for f in recall.recall(q):
+        for f in cli.recall(q):
             assert required_cols <= set(f.keys()), required_cols - set(f.keys())
             _assert_schema_join([f])
             # Cross-table: subject entity's name is the relation subject.

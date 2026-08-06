@@ -15,6 +15,7 @@ from typing import Any
 
 import db
 import scoring
+import store
 
 
 def search_entities(tokens: list[str]) -> list[dict[str, Any]]:
@@ -56,13 +57,7 @@ def _facts_for_entities(entity_ids: list[str]) -> list[dict[str, Any]]:
     ).fetchall()
     facts: list[dict[str, Any]] = []
     for r in rows:
-        facts.append({
-            "id": r["id"], "subject_id": r["subject_id"], "predicate": r["predicate"],
-            "object_id": r["object_id"], "value": r["value"], "valid_from": r["valid_from"],
-            "valid_to": r["valid_to"], "fact_type": r["fact_type"], "LIF": r["LIF"],
-            "confidence": r["confidence"], "extractor": r["extractor"],
-            "status": r["status"], "created_at": r["created_at"],
-        })
+        facts.append(store._decode_fact(r))
     return facts
 
 
@@ -109,13 +104,7 @@ def recall(
         val = (r["value"] or "").lower()
         if any(tok and tok in val for tok in tokens):
             seen_ids.add(rid)
-            candidates.append({
-                "id": r["id"], "subject_id": r["subject_id"], "predicate": r["predicate"],
-                "object_id": r["object_id"], "value": r["value"], "valid_from": r["valid_from"],
-                "valid_to": r["valid_to"], "fact_type": r["fact_type"], "LIF": r["LIF"],
-                "confidence": r["confidence"], "extractor": r["extractor"],
-                "status": r["status"], "created_at": r["created_at"],
-            })
+            candidates.append(store._decode_fact(r))
 
     scored = [scoring.score_fact(f, query) for f in candidates]
     # drop zero-score (no match) unless verbose wants them; mirrors "hit" semantics

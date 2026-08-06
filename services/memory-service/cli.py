@@ -20,7 +20,9 @@ import json
 import sys
 from typing import Any
 
+import consolidate as consolidate_mod
 import extractor
+import recall as recall_mod
 import store
 
 
@@ -100,78 +102,23 @@ def _ensure_entity(name: str, cache: dict[str, str]) -> str | None:
 def recall(query: str, verbose: bool = False) -> list[dict[str, Any]]:
     """Return Facts relevant to ``query``, ordered by match×lif (ADR-4).
 
-    v1 navigation = substring/prefix match: entity.name LIKE query locates
-    seed entities, then their facts (as subject OR object) are scored. Semantic
-    recall / synonym rewrite deferred (Spec Defer; ADR-4).
-
-    Node C owns the match_item detail; this is the working closed-loop path
-    so ingest→recall (Node F) is testable now.
+    Thin wrapper over ``recall.recall`` (Node C depth: token-split match_item
+    × LIF). Spec §6 seam — the cli subcommand and ``cli.recall(...)`` drive
+    the same pipeline as the deepened module.
     """
-    import db
-
-    conn = db.get_conn()
-    # Seed entity ids whose name contains the query (LIKE, case-insensitive).
-    seed_rows = conn.execute(
-        "SELECT id FROM entity WHERE name LIKE ?", (f"%{query}%",)
-    ).fetchall()
-    seed_ids = {r["id"] for r in seed_rows}
-
-    facts: list[dict[str, Any]] = []
-    if seed_ids:
-        placeholders = ",".join("?" for _ in seed_ids)
-        rows = conn.execute(
-            f"SELECT * FROM fact WHERE status='active' "
-            f"AND (subject_id IN ({placeholders}) OR object_id IN ({placeholders}))",
-            (*seed_ids, *seed_ids),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM fact WHERE status='active' AND "
-            "(value LIKE ? OR predicate LIKE ?)",
-            (f"%{query}%", f"%{query}%"),
-        ).fetchall()
-
-    for row in rows:
-        fact = store._decode_fact(row)
-        # match×lif: literal hit weight 1.0 × LIF scalar (ADR-4).
-        scored = round(1.0 * fact["LIF"], 4)
-        if verbose:
-            subj = store.get_entity(fact["subject_id"])
-            obj = store.get_entity(fact["object_id"]) if fact["object_id"] else None
-            fact["_scored"] = scored
-            fact["_subject_name"] = subj["name"] if subj else None
-            fact["_object_name"] = obj["name"] if obj else None
-        facts.append(fact)
-
-    facts.sort(key=lambda f: f.get("_scored", f["LIF"]), reverse=True)
-    return facts
+    return recall_mod.recall(query, verbose=verbose)
 
 
 # ── consolidate ────────────────────────────────────────────────────
 
 def consolidate() -> dict[str, int]:
-    """Dedup skeleton — mark exact-duplicate facts as superseded (Spec §4.4).
+    """Dedup pass — mark exact-duplicate facts as superseded (Spec §4.4).
 
-    No decay (type-aware LIF decay deferred, ADR-6). Node D owns depth; this
-    keeps the seam importable and the cli subcommand present.
+    Thin wrapper over ``consolidate.consolidate`` (Node D depth: survivor
+    absorbs max-LIF + union of source_refs). Returns ``{superseded, active}``
+    per the SKILL.md output contract. No decay (ADR-6).
     """
-    import db
-
-    conn = db.get_conn()
-    rows = conn.execute(
-        "SELECT id, subject_id, predicate, object_id, value FROM fact "
-        "WHERE status='active' ORDER BY created_at"
-    ).fetchall()
-    seen: dict[tuple, str] = {}
-    superseded = 0
-    for r in rows:
-        key = (r["subject_id"], r["predicate"], r["object_id"], r["value"])
-        if key in seen:
-            store.update_fact_status(r["id"], "superseded", supersedes_id=seen[key])
-            superseded += 1
-        else:
-            seen[key] = r["id"]
-    return {"superseded": superseded, "active": len(seen)}
+    return consolidate_mod.consolidate()
 
 
 # ── argv entry ──────────────────────────────────────────────────────

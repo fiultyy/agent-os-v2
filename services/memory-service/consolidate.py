@@ -71,12 +71,17 @@ def _merge_group(group: list[dict[str, Any]]) -> int:
 def consolidate() -> dict[str, int]:
     """Run one dedup pass over the active Fact set.
 
-    Returns ``{"groups": <duplicate groups collapsed>, "facts_merged": <total
-    superseded Facts>}``. Idempotent: a clean run with no dups returns zeros.
+    Returns ``{"superseded": <total Facts flipped to superseded>,
+    "active": <unique Facts remaining active>}`` (SKILL.md §3 contract).
+    Idempotent: a clean run with no dups returns zeros.
     """
     conn = db.get_conn()  # ensures schema initialised on first call
     groups = _group_duplicate_facts(conn)
-    total = 0
+    superseded = 0
     for _, members in groups.items():
-        total += _merge_group(members)
-    return {"groups": len(groups), "facts_merged": total}
+        superseded += _merge_group(members)
+    # Active Facts remaining post-merge (dups already flipped to 'superseded').
+    active = conn.execute(
+        "SELECT COUNT(*) FROM fact WHERE status = 'active'"
+    ).fetchone()[0]
+    return {"superseded": superseded, "active": active}
