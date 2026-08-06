@@ -1,0 +1,192 @@
+"""Node J — autoDream session raw→KG incremental (ADR-10).
+
+Drives ``autodream.autodream(session_id, transcript_path)`` against isolated
+per-test SQLite files, covering the four incremental-decision paths plus the
+idempotency contract (same transcript twice ⇒ second call is all-NOOP).
+
+- **ADD**    — new (subject, predicate, value) → put_fact, ``added`` += 1.
+- **UPDATE** — same (subject, predicate, value), new session ⇒ refresh LIF +
+  absorb session (``updated`` += 1).
+- **DELETE** — same (subject, predicate), different value ⇒ old(s) superseded,
+  new fact added (``deleted`` counts the superseded, ``added`` the new).
+- **NOOP**   — exact fact already active with the session already absorbed
+  (re-run on the same transcript ⇒ second call all-NOOP).
+
+Acceptance cmd: ``cd services/memory-service && python -m pytest tests/test_autodream.py -q``.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+
+import pytest
+
+_SRV_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _SRV_DIR not in sys.path:
+    sys.path.insert(0, _SRV_DIR)
+
+import autodream  # noqa: E402
+import cli  # noqa: E402
+import db  # noqa: E402
+import store  # noqa: E402
+
+
+@pytest.fixture()
+def fresh_db(tmp_path):
+    """Per-test isolated SQLite file; resets db's cached connection."""
+    db.init(str(tmp_path / "memory.db"))
+    yield tmp_path
+
+
+def _write_transcript(tmp_path, records):
+    """Write a list of CC transcript records as JSONL, return the path."""
+    tp = tmp_path / "transcript.jsonl"
+    with tp.open("w", encoding="utf-8") as fh:
+        for rec in records:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    return str(tp)
+
+
+def _user(content):
+    return {"type": "user", "message": {"content": content}}
+
+
+def _assistant(content):
+    return {"type": "assistant", "message": {"content": content}}
+
+
+# ── ADD path ────────────────────────────────────────────────────────
+
+def test_add_new_fact(fresh_db):
+    """GIVEN transcript 含 '用户使用 rust' WHEN autodream THEN KG ADD
+    fact(用户,uses,rust) — added≥1, the fact is active in the store."""
+    tp = _write_transcript(fresh_db, [_user("用户使用 rust")])
+    r = autodream.autodream("s1", tp)
+    assert r["added"] >= 1, r
+    assert r["updated"] == 0 and r["deleted"] == 0, r
+    # The fact is persisted and active.
+    subj = store.find_entities_by_name("用户")
+    assert subj, "subject entity created"
+    facts = store.get_facts_by_subject(subj[0]["id"], status="active")
+    assert any(f["predicate"] == "uses" and f["value"] == "rust" for f in facts), facts
+
+
+def test_add_assistant_and_user_content_both_scanned(fresh_db):
+    """Both user and assistant message.content feed the extractor; multi-line
+    transcript yields multiple facts across speakers."""
+    tp = _write_transcript(fresh_db, [
+        _user("用户使用 rust"),
+        _assistant("FastAPI uses Pydantic."),
+    ])
+    r = autodream.autodream("s1", tp)
+    assert r["added"] >= 2, r
+
+
+def test_content_block_list_form_supported(fresh_db):
+    """``message.content`` may be a list of content blocks (text/tool_use).
+    Text blocks are scanned; non-text blocks skipped."""
+    tp = _write_transcript(fresh_db, [
+        {"type": "user", "message": {"content": [
+            {"type": "text", "text": "用户使用 rust"},
+            {"type": "tool_result", "content": "noise"},
+        ]}},
+    ])
+    r = autodream.autodream("s1", tp)
+    assert r["added"] >= 1, r
+
+
+def test_missing_transcript_noop(fresh_db):
+    """A non-existent transcript path ⇒ no crash, all-zero (no extraction)."""
+    r = autodream.autodream("s1", str(fresh_db / "nope.jsonl"))
+    assert r == {"added": 0, "updated": 0, "deleted": 0, "noop": 0}, r
+
+
+# ── UPDATE path ─────────────────────────────────────────────────────
+
+def test_update_refresh_on_new_session(fresh_db):
+    """Same (subject, predicate, value) re-dreamt from a *new* session ⇒
+    UPDATE (session absorbed, LIF spread rises), not a second ADD."""
+    tp = _write_transcript(fresh_db, [_user("用户使用 rust")])
+    r1 = autodream.autodream("s1", tp)
+    assert r1["added"] >= 1, r1
+
+    r2 = autodream.autodream("s2", tp)  # different session, same fact
+    assert r2["added"] == 0, r2
+    assert r2["updated"] >= 1, r2
+    # The fact now carries both sessions.
+    subj = store.find_entities_by_name("用户")
+    facts = store.get_facts_by_subject(subj[0]["id"], status="active")
+    the_fact = next(f for f in facts if f["predicate"] == "uses" and f["value"] == "rust")
+    assert set(the_fact["seen_sessions"]) >= {"s1", "s2"}, the_fact["seen_sessions"]
+
+
+# ── DELETE path (supersede on contradiction) ────────────────────────
+
+def test_delete_supersede_on_value_change(fresh_db):
+    """Same (subject, predicate) but a *different* value ⇒ the old fact flips
+    to superseded (deleted += 1), the new one is added. Two passes, two
+    different values."""
+    tp1 = _write_transcript(fresh_db, [_user("用户使用 rust")])
+    autodream.autodream("s1", tp1)
+    # Subject now uses 'rust'. Same predicate, new value ⇒ contradiction.
+    tp2 = _write_transcript(fresh_db, [_user("用户使用 python")])
+    r2 = autodream.autodream("s1", tp2)
+    assert r2["deleted"] >= 1, r2
+    assert r2["added"] >= 1, r2
+    # The superseded fact points at the new survivor.
+    subj = store.find_entities_by_name("用户")
+    all_facts = store.get_facts_by_subject(subj[0]["id"], status=None)
+    superseded = [f for f in all_facts if f["status"] == "superseded" and f["value"] == "rust"]
+    survivors = [f for f in all_facts if f["status"] == "active" and f["predicate"] == "uses"]
+    assert superseded, "old 'rust' fact must be superseded"
+    assert any(f["value"] == "python" for f in survivors), survivors
+    assert all(s["supersedes_id"] for s in superseded), superseded
+
+
+# ── NOOP + idempotency (acceptance contract) ────────────────────────
+
+def test_idempotent_same_transcript_second_call_all_noop(fresh_db):
+    """Acceptance: same transcript, same session, run twice ⇒ second call
+    added==0 and the result is all-NOOP (the core idempotency contract)."""
+    tp = _write_transcript(fresh_db, [_user("用户使用 rust")])
+    r1 = autodream.autodream("s1", tp)
+    r2 = autodream.autodream("s1", tp)
+    assert r1["added"] >= 1, r1
+    assert r2["added"] == 0, r2
+    assert r2["noop"] >= 1, r2
+    assert r2["updated"] == 0 and r2["deleted"] == 0, r2
+
+
+# ── cli seam ─────────────────────────────────────────────────────────
+
+def test_cli_autodream_subcommand(fresh_db, monkeypatch):
+    """``cli autodream --session <id> --transcript <path>`` drives the same
+    pipeline as ``autodream.autodream`` (Spec §6 seam — both entrypoints share
+    the implementation)."""
+    tp = _write_transcript(fresh_db, [_user("用户使用 rust")])
+    # cli._main prints JSON to stdout; capture via monkeypatch.
+    import io
+    buf = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", buf)
+    rc = cli._main(["autodream", "--session", "s1", "--transcript", tp])
+    assert rc == 0
+    out = json.loads(buf.getvalue())
+    assert out["added"] >= 1, out
+
+
+# ── consolidate reuse ───────────────────────────────────────────────
+
+def test_autodream_runs_consolidate(fresh_db):
+    """autoDream phase (a) reuses consolidate (decay+dedup). A pre-seeded
+    exact-duplicate fact pair is collapsed by the autodream call."""
+    eid = store.put_entity("用户", "inferred")
+    store.put_fact(eid, "uses", "rust", extractor="regex")
+    store.put_fact(eid, "uses", "rust", extractor="regex")  # exact dup
+    tp = _write_transcript(fresh_db, [_user("irrelevant")])
+    autodream.autodream("s1", tp)
+    # consolidate collapsed the dup → exactly one active 'rust' fact.
+    facts = store.get_facts_by_subject(eid, status="active")
+    rust_active = [f for f in facts if f["predicate"] == "uses" and f["value"] == "rust"]
+    assert len(rust_active) == 1, rust_active
