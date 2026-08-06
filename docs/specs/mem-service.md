@@ -70,6 +70,6 @@ CC 现有记忆(~/.claude memory md,即时派热/温层)缺结构化 fact 层、
 - type-aware 衰减(需 per-type half_life + consolidate 触发设计)(随 autoDream consolidate 阶)
 - LLM 抽取/蝴蝶翼(需模型依赖)(后续)
 - query 独立 cli(调试用 `recall --verbose` 或 `sqlite3 services/memory-service/data/*.db` 直查)
-- skill deploy: 仓内源 `services/memory-service/skill/` → `~/.claude/skills/mem/`(P4 软链/拷贝)。**注: v1 green(P2)只写仓内源, 须 P4 deploy 到 ~/.claude 后 CC 才能调 skill; Node E verify 只验仓内源不验 deploy**
+- skill deploy: 仓内源 `services/memory-service/SKILL.md`(服务根, 与 cli.py 同级) → `~/.claude/skills/mem/`(软链**服务根** `~/.claude/skills/mem → services/memory-service/`, cli.py+SKILL.md 全入; 非 skill/ 子目录)。**注: SKILL.md 在仓内服务根(CC 发现 ~/.claude/skills/mem/SKILL.md + cli 同目录裸 import work); v1 已 deploy 软链; ops grill 抓 P0 修(SKILL.md 从 skill/ 移根 + 软链服务根, 解 L45 deploy 路径失效)**
 - **v1 召回=子串/前缀匹配(match×lif on Fact + KG entity.name LIKE),中文同义/省称/改写 query 命中率低;语义召回 defer 到向量实体tag+聚合度重排层(P4)**
 - skill 把服务 fact 投影回 CC md(v1 不做,桥接留后)

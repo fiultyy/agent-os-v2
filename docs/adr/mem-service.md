@@ -54,7 +54,7 @@ Constrains: [全]
 ## ADR-7: 不改 CC 现有记忆 — 叠加路线,skill 源仓内+deploy 独立
 Status: Accepted
 Context: CC 现有 ~/.claude/projects/*/memory/*.md 是即时派热/温层,工作良好。独立服务在其下叠加 KG fact 层,不替换。
-Decision: 服务独立进程,数据在 `services/memory-service/data/`。CC skill **源在仓内 `services/memory-service/skill/`**(P2 worktree 正常 commit),**deploy 步骤独立**(P4 软链/拷贝到 `~/.claude/skills/mem/`)。CC 通过 skill+cli 读写服务 KG。**绝不改 CC ~/.claude/projects/*/memory/*.md**。skill 是唯一桥梁。
+Decision: 服务独立进程,数据在 `services/memory-service/data/`。CC skill **源在仓内 `services/memory-service/SKILL.md`(服务根, 与 cli.py 同级)**(P2 worktree 正常 commit),**deploy = 软链服务根** `~/.claude/skills/mem → services/memory-service/`(cli.py+SKILL.md 全入 skills/mem/, CC 发现 + cli 同目录裸 import 都 work)。CC 通过 skill+cli 读写服务 KG。**绝不改 CC ~/.claude/projects/*/memory/*.md**。skill 是唯一桥梁。(v1 原 skill/ 子目录 → P0 修移根, 因 CC 发现要 ~/.claude/skills/mem/SKILL.md 根 + cli 同级裸 import)
 Alternatives: 替换 CC memory(破坏现有,违反约束)。
 Consequences: 两套记忆并存(CC md 即时派 + 服务 KG fact);后续 skill 可选投影回 md(v1 不做)。
 Constrains: [T5, E]
