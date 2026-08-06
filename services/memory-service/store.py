@@ -48,6 +48,12 @@ def get_entity(entity_id: str) -> dict[str, Any] | None:
     return _decode_entity(row)
 
 
+def count_entities() -> int:
+    """Row count of the entity table (acceptance/inspection helper)."""
+    conn = db.get_conn()
+    return conn.execute("SELECT COUNT(*) FROM entity").fetchone()[0]
+
+
 def find_entities_by_name(name: str, entity_type: str | None = None) -> list[dict[str, Any]]:
     """Exact-name lookup (dedup helper; v1 recall uses LIKE, not this)."""
     conn = db.get_conn()
