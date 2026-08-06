@@ -24,6 +24,7 @@ import sys
 from typing import Any
 
 import adapter
+import autodream as autodream_mod
 import consolidate as consolidate_mod
 import recall as recall_mod
 import store
@@ -138,6 +139,22 @@ def consolidate() -> dict[str, int]:
     return consolidate_mod.consolidate()
 
 
+# ── autodream ──────────────────────────────────────────────────────
+
+def autodream(session_id: str, transcript_path: str) -> dict[str, int]:
+    """PreCompact autoDream: session transcript raw→KG incremental (ADR-10).
+
+    Thin wrapper over ``autodream.autodream``. Reads the CC transcript JSONL,
+    reuses ``extractor.extract()`` regex (蝴蝶翼 LLM defer, adapter 预留), runs
+    ``consolidate.consolidate()`` (decay+dedup 复用 v2/v3), then makes the
+    incremental decision per fact (ADD / UPDATE / DELETE / NOOP). Returns
+    ``{added, updated, deleted, noop}``.
+
+    Driven by the ``cli autodream`` subcommand from the PreCompact hook.
+    """
+    return autodream_mod.autodream(session_id, transcript_path)
+
+
 # ── argv entry ──────────────────────────────────────────────────────
 
 def _main(argv: list[str] | None = None) -> int:
@@ -161,6 +178,13 @@ def _main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("consolidate", help="dedup skeleton")
 
+    dream = sub.add_parser("autodream", help="session transcript raw→KG incremental (ADR-10)")
+    dream.add_argument("--session", dest="session", required=True, help="CC session id")
+    dream.add_argument(
+        "--transcript", dest="transcript", required=True,
+        help="path to CC transcript JSONL",
+    )
+
     args = p.parse_args(argv)
     if args.cmd == "ingest":
         print(json.dumps(
@@ -171,6 +195,8 @@ def _main(argv: list[str] | None = None) -> int:
         print(json.dumps(recall(args.query, verbose=args.verbose), ensure_ascii=False, default=str))
     elif args.cmd == "consolidate":
         print(json.dumps(consolidate()))
+    elif args.cmd == "autodream":
+        print(json.dumps(autodream(args.session, args.transcript), ensure_ascii=False))
     return 0
 
 
