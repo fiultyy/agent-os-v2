@@ -355,7 +355,10 @@ def refresh_lif_on_recall(
         return None
     fact = store._decode_fact(row)
 
-    now = datetime.now(timezone.utc)
+    # ADR-8v2 ms-floor: match compute_lif/decay's floor so last_accessed_at
+    # and the now passed to compute_lif carry no microseconds (precision
+    # symmetry with the decay idempotency anchor — see consolidate.decay).
+    now = datetime.now(timezone.utc).replace(microsecond=0)
     now_iso = now.isoformat()
     access_count = int(fact.get("access_count") or 0) + 1
 

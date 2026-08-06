@@ -116,6 +116,17 @@ def test_decay_permanent_fact_recency_one(fresh_db):
     assert abs(f["lif_recency"] - 1.0) < 1e-9, f["lif_recency"]
 
 
+def test_decay_idempotent_back_to_back(fresh_db):
+    """ADR-8v2 idempotency: a second decay() immediately after the first
+    short-circuits (same wall-clock second + ms-floor ⇒ same dims ⇒ no write).
+    Pins the ms-floor + 1e-9 tolerance argument with an automated regression."""
+    eid = store.put_entity("用户", "user")
+    store.put_fact(eid, "uses", "rust", fact_type="stable")
+    consolidate.decay()  # primes stored dims from store defaults
+    second = consolidate.decay()
+    assert second["decayed"] == 0, second
+
+
 # ── consolidate._merge_group (per-dim max + LIF recompute) ──────────────
 
 def test_merge_group_absorbs_per_dim_max_and_recomputes_lif(fresh_db):

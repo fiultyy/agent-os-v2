@@ -217,7 +217,8 @@ def _eval(weights: tuple[float, float, float] | None = None) -> dict:
 
     ponytail: ``_eval`` 不再自调 ``_seed_kg`` —— grid search 复用同一 KG(seed 一次),
     weights 只改 ``score_fact`` 排序, 不改候选集/不改 LIF, 故不同 weights 共用同一
-    候选池是数学等价于每点重 seed(recall 不写回)。这把 grid 从 8×ingest 降到 1×ingest
+    候选池是数学等价于每点重 seed(``cli.recall(..., boost=False)`` 纯读, 不触发
+    ``refresh_lif_on_recall``, LIF 不被写回污染)。这把 grid 从 8×ingest 降到 1×ingest
     + 8×recall, 实测 <60s(原 8×ingest ≈ 28min)。
 
     返回结构:
@@ -229,7 +230,9 @@ def _eval(weights: tuple[float, float, float] | None = None) -> dict:
     overall = {"total": 0, "hit@3": 0, "hit@5": 0}
 
     for _grp, query, expected, kind in QUERY_GROUPS:
-        hits = cli.recall(query, weights=weights)
+        # boost=False: grid 比较纯读, 不触发 refresh_lif_on_recall(access_count/last_accessed_at
+        # /LIF 不变), 否则第一次 baseline 写回会污染后续角点的 LIF(ADR-4v2 调参实证准确性)。
+        hits = cli.recall(query, weights=weights, boost=False)
         h3 = _hit_at_k(hits, expected, 3)
         h5 = _hit_at_k(hits, expected, 5)
         overall["total"] += 1
@@ -250,8 +253,8 @@ def _pct(n: int, d: int) -> str:
 # ── ADR-4v2 grid search + baseline 对比 ─────────────────────────────────
 # ponytail: 粗粒度 α/β/γ 网格(step 0.2 = 6³=216 点,实测 <30s)而非细粒度
 # (0.1 step = 1000 点, 收益边际递减且 grill 已实证 synonym/rewrite 盲区对权重
-# 无解——细网格只会更确定地确认这点)。grid 只跑 recall 重排(KG 已 seed 一次),
-# 不重算 LIF(LIF 在 ingest 时定型, recall 仅读)。
+# 无解——细网格只会更确定地确认这点)。grid 只跑 recall 重排(KG 已 seed 一次,
+# ``boost=False`` 纯读不写回), LIF 在 ingest 时定型, weights 仅改 score_fact 排序。
 
 # α/β/γ 三选一为 1.0(其他 0)的角点 + 对角线 + ADR-4v2 默认, 覆盖"哪个分量
 # 独扛信号/三信号融合/默认论证"三问。角点确认 synonym/rewrite 在任何单分量
@@ -272,9 +275,9 @@ def grid_search() -> list[dict]:
     """ADR-4v2 grid search: 跑 GRID_WEIGHTS 各权重组合, 返回 hit@5 对比行。
 
     调用方负责 ``db.init()``。本函数 seed KG 一次, 然后所有 weights 共用同一 KG
-    —— recall 不写回(recall.recall 不调 refresh_lif_on_recall), weights 只改
-    score_fact 排序, 故不同 weights 在同一候选池上排序是数学等价于每点重 seed 的,
-    但省了 8×ingest 的开销(实测 ingest 是 recall 的 ~5×耗时)。
+    —— ``cli.recall(..., boost=False)`` 纯读不写回(``refresh_lif_on_recall`` 不触发),
+    weights 只改 score_fact 排序, 故不同 weights 在同一候选池上排序是数学等价于
+    每点重 seed 的, 但省了 8×ingest 的开销(实测 ingest 是 recall 的 ~5×耗时)。
 
     返回 ``[{"weights": (α,β,γ), "by_kind": {...}, "overall": {...}}, ...]``。
     """
@@ -410,8 +413,8 @@ def test_grid_search(fresh_db, capsys):
     """ADR-4v2 grid search: α/β/γ 网格 + baseline 对比。
 
     复用 ``fresh_db``(per-test 隔离 KG);seed 一次后所有 weights 共用同一候选池
-    (recall 不写回 — 见 ``grid_search`` docstring)。grid 收益面量化 + 角点印证
-    synonym/rewrite 盲区对权重无解(m=0 → score=0 → 排不进 top-k)。
+    (``cli.recall(..., boost=False)`` 纯读不写回 — 见 ``grid_search`` docstring)。
+    grid 收益面量化 + 角点印证 synonym/rewrite 盲区对权重无解(m=0 → score=0 → 排不进 top-k)。
 
     断言(硬约束,非命中率阈值):
     - grid 跑通(8 组合全产出结果)。
