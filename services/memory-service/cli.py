@@ -28,11 +28,13 @@ import store
 
 # ── ingest ──────────────────────────────────────────────────────────
 
-def ingest(text: str, source_ref: str | None = None) -> dict[str, Any]:
+def ingest(text: str, source_ref: str | None = None,
+           fact_type: str = "stable") -> dict[str, Any]:
     """Extract entities+facts from ``text`` and persist them to the KG.
 
-    Each fact is stamped ``extractor="regex"`` (ADR-5). Entities dedup by
-    (name, entity_type) — re-extraction of a known name reuses the existing
+    Each fact is stamped ``extractor="regex"`` (ADR-5) and ``fact_type``
+    (ADR-8, default stable; ingest ``--fact-type`` overrides). Entities dedup
+    by (name, entity_type) — re-extraction of a known name reuses the existing
     entity id rather than creating a duplicate.
 
     Returns a summary ``{"entities": n, "facts": [...]}`` (fact ids).
@@ -70,6 +72,7 @@ def ingest(text: str, source_ref: str | None = None) -> dict[str, Any]:
             value=obj_name,
             object_id=obj_id,
             extractor="regex",
+            fact_type=fact_type,
             source_refs=source_refs,
         )
         fact_ids.append(fid)
@@ -112,11 +115,12 @@ def recall(query: str, verbose: bool = False) -> list[dict[str, Any]]:
 # ── consolidate ────────────────────────────────────────────────────
 
 def consolidate() -> dict[str, int]:
-    """Dedup pass — mark exact-duplicate facts as superseded (Spec §4.4).
+    """Decay + dedup pass (Spec §4.4; ADR-8 + ADR-6).
 
-    Thin wrapper over ``consolidate.consolidate`` (Node D depth: survivor
-    absorbs max-LIF + union of source_refs). Returns ``{superseded, active}``
-    per the SKILL.md output contract. No decay (ADR-6).
+    Thin wrapper over ``consolidate.consolidate``. Phase 1 decays LIF per
+    fact_type half-life (active→deprecated when LIF<0.1); phase 2 marks
+    exact-duplicate Facts as superseded. Returns ``{decayed, deprecated,
+    superseded, active}`` per the SKILL.md output contract.
     """
     return consolidate_mod.consolidate()
 
@@ -130,6 +134,13 @@ def _main(argv: list[str] | None = None) -> int:
     ing = sub.add_parser("ingest", help="extract+store text")
     ing.add_argument("text")
     ing.add_argument("--source", default=None)
+    ing.add_argument(
+        "--fact-type",
+        dest="fact_type",
+        default="stable",
+        choices=("ephemeral", "stable", "permanent"),
+        help="Fact lifetime class for decay (ADR-8); default stable",
+    )
 
     rec = sub.add_parser("recall", help="recall facts for query")
     rec.add_argument("query")
@@ -139,7 +150,10 @@ def _main(argv: list[str] | None = None) -> int:
 
     args = p.parse_args(argv)
     if args.cmd == "ingest":
-        print(json.dumps(ingest(args.text, source_ref=args.source), ensure_ascii=False))
+        print(json.dumps(
+            ingest(args.text, source_ref=args.source, fact_type=args.fact_type),
+            ensure_ascii=False,
+        ))
     elif args.cmd == "recall":
         print(json.dumps(recall(args.query, verbose=args.verbose), ensure_ascii=False, default=str))
     elif args.cmd == "consolidate":
