@@ -71,3 +71,6 @@ target/
 # Go build binary(cmd/popup 产物)
 /apps/tui/popup
 .worktrees/
+
+# Orchestrator 运行时 scratch(plan.yaml/grill 输出, 不入库)
+.scratch/
