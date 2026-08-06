@@ -116,6 +116,8 @@ def recall(
     *,
     verbose: bool = False,
     top_k: int | None = None,
+    session_id: str | None = None,
+    boost: bool = True,
 ) -> list[dict[str, Any]]:
     """Recall Facts relevant to ``query``, ranked by ``α·match + β·centrality + γ·LIF``.
 
@@ -124,12 +126,22 @@ def recall(
     ``Fact.value`` + on-the-fly pagerank centrality (ADR-2v2) + ``Fact.LIF``
     scalar, fused by ADR-4v2 weighted sum.
 
+    Recall reinforcement (ADR-8v2): after ranking + top_k truncation, each
+    returned (hit) Fact's access stats are refreshed via
+    :func:`scoring.refresh_lif_on_recall` — ``access_count += 1``,
+    ``last_accessed_at = now``, ``seen_sessions`` absorbs ``session_id`` — and
+    LIF is recomputed (freq/recency/spread rise; the reinforcement feedback
+    loop). Set ``boost=False`` to skip (read-only recall). ``session_id=None``
+    still bumps access_count/last_accessed_at (spread stays put).
+
     Args:
         query: Recall query text.
         verbose: When True, return ``{"fact":..., "match":..., "centrality":...,
             "lif":..., "score":..., "entities":[...]}`` dicts (debug detail for
             ``recall --verbose``); else bare Fact dicts.
         top_k: Truncate to top-k by score; None = no truncation.
+        session_id: Session doing the recall (drives lif_spread on boost).
+        boost: Refresh LIF on hit facts (ADR-8v2 reinforcement); default True.
 
     Returns:
         Sorted list of Facts (bare) or score-detail dicts (verbose).
@@ -171,6 +183,32 @@ def recall(
     scored.sort(key=lambda s: s["score"], reverse=True)
     if top_k is not None:
         scored = scored[: max(0, top_k)]
+
+    # ADR-8v2 recall reinforcement: refresh access stats + recompute LIF on
+    # each hit fact. freq/recency/spread rise on recall (the feedback loop);
+    # the returned facts carry the refreshed LIF. boost=False ⇒ pure read.
+    # ponytail: linear refresh over the (already top_k-bounded) hit set; O(k)
+    # UPDATEs, k typically ≤ top_k. Idempotent within a wall clock — refresh
+    # recomputes from stored state, no compounding drift (cf. scoring contract).
+    if boost and scored:
+        conn = db.get_conn()
+        for s in scored:
+            refreshed = scoring.refresh_lif_on_recall(
+                s["fact"]["id"], session_id=session_id, conn=conn,
+            )
+            if refreshed is not None:
+                # Reflect the post-reinforcement stored state on the returned
+                # FACT. refresh_lif_on_recall is the authority (it writes
+                # access_count/last_accessed_at/seen_sessions + recomputes LIF);
+                # re-reading the row avoids hand-replaying those fields off the
+                # stale pre-refresh dict (off-by-N if a caller ever hands us a
+                # dict already aligned with the store). The verbose dict's own
+                # ``lif``/``score`` fields stay at score-time values — they pin
+                # the ADR-4v2 identity score; the reinforced scalar is read off
+                # fact["LIF"].
+                authoritative = store.get_fact(s["fact"]["id"])
+                if authoritative is not None:
+                    s["fact"].update(authoritative)
 
     if verbose:
         ent_ids = {e["id"] for e in entities}

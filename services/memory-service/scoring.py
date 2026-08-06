@@ -187,6 +187,7 @@ def compute_lif(
     neighbors: list[dict[str, Any]] | list[str] | None,
     *,
     now: datetime | None = None,
+    source_override: float | None = None,
 ) -> dict[str, float]:
     """Compose LIF from five non-LLM dimensions (ADR-8v2).
 
@@ -200,11 +201,16 @@ def compute_lif(
             last access). half_life from ``fact_type`` (ephemeral=7d /
             stable=90d / permanent=∞⇒1.0). Absent timestamps ⇒ recency=0.5
             (mid-neutral, never zero-stamp a fact to death on a parse miss).
+            Decay (ADR-8 ``original_lif*0.5**(Δt/h)``) is folded into this dim:
+            ``last_accessed_at`` refresh on recall is the reinforcement path.
         spread: ``min(1, distinct_sessions/5)`` — cross-session breadth.
         coherence: ``1 - conflicts/max(1, len(neighbors))`` over hardcoded
             contradiction pairs among neighbor predicates. Empty neighbors ⇒ 1.0.
         source: ``SOURCE_WEIGHT[extractor]`` (regex=0.4/llm=0.7/human=0.9/
-            vote=0.85), unknown extractor ⇒ 0.4.
+            vote=0.85), unknown extractor ⇒ 0.4. ``source_override`` (when
+            given) replaces this — used by consolidate's decay pass to honour
+            ADR-8v2's ``original_lif``⇒source fallback for legacy rows whose
+            extractor is absent.
 
     Composite: ``LIF = w_f·freq + w_r·recency + w_s·spread + w_c·coherence +
     w_o·source`` (0.25/0.30/0.15/0.15/0.15).
@@ -218,13 +224,21 @@ def compute_lif(
             Fact dicts (predicate read from ``["predicate"]``) or bare predicate
             strings. None / empty ⇒ coherence=1.0 (no contradictions possible).
         now: Override for deterministic tests; defaults to utcnow.
+        source_override: When given, force the source dim to this value
+            (clamped) instead of deriving from ``extractor``. ADR-8v2:
+            ``original_lif`` is the source-dim fallback — consolidate passes
+            it here for facts with no extractor.
 
     Returns:
         ``{"LIF": float, "lif_freq": float, "lif_recency": float,
         "lif_spread": float, "lif_coherence": float, "lif_source": float}``,
         all clamped to ``[0,1]``.
     """
-    now = now or datetime.now(timezone.utc)
+    # ADR-8v2 idempotency: default `now` floored to whole seconds so back-to-
+    # back decay() calls sample the same wall clock (no microsecond drift ⇒
+    # identical recency ⇒ same-short-circuit holds). Callers pass explicit `now`
+    # for tests; decay() also floors its own sample.
+    now = now or datetime.now(timezone.utc).replace(microsecond=0)
 
     # freq — recall saturation.
     freq = 1.0 - math.exp(-float(access_count or 0) / 5.0)
@@ -258,8 +272,12 @@ def compute_lif(
         conflicts = _conflicts(neighbor_preds)
         coherence = max(0.0, 1.0 - conflicts / max(1, n_neigh))
 
-    # source — extractor trust.
-    source = SOURCE_WEIGHT.get(fact.get("extractor") or "regex", 0.4)
+    # source — extractor trust. source_override (ADR-8v2 original_lif⇒source
+    # fallback for legacy rows) takes precedence when given.
+    if source_override is not None:
+        source = float(source_override)
+    else:
+        source = SOURCE_WEIGHT.get(fact.get("extractor") or "regex", 0.4)
 
     lif = (
         LIF_WEIGHTS["freq"] * freq
