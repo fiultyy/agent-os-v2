@@ -50,8 +50,9 @@ data/*.faiss
 services/data/*.db
 services/data/*.db-shm
 services/data/*.db-wal
-services/orchestrator/data/*.db-shm
-services/orchestrator/data/*.db-wal
+services/*/data/*.db
+services/*/data/*.db-shm
+services/*/data/*.db-wal
 services/orchestrator/data/*.db
 
 # Runtime DB backup files(*.db.bak.*,自动生成的备份)
