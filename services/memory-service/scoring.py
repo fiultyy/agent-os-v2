@@ -234,7 +234,11 @@ def compute_lif(
         "lif_spread": float, "lif_coherence": float, "lif_source": float}``,
         all clamped to ``[0,1]``.
     """
-    now = now or datetime.now(timezone.utc)
+    # ADR-8v2 idempotency: default `now` floored to whole seconds so back-to-
+    # back decay() calls sample the same wall clock (no microsecond drift ⇒
+    # identical recency ⇒ same-short-circuit holds). Callers pass explicit `now`
+    # for tests; decay() also floors its own sample.
+    now = now or datetime.now(timezone.utc).replace(microsecond=0)
 
     # freq — recall saturation.
     freq = 1.0 - math.exp(-float(access_count or 0) / 5.0)

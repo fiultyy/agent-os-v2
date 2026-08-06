@@ -181,7 +181,12 @@ def decay() -> dict[str, int]:
     """
     _ensure_schema()
     conn = db.get_conn()
-    now = datetime.now(timezone.utc)
+    # ADR-8v2 idempotency anchor: floor wall clock to whole seconds. Sub-second
+    # microsecond drift between back-to-back decay() calls would otherwise move
+    # age_h (and thus lif_recency) by ~1e-11 — larger than the same-short-circuit
+    # tolerance and enough to flip same=False, re-writing every active fact each
+    # pass. ms-floor makes "now" identical across sub-second re-runs.
+    now = datetime.now(timezone.utc).replace(microsecond=0)
     rows = conn.execute(
         "SELECT * FROM fact WHERE status = 'active'"
     ).fetchall()
@@ -194,18 +199,25 @@ def decay() -> dict[str, int]:
     for f in facts:
         by_subject.setdefault(f["subject_id"], []).append(f)
 
+    # ADR-8v2 idempotency: same-short-circuit tolerance. 1e-9 absorbs residual
+    # clock jitter (the ms-floor on `now` already collapses sub-second drift; a
+    # straddled-second boundary can still shift age_h by ±1s ⇒ recency Δ up to
+    # ~1e-10 at stable's 90d half-life, far larger than 1e-12). 1e-9 stays well
+    # below real threshold crossings (DEPRECATE_LIF_THRESHOLD=0.1) so genuine
+    # decay/deprecate events are never masked.
+    SAME_TOL = 1e-9
     decayed = 0
     deprecated = 0
     for f in facts:
         siblings = by_subject.get(f["subject_id"], [])
         dims, deprecate = _decay_one(f, now, siblings)
         same = (
-            abs(dims["LIF"] - float(f["LIF"])) < 1e-12
-            and abs(dims["lif_freq"] - float(f.get("lif_freq") or 0)) < 1e-12
-            and abs(dims["lif_recency"] - float(f.get("lif_recency") or 0)) < 1e-12
-            and abs(dims["lif_spread"] - float(f.get("lif_spread") or 0)) < 1e-12
-            and abs(dims["lif_coherence"] - float(f.get("lif_coherence") or 0)) < 1e-12
-            and abs(dims["lif_source"] - float(f.get("lif_source") or 0)) < 1e-12
+            abs(dims["LIF"] - float(f["LIF"])) < SAME_TOL
+            and abs(dims["lif_freq"] - float(f.get("lif_freq") or 0)) < SAME_TOL
+            and abs(dims["lif_recency"] - float(f.get("lif_recency") or 0)) < SAME_TOL
+            and abs(dims["lif_spread"] - float(f.get("lif_spread") or 0)) < SAME_TOL
+            and abs(dims["lif_coherence"] - float(f.get("lif_coherence") or 0)) < SAME_TOL
+            and abs(dims["lif_source"] - float(f.get("lif_source") or 0)) < SAME_TOL
         )
         if same and not deprecate:
             continue  # no wall-clock progress and no threshold cross — no write

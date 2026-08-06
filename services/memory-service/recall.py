@@ -16,7 +16,6 @@ centrality/lif/score) as a debug surface in lieu of a dedicated ``query`` cli.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any
 
 import db
@@ -198,27 +197,18 @@ def recall(
                 s["fact"]["id"], session_id=session_id, conn=conn,
             )
             if refreshed is not None:
-                # Reflect the refreshed LIF/scalars on the returned FACT so
-                # callers see the post-reinforcement stored state. The verbose
-                # dict's own ``lif``/``score`` fields stay at their score-time
-                # values — they pin the ADR-4v2 identity score == α·match +
-                # β·centrality + γ·(score-time LIF); the reinforced LIF is read
-                # off fact["LIF"]. Mirrors how score_fact decouples the scoring
-                # snapshot from the stored scalar.
-                f = s["fact"]
-                f["LIF"] = refreshed["LIF"]
-                f["lif_freq"] = refreshed["lif_freq"]
-                f["lif_recency"] = refreshed["lif_recency"]
-                f["lif_spread"] = refreshed["lif_spread"]
-                f["lif_coherence"] = refreshed["lif_coherence"]
-                f["lif_source"] = refreshed["lif_source"]
-                f["access_count"] = int(f.get("access_count") or 0) + 1
-                f["last_accessed_at"] = datetime.now(timezone.utc).isoformat()
-                if session_id:
-                    sess = list(f.get("seen_sessions") or [])
-                    if session_id not in sess:
-                        sess.append(session_id)
-                    f["seen_sessions"] = sess
+                # Reflect the post-reinforcement stored state on the returned
+                # FACT. refresh_lif_on_recall is the authority (it writes
+                # access_count/last_accessed_at/seen_sessions + recomputes LIF);
+                # re-reading the row avoids hand-replaying those fields off the
+                # stale pre-refresh dict (off-by-N if a caller ever hands us a
+                # dict already aligned with the store). The verbose dict's own
+                # ``lif``/``score`` fields stay at score-time values — they pin
+                # the ADR-4v2 identity score; the reinforced scalar is read off
+                # fact["LIF"].
+                authoritative = store.get_fact(s["fact"]["id"])
+                if authoritative is not None:
+                    s["fact"].update(authoritative)
 
     if verbose:
         ent_ids = {e["id"] for e in entities}
