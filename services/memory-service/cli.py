@@ -1,9 +1,11 @@
-"""mem-service cli — ingest / recall / consolidate (ADR-1, ADR-5).
+"""mem-service cli — ingest / recall / consolidate (ADR-1, ADR-5, ADR-5b).
 
 Top seam is the cli module (Spec §6): both ``cli.ingest(...)`` (Python) and
 ``python cli.py ingest "..."`` (argv) drive the same pipeline.
 
-- ingest: regex-extract entities+facts, store them (fact.extractor="regex").
+- ingest: extract facts via the adapter (ADR-5b butterfly-wing LLM with regex
+  fallback), persist them. ``fact.extractor`` = "llm" when the adapter's LLM
+  vote won, "regex" when it fell back (ADR-5 upheld as fallback).
 - recall: KG navigation → Fact list + α·match+β·centrality+γ·LIF 加权排序
   (ADR-4v2). scoring.ALPHA_MATCH/BETA_CENTRALITY/GAMMA_LIF fuse token match,
   pagerank centrality and LIF into the recall order. v1 substring match on
@@ -21,58 +23,59 @@ import json
 import sys
 from typing import Any
 
+import adapter
 import consolidate as consolidate_mod
-import extractor
 import recall as recall_mod
 import store
+from llm_provider import CCRProvider, LLMProvider
 
 
 # ── ingest ──────────────────────────────────────────────────────────
 
 def ingest(text: str, source_ref: str | None = None,
-           fact_type: str = "stable") -> dict[str, Any]:
-    """Extract entities+facts from ``text`` and persist them to the KG.
+           fact_type: str = "stable",
+           providers: list[LLMProvider] | None = None) -> dict[str, Any]:
+    """Extract facts from ``text`` via the adapter and persist them to the KG.
 
-    Each fact is stamped ``extractor="regex"`` (ADR-5) and ``fact_type``
-    (ADR-8, default stable; ingest ``--fact-type`` overrides). Entities dedup
-    by (name, entity_type) — re-extraction of a known name reuses the existing
-    entity id rather than creating a duplicate.
+    The adapter runs butterfly-wing LLM extraction (ADR-5b) and falls back to
+    the regex extractor (ADR-5) when no provider is reachable or confidence is
+    low. ``fact.extractor`` reflects which path won: "llm" or "regex".
+    ``fact_type`` is ADR-8 (default stable; ingest ``--fact-type`` overrides).
+    Entities are lazily created from each fact's subject/object via
+    ``_ensure_entity`` (re-extraction of a known name reuses its id).
+
+    ``providers`` defaults to ``[CCRProvider()]`` (the deployed ccr router).
+    Pass ``[]`` to force the regex fallback path (Spec §4 story 5).
 
     Returns a summary ``{"entities": n, "facts": [...]}`` (fact ids).
     """
-    extracted = extractor.extract(text)
+    if providers is None:
+        providers = [CCRProvider()]
+    extracted = adapter.extract_facts(text, providers=providers)
+    # "llm" when the adapter's LLM vote produced the surviving facts (its
+    # source_meta carries provider ≠ "regex"); "regex" on fallback.
+    ext_label = "regex" if extracted.source_meta.get("provider") == "regex" else "llm"
     source_refs = [source_ref] if source_ref else []
 
     # name → entity_id cache (this ingest's working set).
     name_to_id: dict[str, str] = {}
-    # Existing entities first so we dedup across ingests.
-    for ent in extracted["entities"]:
-        existing = store.find_entities_by_name(ent["name"], ent["entity_type"])
-        if existing:
-            name_to_id[ent["name"]] = existing[0]["id"]
-    for ent in extracted["entities"]:
-        if ent["name"] in name_to_id:
-            continue
-        name_to_id[ent["name"]] = store.put_entity(
-            ent["name"], ent["entity_type"]
-        )
 
     fact_ids: list[str] = []
-    for fact in extracted["facts"]:
-        subj_id = _ensure_entity(fact["subject"], name_to_id)
+    for fact in extracted.facts:
+        subj_id = _ensure_entity(fact.subject, name_to_id)
         if subj_id is None:
             continue
         # Object may be a multi-word phrase; store as literal value AND try to
-        # link an object entity if the object name was extracted. ADR-3: object
-        # is value-carrier; object_id optional. Prefer linking when known.
-        obj_name = fact["object"]
+        # link an object entity if the object name was seen this ingest. ADR-3:
+        # object is value-carrier; object_id optional. Prefer linking when known.
+        obj_name = fact.object
         obj_id = name_to_id.get(obj_name)
         fid = store.put_fact(
             subject_id=subj_id,
-            predicate=fact["predicate"],
+            predicate=fact.predicate,
             value=obj_name,
             object_id=obj_id,
-            extractor="regex",
+            extractor=ext_label,
             fact_type=fact_type,
             source_refs=source_refs,
         )
