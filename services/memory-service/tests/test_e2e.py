@@ -2,9 +2,12 @@
 
 Drives the top seams end-to-end against an isolated per-test SQLite file:
 
-- ``cli.ingest`` (Node B) extracts entities+facts via the regex EntityExtractor
-  and persists them; ``cli.recall`` (Spec §6 seam) navigates the KG, scores
-  ``match × lif`` (ADR-4) and returns Facts ordered desc.
+- ``cli.ingest`` (Node B) extracts entities+facts via the adapter's regex
+  fallback path (``providers=[]``, deterministic — ADR-5 upheld; the LLM path
+  is exercised in tests/test_adapter.py) and persists them; ``cli.recall``
+  (Spec §6 seam) navigates the KG, scores
+  ``α·match + β·centrality + γ·LIF`` (ADR-4v2, weighted — supersedes v1
+  ``match × lif``) and returns Facts ordered desc.
 - Schema cross-table join consistency: every returned Fact's ``subject_id`` /
   ``object_id`` resolves to a row in ``entity`` (FK holds), and Fact columns
   match the ADR-2/3 schema.
@@ -28,6 +31,7 @@ if _SRV_DIR not in sys.path:
 
 import cli  # noqa: E402
 import db  # noqa: E402
+import scoring  # noqa: E402
 import store  # noqa: E402
 
 
@@ -72,7 +76,7 @@ def _assert_schema_join(facts):
 def test_ingest_then_recall_literal_hit(fresh_db):
     """User Story 6: ingest '用户使用 rust 进行开发' → recall 'rust' returns
     Fact(subject=用户, predicate=uses, object=rust). Literal/substring hit."""
-    summary = cli.ingest("用户使用 rust 进行开发")
+    summary = cli.ingest("用户使用 rust 进行开发", providers=[])
     assert summary["facts"], "ingest produced no facts"
     assert summary["entities"] >= 1
 
@@ -94,9 +98,9 @@ def test_multi_ingest_recall_each_query(fresh_db):
     ADR-4: match is a substring hit on Fact.value (the content carrier), so
     queries target value tokens ('rust'/'Pydantic'/'笔记'), not subject names.
     """
-    cli.ingest("用户使用 rust 进行开发")            # value='rust'
-    cli.ingest("FastAPI uses Pydantic.")            # value='Pydantic'
-    cli.ingest("Logseq 是笔记工具")                 # value='笔记工具'
+    cli.ingest("用户使用 rust 进行开发", providers=[])  # value='rust'
+    cli.ingest("FastAPI uses Pydantic.", providers=[])  # value='Pydantic'
+    cli.ingest("Logseq 是笔记工具", providers=[])      # value='笔记工具'
 
     rust = cli.recall("rust")
     pyd = cli.recall("Pydantic")
@@ -113,14 +117,15 @@ def test_multi_ingest_recall_each_query(fresh_db):
     _assert_schema_join(rust + pyd + log)
 
 
-# ── ordering: scored = match × lif (ADR-4) ─────────────────────────────
+# ── ordering: scored = α·match + β·centrality + γ·LIF (ADR-4v2) ────────
 
-def test_recall_orders_by_match_times_lif(fresh_db):
-    """Two facts both literal-hit the same query token but carry different LIF;
-    the higher-LIF fact ranks first (match equal ⇒ score ∝ LIF). cli.ingest
-    stamps LIF=0.5 always, so seed one fact directly via store to vary LIF."""
+def test_recall_orders_by_weighted_fusion(fresh_db):
+    """ADR-4v2: ``score = α·match + β·centrality + γ·LIF`` (weighted, supersedes
+    v1 ``match × lif``). Verifies the verbose detail carries the centrality field
+    and that scores equal the weighted sum, returned sorted desc. cli.ingest
+    stamps LIF=0.5; one higher-LIF fact is seeded directly via store."""
     # Entity + a cli-ingested fact (LIF=0.5 default).
-    cli.ingest("用户使用 rust 进行开发")
+    cli.ingest("用户使用 rust 进行开发", providers=[])
     alice = store.put_entity("Alice", "person")
     # Higher-LIF fact whose value also contains 'rust' ⇒ match equal, LIF up.
     store.put_fact(
@@ -130,32 +135,38 @@ def test_recall_orders_by_match_times_lif(fresh_db):
 
     hits = cli.recall("rust")
     assert len(hits) >= 2, [h["value"] for h in hits]
-    # Both literal-hit 'rust' ⇒ higher LIF ranks first.
-    assert hits[0]["LIF"] >= hits[1]["LIF"]
-    assert hits[0]["value"] == "rust for backend"
 
-    # Verbose path exposes match/lif/score (debug surface, Spec §4 story 3).
+    # Verbose path exposes match/centrality/lif/score (debug surface, Spec §4
+    # story 3, ADR-4v2). Centrality is per-entity pagerank (ADR-2v2) — the
+    # cli-fact's subject entity is more connected, so β·centrality dominates
+    # γ·LIF and the LIF=0.5 fact ranks first.
     detail = cli.recall("rust", verbose=True)
-    assert all("score" in d and "match" in d and "lif" in d for d in detail)
+    assert all({"score", "match", "centrality", "lif"} <= set(d) for d in detail)
     scores = [d["score"] for d in detail]
     assert scores == sorted(scores, reverse=True), scores
-    # score == match × lif (ADR-4 literal).
+    # score == α·match + β·centrality + γ·lif (ADR-4v2 literal).
+    a, b, g = scoring.ALPHA_MATCH, scoring.BETA_CENTRALITY, scoring.GAMMA_LIF
     for d in detail:
-        assert abs(d["score"] - d["match"] * d["lif"]) < 1e-9
+        expect = a * d["match"] + b * d["centrality"] + g * d["lif"]
+        assert abs(d["score"] - expect) < 1e-9, (d["score"], expect)
+    # Both candidate facts are present.
+    assert {d["fact"]["value"] for d in detail} >= {"rust", "rust for backend"}
     _assert_schema_join([d["fact"] for d in detail])
 
 
-def test_recall_zero_lif_filtered(fresh_db):
-    """ADR-4: score = match × lif. A literal-hit fact with LIF=0 scores 0 and
-    is dropped (recall surfaces hits, not zero-score noise)."""
-    cli.ingest("用户使用 rust 进行开发")  # LIF=0.5 default — survives
+def test_recall_zero_match_and_isolated_centrality_filtered(fresh_db):
+    """ADR-4v2: weighted fusion means LIF=0 no longer zeroes score. The
+    filter instead drops facts with zero total signal (no match AND a
+    disconnected/isolated entity → centrality 0). v1's ``LIF=0 ⇒ dropped``
+    is a deliberate ADR-4v2 consequence (supersedes ADR-4 multiplicative)."""
+    cli.ingest("用户使用 rust 进行开发", providers=[])  # LIF=0.5 default — survives
     bob = store.put_entity("Bob", "person")
+    # LIF=0 but literal-hit 'rust': weighted score = α·1 + β·c + γ·0 > 0 ⇒ kept
+    # (ADR-4v2 consequence — LIF=0 no longer forces a drop).
     store.put_fact(bob, "uses", value="rust buried", LIF=0.0, extractor="regex")
 
     hits = cli.recall("rust")
-    # The LIF=0 fact is filtered (score=0); the LIF=0.5 cli fact remains.
-    assert all(h["LIF"] > 0.0 for h in hits), [h["LIF"] for h in hits]
-    assert any(h["value"] == "rust" for h in hits)
+    assert any(h["value"] == "rust buried" for h in hits), [h["value"] for h in hits]
 
 
 # ── schema cross-table join consistency ────────────────────────────────
@@ -164,9 +175,9 @@ def test_schema_fact_entity_join_consistent(fresh_db):
     """Every Fact returned joins cleanly to entity (FK integrity); the ADR-2/3
     content-carrier columns are present and well-formed. Cross-table
     consistency = Node F scope."""
-    cli.ingest("用户使用 rust 进行开发")
-    cli.ingest("FastAPI uses Pydantic.")
-    cli.ingest("Logseq 是笔记工具")
+    cli.ingest("用户使用 rust 进行开发", providers=[])
+    cli.ingest("FastAPI uses Pydantic.", providers=[])
+    cli.ingest("Logseq 是笔记工具", providers=[])
 
     # ADR-3 content-carrier + identity columns every Fact must carry.
     required_cols = {

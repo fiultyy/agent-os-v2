@@ -1,13 +1,16 @@
-"""mem-service cli — ingest / recall / consolidate (ADR-1, ADR-5).
+"""mem-service cli — ingest / recall / consolidate (ADR-1, ADR-5, ADR-5b).
 
 Top seam is the cli module (Spec §6): both ``cli.ingest(...)`` (Python) and
 ``python cli.py ingest "..."`` (argv) drive the same pipeline.
 
-- ingest: regex-extract entities+facts, store them (fact.extractor="regex").
-- recall: KG navigation → Fact list + match×lif ordering. v1 substring match
-  on Fact.value/predicate + entity.name LIKE (semantic recall deferred — ADR-4,
-  Spec Defer). Node C fleshes out scoring detail; here is the working skeleton
-  so the closed loop (Node F) can run.
+- ingest: extract facts via the adapter (ADR-5b butterfly-wing LLM with regex
+  fallback), persist them. ``fact.extractor`` = "llm" when the adapter's LLM
+  vote won, "regex" when it fell back (ADR-5 upheld as fallback).
+- recall: KG navigation → Fact list + α·match+β·centrality+γ·LIF 加权排序
+  (ADR-4v2). scoring.ALPHA_MATCH/BETA_CENTRALITY/GAMMA_LIF fuse token match,
+  pagerank centrality and LIF into the recall order. v1 substring match on
+  Fact.value/predicate + entity.name LIKE underlies the match term (semantic
+  recall deferred — ADR-4, Spec Defer).
 - consolidate: dedup skeleton, no decay (Spec §4 story 4; Node D owns depth).
 
 No ``query`` subcommand (debug via ``recall --verbose`` or sqlite3 — Spec §3).
@@ -20,56 +23,61 @@ import json
 import sys
 from typing import Any
 
+import adapter
+import autodream as autodream_mod
 import consolidate as consolidate_mod
-import extractor
 import recall as recall_mod
 import store
+from llm_provider import CCRProvider, LLMProvider
 
 
 # ── ingest ──────────────────────────────────────────────────────────
 
-def ingest(text: str, source_ref: str | None = None) -> dict[str, Any]:
-    """Extract entities+facts from ``text`` and persist them to the KG.
+def ingest(text: str, source_ref: str | None = None,
+           fact_type: str = "stable",
+           providers: list[LLMProvider] | None = None) -> dict[str, Any]:
+    """Extract facts from ``text`` via the adapter and persist them to the KG.
 
-    Each fact is stamped ``extractor="regex"`` (ADR-5). Entities dedup by
-    (name, entity_type) — re-extraction of a known name reuses the existing
-    entity id rather than creating a duplicate.
+    The adapter runs butterfly-wing LLM extraction (ADR-5b) and falls back to
+    the regex extractor (ADR-5) when no provider is reachable or confidence is
+    low. ``fact.extractor`` reflects which path won: "llm" or "regex".
+    ``fact_type`` is ADR-8 (default stable; ingest ``--fact-type`` overrides).
+    Entities are lazily created from each fact's subject/object via
+    ``_ensure_entity`` (re-extraction of a known name reuses its id).
+
+    ``providers`` defaults to ``[CCRProvider()]`` (the deployed ccr router).
+    Pass ``[]`` to force the regex fallback path (Spec §4 story 5).
 
     Returns a summary ``{"entities": n, "facts": [...]}`` (fact ids).
     """
-    extracted = extractor.extract(text)
+    if providers is None:
+        providers = [CCRProvider()]
+    extracted = adapter.extract_facts(text, providers=providers)
+    # "llm" when the adapter's LLM vote produced the surviving facts (its
+    # source_meta carries provider ≠ "regex"); "regex" on fallback.
+    ext_label = "regex" if extracted.source_meta.get("provider") == "regex" else "llm"
     source_refs = [source_ref] if source_ref else []
 
     # name → entity_id cache (this ingest's working set).
     name_to_id: dict[str, str] = {}
-    # Existing entities first so we dedup across ingests.
-    for ent in extracted["entities"]:
-        existing = store.find_entities_by_name(ent["name"], ent["entity_type"])
-        if existing:
-            name_to_id[ent["name"]] = existing[0]["id"]
-    for ent in extracted["entities"]:
-        if ent["name"] in name_to_id:
-            continue
-        name_to_id[ent["name"]] = store.put_entity(
-            ent["name"], ent["entity_type"]
-        )
 
     fact_ids: list[str] = []
-    for fact in extracted["facts"]:
-        subj_id = _ensure_entity(fact["subject"], name_to_id)
+    for fact in extracted.facts:
+        subj_id = _ensure_entity(fact.subject, name_to_id)
         if subj_id is None:
             continue
         # Object may be a multi-word phrase; store as literal value AND try to
-        # link an object entity if the object name was extracted. ADR-3: object
-        # is value-carrier; object_id optional. Prefer linking when known.
-        obj_name = fact["object"]
+        # link an object entity if the object name was seen this ingest. ADR-3:
+        # object is value-carrier; object_id optional. Prefer linking when known.
+        obj_name = fact.object
         obj_id = name_to_id.get(obj_name)
         fid = store.put_fact(
             subject_id=subj_id,
-            predicate=fact["predicate"],
+            predicate=fact.predicate,
             value=obj_name,
             object_id=obj_id,
-            extractor="regex",
+            extractor=ext_label,
+            fact_type=fact_type,
             source_refs=source_refs,
         )
         fact_ids.append(fid)
@@ -99,26 +107,52 @@ def _ensure_entity(name: str, cache: dict[str, str]) -> str | None:
 
 # ── recall ──────────────────────────────────────────────────────────
 
-def recall(query: str, verbose: bool = False) -> list[dict[str, Any]]:
-    """Return Facts relevant to ``query``, ordered by match×lif (ADR-4).
+def recall(query: str, verbose: bool = False,
+           session_id: str | None = None, boost: bool = True,
+           weights=None) -> list[dict[str, Any]]:
+    """Return Facts relevant to ``query``, ordered by α·match+β·centrality+γ·LIF
+    加权排序 (ADR-4v2).
 
-    Thin wrapper over ``recall.recall`` (Node C depth: token-split match_item
-    × LIF). Spec §6 seam — the cli subcommand and ``cli.recall(...)`` drive
-    the same pipeline as the deepened module.
+    Thin wrapper over ``recall.recall`` (scoring.ALPHA_MATCH·match +
+    BETA_CENTRALITY·pagerank + GAMMA_LIF·LIF). Spec §6 seam — the cli
+    subcommand and ``cli.recall(...)`` drive the same pipeline as the
+    deepened module.
+
+    Recall reinforcement (ADR-8v2) defaults on: hit facts' access stats +
+    LIF refresh on recall (boost=False for a pure read). ``session_id`` drives
+    lif_spread on the refresh.
     """
-    return recall_mod.recall(query, verbose=verbose)
+    return recall_mod.recall(query, verbose=verbose, session_id=session_id,
+                             boost=boost, weights=weights)
 
 
 # ── consolidate ────────────────────────────────────────────────────
 
 def consolidate() -> dict[str, int]:
-    """Dedup pass — mark exact-duplicate facts as superseded (Spec §4.4).
+    """Decay + dedup pass (Spec §4.4; ADR-8 + ADR-6).
 
-    Thin wrapper over ``consolidate.consolidate`` (Node D depth: survivor
-    absorbs max-LIF + union of source_refs). Returns ``{superseded, active}``
-    per the SKILL.md output contract. No decay (ADR-6).
+    Thin wrapper over ``consolidate.consolidate``. Phase 1 decays LIF per
+    fact_type half-life (active→deprecated when LIF<0.1); phase 2 marks
+    exact-duplicate Facts as superseded. Returns ``{decayed, deprecated,
+    superseded, active}`` per the SKILL.md output contract.
     """
     return consolidate_mod.consolidate()
+
+
+# ── autodream ──────────────────────────────────────────────────────
+
+def autodream(session_id: str, transcript_path: str) -> dict[str, int]:
+    """PreCompact autoDream: session transcript raw→KG incremental (ADR-10).
+
+    Thin wrapper over ``autodream.autodream``. Reads the CC transcript JSONL,
+    reuses ``extractor.extract()`` regex (蝴蝶翼 LLM defer, adapter 预留), runs
+    ``consolidate.consolidate()`` (decay+dedup 复用 v2/v3), then makes the
+    incremental decision per fact (ADD / UPDATE / DELETE / NOOP). Returns
+    ``{added, updated, deleted, noop}``.
+
+    Driven by the ``cli autodream`` subcommand from the PreCompact hook.
+    """
+    return autodream_mod.autodream(session_id, transcript_path)
 
 
 # ── argv entry ──────────────────────────────────────────────────────
@@ -130,6 +164,13 @@ def _main(argv: list[str] | None = None) -> int:
     ing = sub.add_parser("ingest", help="extract+store text")
     ing.add_argument("text")
     ing.add_argument("--source", default=None)
+    ing.add_argument(
+        "--fact-type",
+        dest="fact_type",
+        default="stable",
+        choices=("ephemeral", "stable", "permanent"),
+        help="Fact lifetime class for decay (ADR-8); default stable",
+    )
 
     rec = sub.add_parser("recall", help="recall facts for query")
     rec.add_argument("query")
@@ -137,13 +178,25 @@ def _main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("consolidate", help="dedup skeleton")
 
+    dream = sub.add_parser("autodream", help="session transcript raw→KG incremental (ADR-10)")
+    dream.add_argument("--session", dest="session", required=True, help="CC session id")
+    dream.add_argument(
+        "--transcript", dest="transcript", required=True,
+        help="path to CC transcript JSONL",
+    )
+
     args = p.parse_args(argv)
     if args.cmd == "ingest":
-        print(json.dumps(ingest(args.text, source_ref=args.source), ensure_ascii=False))
+        print(json.dumps(
+            ingest(args.text, source_ref=args.source, fact_type=args.fact_type),
+            ensure_ascii=False,
+        ))
     elif args.cmd == "recall":
         print(json.dumps(recall(args.query, verbose=args.verbose), ensure_ascii=False, default=str))
     elif args.cmd == "consolidate":
         print(json.dumps(consolidate()))
+    elif args.cmd == "autodream":
+        print(json.dumps(autodream(args.session, args.transcript), ensure_ascii=False))
     return 0
 
 
