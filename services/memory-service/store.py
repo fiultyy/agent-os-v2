@@ -95,31 +95,49 @@ def put_fact(
     supersedes_id: str | None = None,
     fact_id: str | None = None,
     original_lif: float | None = None,
+    lif_freq: float = 0.0,
+    lif_recency: float = 0.5,
+    lif_spread: float = 0.0,
+    lif_coherence: float = 0.0,
+    lif_source: float | None = None,
+    access_count: int = 0,
+    last_accessed_at: str | None = None,
+    seen_sessions: list[str] | None = None,
 ) -> str:
     """Insert a Fact (reified), return its id.
 
     Literal/unary facts: pass ``value`` only (object_id stays None).
     Binary entity→entity facts: pass ``object_id`` (value optional).
 
-    ``original_lif`` (ADR-8 idempotent decay) freezes the decay base at store
-    time — defaults to ``LIF``. Decay rebases ``new_lif = original_lif *
-    0.5**(Δt/half_life)`` so re-running consolidate never compounds (created_at
-    is immutable). Leave it None on store to freeze = LIF.
+    ``original_lif`` (ADR-8v2): semantics shifted from ADR-8 decay base to the
+    source-dim initial-value snapshot — defaults to ``LIF``. The LIF-Scorer
+    node composes LIF from the five dims; this store writes them verbatim
+    (no composition). ``lif_source`` defaults to ``SOURCE_WEIGHT[extractor]``
+    (regex=0.4) when None — see consolidate.SOURCE_WEIGHT for the canonical
+    table.
     """
     conn = db.get_conn()
     fid = fact_id or _uid()
     frozen_lif = float(LIF) if original_lif is None else float(original_lif)
+    if lif_source is None:
+        from consolidate import SOURCE_WEIGHT
+        lif_source = SOURCE_WEIGHT.get(extractor, 0.4)
     conn.execute(
         """INSERT INTO fact
            (id, subject_id, predicate, object_id, value, valid_from, valid_to,
             fact_type, LIF, original_lif, confidence, source_refs, extractor,
-            status, supersedes_id, created_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            status, supersedes_id, created_at,
+            lif_freq, lif_recency, lif_spread, lif_coherence, lif_source,
+            access_count, last_accessed_at, seen_sessions)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             fid, subject_id, predicate, object_id, value, valid_from, valid_to,
             fact_type, LIF, frozen_lif, confidence,
             json.dumps(source_refs or [], ensure_ascii=False),
             extractor, status, supersedes_id, _now(),
+            lif_freq, lif_recency, lif_spread, lif_coherence, lif_source,
+            access_count, last_accessed_at,
+            json.dumps(seen_sessions or [], ensure_ascii=False),
         ),
     )
     conn.commit()
@@ -174,4 +192,13 @@ def _decode_fact(row: Any) -> dict[str, Any]:
         "status": row["status"],
         "supersedes_id": row["supersedes_id"],
         "created_at": row["created_at"],
+        # ADR-8v2 LIF five-dim composite + recall-reinforcement state.
+        "lif_freq": row["lif_freq"],
+        "lif_recency": row["lif_recency"],
+        "lif_spread": row["lif_spread"],
+        "lif_coherence": row["lif_coherence"],
+        "lif_source": row["lif_source"],
+        "access_count": row["access_count"],
+        "last_accessed_at": row["last_accessed_at"],
+        "seen_sessions": json.loads(row["seen_sessions"]) if row["seen_sessions"] else [],
     }

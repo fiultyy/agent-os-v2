@@ -39,28 +39,65 @@ HALF_LIFE_DAYS: dict[str, float] = {
 # ADR-8: LIF below this threshold after decay ⇒ active → deprecated.
 DEPRECATE_LIF_THRESHOLD = 0.1
 
+# ADR-8v2 source-dim weight by extractor (canonical LIF-Scorer value; mirrored
+# here only for legacy backfill so _ensure_schema has no cross-node dep).
+SOURCE_WEIGHT: dict[str, float] = {
+    "regex": 0.4,
+    "llm": 0.7,
+    "human": 0.9,
+    "vote": 0.85,
+}
+
 _schema_migrated = False
 
 
 def _ensure_schema() -> None:
-    """Idempotent back-fill of ``original_lif`` for legacy fact tables.
+    """Idempotent schema migration: back-fill ADR-8 ``original_lif`` and the
+    ADR-8v2 LIF five-dim columns for legacy fact tables.
 
-    schema.sql adds the column on fresh DBs, but ``CREATE TABLE IF NOT
-    EXISTS`` skips existing tables — so pre-ADR-8idempotent DBs need an ALTER.
-    Backfills ``original_lif = LIF`` so the first decay pass rebases from the
-    current LIF snapshot (best available base). Runs once per process.
+    schema.sql adds the columns on fresh DBs, but ``CREATE TABLE IF NOT
+    EXISTS`` skips existing tables — so pre-ADR-8/8v2 DBs need ALTERs here.
+
+    Backfill (ADR-8v2): ``lif_source = SOURCE_WEIGHT[extractor]`` (regex=0.4
+    default for unknown extractors), ``lif_recency = 0.5`` (mid-neutral, the
+    decay pass recomputes from last_accessed_at=created_at on first run); all
+    other new dims default 0 and ``original_lif`` semantics shifts from decay
+    base to the source-dim initial-value snapshot.
     """
     global _schema_migrated
     if _schema_migrated:
         return
     conn = db.get_conn()
     cols = {r[1] for r in conn.execute("PRAGMA table_info(fact)").fetchall()}
+
+    # ADR-8 idempotency column (legacy backfill only).
     if "original_lif" not in cols:
-        # ponytail: ALTER ADD COLUMN with DEFAULT fills existing rows; we then
-        # copy each row's current LIF in (decay rebases from that snapshot).
         conn.execute("ALTER TABLE fact ADD COLUMN original_lif REAL NOT NULL DEFAULT 0.5")
         conn.execute("UPDATE fact SET original_lif = LIF")
-        conn.commit()
+
+    # ADR-8v2 LIF five-dim + recall-reinforcement state.
+    if "lif_freq" not in cols:
+        conn.execute("ALTER TABLE fact ADD COLUMN lif_freq REAL NOT NULL DEFAULT 0")
+    if "lif_recency" not in cols:
+        conn.execute("ALTER TABLE fact ADD COLUMN lif_recency REAL NOT NULL DEFAULT 0.5")
+    if "lif_spread" not in cols:
+        conn.execute("ALTER TABLE fact ADD COLUMN lif_spread REAL NOT NULL DEFAULT 0")
+    if "lif_coherence" not in cols:
+        conn.execute("ALTER TABLE fact ADD COLUMN lif_coherence REAL NOT NULL DEFAULT 0")
+    if "lif_source" not in cols:
+        # Backfill source-dim from extractor (regex=0.4 fallback for unknown).
+        conn.execute("ALTER TABLE fact ADD COLUMN lif_source REAL NOT NULL DEFAULT 0.4")
+        for ext, w in SOURCE_WEIGHT.items():
+            conn.execute("UPDATE fact SET lif_source = ? WHERE extractor = ?", (w, ext))
+    if "access_count" not in cols:
+        conn.execute("ALTER TABLE fact ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0")
+    if "last_accessed_at" not in cols:
+        # NULL ⇒ first decay/recency pass treats created_at as last access.
+        conn.execute("ALTER TABLE fact ADD COLUMN last_accessed_at TEXT")
+    if "seen_sessions" not in cols:
+        conn.execute("ALTER TABLE fact ADD COLUMN seen_sessions TEXT NOT NULL DEFAULT '[]'")
+
+    conn.commit()
     _schema_migrated = True
 
 

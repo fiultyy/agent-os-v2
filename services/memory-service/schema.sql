@@ -25,13 +25,22 @@ CREATE TABLE IF NOT EXISTS fact (
     valid_from    TEXT,
     valid_to      TEXT,
     fact_type     TEXT NOT NULL DEFAULT 'stable', -- ephemeral|stable|permanent
-    LIF           REAL NOT NULL DEFAULT 0.5,      -- trust scalar (NOT NeuralField — ADR-4); decayed in place
-    original_lif  REAL NOT NULL DEFAULT 0.5,      -- frozen LIF at store time — decay rebases from this (idempotent, ADR-8)
+    LIF           REAL NOT NULL DEFAULT 0.5,      -- trust scalar (NOT NeuralField — ADR-4); composite of LIF five dims (ADR-8v2)
+    original_lif  REAL NOT NULL DEFAULT 0.5,      -- ADR-8v2: source-dim initial-value snapshot (was decay base under ADR-8; decay now folded into lif_recency)
     confidence    REAL NOT NULL DEFAULT 0.5,
     source_refs   TEXT NOT NULL DEFAULT '[]',     -- JSON array: raw sessionId/leafUuid
     extractor     TEXT NOT NULL DEFAULT 'regex',
     status        TEXT NOT NULL DEFAULT 'active', -- active|deprecated|superseded
     supersedes_id TEXT,
+    -- ADR-8v2 LIF five-dim composite (freq/recency/spread/coherence/source) + recall-reinforcement state
+    lif_freq        REAL NOT NULL DEFAULT 0,        -- 1-exp(-access_count/5) — recall saturation
+    lif_recency     REAL NOT NULL DEFAULT 0.5,      -- exp(-ln2·age_h/half_life_h), age_h=now-last_accessed_at
+    lif_spread      REAL NOT NULL DEFAULT 0,        -- min(1, distinct_sessions/5) — cross-session
+    lif_coherence   REAL NOT NULL DEFAULT 0,        -- 1-conflicts/max(1,neighbors) — subject-neighbor agreement
+    lif_source      REAL NOT NULL DEFAULT 0.4,      -- SOURCE_WEIGHT[extractor] (regex=0.4/llm=0.7/human=0.9/vote=0.85)
+    access_count    INTEGER NOT NULL DEFAULT 0,     -- recall hit count
+    last_accessed_at TEXT,                          -- recall refresh timestamp (drives lif_recency)
+    seen_sessions   TEXT NOT NULL DEFAULT '[]',     -- JSON array: sessions that recalled this fact (drives lif_spread)
     created_at    TEXT NOT NULL,
     FOREIGN KEY (subject_id) REFERENCES entity(id),
     FOREIGN KEY (object_id)  REFERENCES entity(id),
