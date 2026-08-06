@@ -67,7 +67,14 @@ def extract_facts(
     - Otherwise: fan out ``wings`` calls across ``providers`` (round-robin when
       len(providers) < wings, else one wing per provider), vote on identical
       (subject, predicate, object) triples, aggregate confidence as the max.
-    - Voted result with confidence < ``FALLBACK_CONFIDENCE`` → regex fallback.
+    - Voted result with confidence ≥ ``FALLBACK_CONFIDENCE`` and ≥ quorum
+      agreement → returned as-is.
+    - Below the floor or empty: run regex fallback, then **merge** any voted
+      LLM facts regex did not independently surface (dedup by
+      (subject,predicate,object)). A low-confidence vote is *down-weighted,
+      not discarded* — a single 0.5-confidence wing that regex missed would
+      otherwise vanish silently. Final confidence = max(fb, voted);
+      ``source_meta`` records ``llm_attempted`` and ``merged_voted`` count.
 
     The returned ``Extraction`` is never None and ``confidence`` ≥ 0.
     """
@@ -87,11 +94,19 @@ def extract_facts(
     if voted.facts and voted.confidence >= FALLBACK_CONFIDENCE:
         return voted
 
-    # Low confidence or empty LLM result → regex fallback, but surface that
-    # the LLM path ran (debugging) and merge any LLM facts the vote dropped.
+    # Low confidence or empty LLM result → regex fallback, then merge any
+    # voted LLM facts regex did not surface (ADR-5b: a low-confidence vote is
+    # down-weighted, not silently dropped). Dedup on the triple so a fact both
+    # layers surface isn't double-counted.
     fb = _regex_fallback(text)
+    existing = {(f.subject, f.predicate, f.object) for f in fb.facts}
+    merged = [f for f in voted.facts
+              if (f.subject, f.predicate, f.object) not in existing]
+    fb.facts.extend(merged)
+    fb.confidence = max(fb.confidence, voted.confidence)
     fb.source_meta["llm_attempted"] = True
     fb.source_meta["llm_confidence"] = voted.confidence
+    fb.source_meta["merged_voted"] = len(merged)
     return fb
 
 
@@ -158,20 +173,50 @@ def _regex_fallback(text: str) -> Extraction:
 # ── provider reachability (cheap pre-check, no full call) ─────────────
 
 def _is_reachable(provider: LLMProvider) -> bool:
-    """True if ``provider`` looks usable. Stubs and broken providers report a
-    sentinel error string in source_meta on a probe call; reachable providers
-    either return facts or a clean empty (network error, parse error)."""
-    # Stubs declare themselves via class name or error sentinel — detect by
-    # a single probe and inspect source_meta. Cheap enough at N=3.
+    """True if ``provider`` looks usable.
+
+    Two cheap paths, no LLM call:
+
+    - **Has ``base_url``** (CCRProvider, LMStudioProvider, any HTTP-backed
+      provider): TCP-connect the host:port from the URL. No model in the
+      request → no token spend, ~ms latency. Replaces the previous
+      ``extract_facts("")`` probe which fired a real LLM call per wing
+      (N=3 wings = 4 billable calls at CCRProvider).
+    - **No ``base_url``** (stubs, fakes): fall back to ``extract_facts("")``
+      and inspect source_meta for a stub sentinel. Deterministic for fakes
+      (they ignore the input); stubs self-exclude via their error string.
+    """
+    base_url = getattr(provider, "base_url", None)
+    if base_url:
+        return _tcp_reachable(base_url, timeout=2.0)
     try:
         probe = provider.extract_facts("")
     except Exception:
         return False
-    meta = probe.source_meta
-    err = str(meta.get("error", ""))
+    err = str(probe.source_meta.get("error", ""))
     if "stub" in err or "not implemented" in err:
         return False
     return True
+
+
+def _tcp_reachable(base_url: str, timeout: float = 2.0) -> bool:
+    """TCP-connect the host:port of ``base_url``. Cheap reachability probe —
+    no HTTP request, no model, no token spend. True if the socket opens."""
+    import urllib.parse
+    try:
+        parsed = urllib.parse.urlparse(base_url)
+    except ValueError:
+        return False
+    host = parsed.hostname
+    if not host:
+        return False
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    import socket
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 # ── default providers (cli uses this) ─────────────────────────────────

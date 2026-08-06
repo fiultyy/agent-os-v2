@@ -101,21 +101,39 @@ def test_extract_facts_llm_majority_vote_aggregates_max_confidence():
     assert r.source_meta.get("mode") == "majority"
 
 
-def test_extract_facts_low_confidence_falls_back_to_regex():
-    """A mock provider whose voted confidence is below the fallback floor
-    (single wing / 0.5) triggers regex fallback — the LLM facts are dropped
-    unless regex independently surfaces them."""
-    # Provider returns a fact regex can't hit, at confidence 0.5 (below
-    # FALLBACK_CONFIDENCE 0.6) → voted confidence 0.5 < 0.6 → regex fallback.
+def test_extract_facts_low_confidence_merges_voted_facts():
+    """ADR-5b: a voted fact below the fallback floor is **merged**, not
+    silently dropped. Provider returns a fact regex can't hit, at confidence
+    0.5 (below FALLBACK_CONFIDENCE 0.6) → voted.confidence 0.5 < 0.6 → regex
+    fallback runs AND merges the voted X-uses-Y back in (regex misses it).
+    Without the merge, the voted fact would vanish silently."""
     fact = FactOut(subject="X", predicate="uses", object="Y")
     provider = _FakeProvider([fact], confidence=0.5)
     r = adapter.extract_facts("用户使用 rust", providers=[provider], wings=1)
-    # quorum=1 wing so the LLM fact survives the vote, but confidence 0.5 < 0.6
-    # → regex fallback runs. Regex hits "用户使用 rust" → its triple.
+    # quorum=1 → voted fact survives; confidence 0.5 < 0.6 → fallback + merge.
     assert r.source_meta.get("provider") == "regex"
     assert r.source_meta.get("llm_attempted") is True
+    assert r.source_meta.get("merged_voted") == 1
     triples = {(f.subject, f.predicate, f.object) for f in r.facts}
+    # regex surface + the merged LLM fact both present.
     assert ("用户", "uses", "rust") in triples
+    assert ("X", "uses", "Y") in triples
+    # merged confidence = max(regex 0.5, voted 0.5) = 0.5.
+    assert r.confidence == 0.5
+
+
+def test_extract_facts_low_confidence_dedups_overlap():
+    """Merge dedups on (subject,predicate,object): a voted fact regex also
+    surfaces is not double-counted, and merged_voted counts only the net-new
+    facts the LLM contributed."""
+    # Same fact regex will surface ("用户 uses rust") at low LLM confidence.
+    fact = FactOut(subject="用户", predicate="uses", object="rust")
+    provider = _FakeProvider([fact], confidence=0.5)
+    r = adapter.extract_facts("用户使用 rust", providers=[provider], wings=1)
+    triples = {(f.subject, f.predicate, f.object) for f in r.facts}
+    # Single (用户,uses,rust), no dup; merged_voted=0 (regex already had it).
+    assert triples == {("用户", "uses", "rust")}
+    assert r.source_meta.get("merged_voted") == 0
 
 
 def test_extract_facts_quorum_drops_minority_triples():
