@@ -94,23 +94,30 @@ def put_fact(
     status: str = "active",
     supersedes_id: str | None = None,
     fact_id: str | None = None,
+    original_lif: float | None = None,
 ) -> str:
     """Insert a Fact (reified), return its id.
 
     Literal/unary facts: pass ``value`` only (object_id stays None).
     Binary entity→entity facts: pass ``object_id`` (value optional).
+
+    ``original_lif`` (ADR-8 idempotent decay) freezes the decay base at store
+    time — defaults to ``LIF``. Decay rebases ``new_lif = original_lif *
+    0.5**(Δt/half_life)`` so re-running consolidate never compounds (created_at
+    is immutable). Leave it None on store to freeze = LIF.
     """
     conn = db.get_conn()
     fid = fact_id or _uid()
+    frozen_lif = float(LIF) if original_lif is None else float(original_lif)
     conn.execute(
         """INSERT INTO fact
            (id, subject_id, predicate, object_id, value, valid_from, valid_to,
-            fact_type, LIF, confidence, source_refs, extractor, status,
-            supersedes_id, created_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            fact_type, LIF, original_lif, confidence, source_refs, extractor,
+            status, supersedes_id, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             fid, subject_id, predicate, object_id, value, valid_from, valid_to,
-            fact_type, LIF, confidence,
+            fact_type, LIF, frozen_lif, confidence,
             json.dumps(source_refs or [], ensure_ascii=False),
             extractor, status, supersedes_id, _now(),
         ),
@@ -160,6 +167,7 @@ def _decode_fact(row: Any) -> dict[str, Any]:
         "valid_to": row["valid_to"],
         "fact_type": row["fact_type"],
         "LIF": row["LIF"],
+        "original_lif": row["original_lif"],
         "confidence": row["confidence"],
         "source_refs": json.loads(row["source_refs"]) if row["source_refs"] else [],
         "extractor": row["extractor"],

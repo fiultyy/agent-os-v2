@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS fact (
     valid_from    TEXT,
     valid_to      TEXT,
     fact_type     TEXT NOT NULL DEFAULT 'stable', -- ephemeral|stable|permanent
-    LIF           REAL NOT NULL DEFAULT 0.5,      -- trust scalar (NOT NeuralField — ADR-4)
+    LIF           REAL NOT NULL DEFAULT 0.5,      -- trust scalar (NOT NeuralField — ADR-4); decayed in place
+    original_lif  REAL NOT NULL DEFAULT 0.5,      -- frozen LIF at store time — decay rebases from this (idempotent, ADR-8)
     confidence    REAL NOT NULL DEFAULT 0.5,
     source_refs   TEXT NOT NULL DEFAULT '[]',     -- JSON array: raw sessionId/leafUuid
     extractor     TEXT NOT NULL DEFAULT 'regex',

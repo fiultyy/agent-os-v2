@@ -2,18 +2,22 @@
 
 Two phases per ``consolidate()`` call (Spec §2: decay then dedup):
 
-1. **decay** (ADR-8): LIF *= 0.5**(Δt/half_life) where Δt is the age in days
-   from ``created_at`` to now. half_life is per ``fact_type``:
-   ephemeral=7d / stable=90d / permanent=∞ (no decay). Facts whose decayed
-   LIF drops below 0.1 flip ``active → deprecated`` (v1 only had active +
-   superseded; schema status already permits deprecated).
+1. **decay** (ADR-8, idempotent): ``new_lif = original_lif *
+   0.5**(Δt/half_life)`` where Δt is the age in days from ``created_at``
+   (immutable) to now, and ``original_lif`` is frozen at store time. Because
+   the rebasing starts from ``original_lif`` (not the already-decayed ``LIF``)
+   and ``created_at`` never moves, re-running consolidate recomputes the same
+   ``new_lif`` for the same wall clock — no compounding across passes. half_life
+   is per ``fact_type``: ephemeral=7d / stable=90d / permanent=∞ (no decay).
+   Facts whose decayed LIF drops below 0.1 flip ``active → deprecated`` (v1
+   only had active + superseded; schema status already permits deprecated).
 2. **dedup** (ADR-6): merge Facts sharing the same (subject_id, predicate,
    object_key); survivor absorbs max-LIF + union of source_refs, the rest
    flip to ``superseded`` pointing at it.
 
-Decay is one-way (LIF only ever shrinks) but ``consolidate`` is idempotent —
-re-running a fully-decayed Fact applies the next Δt slice; an already-
-deprecated Fact stays deprecated.
+``original_lif`` (ADR-8 idempotency column) lives on the fact table; legacy
+DBs without it are backfilled to ``LIF`` by :func:`_ensure_schema` (one-time,
+idempotent ALTER).
 """
 
 from __future__ import annotations
@@ -35,6 +39,30 @@ HALF_LIFE_DAYS: dict[str, float] = {
 # ADR-8: LIF below this threshold after decay ⇒ active → deprecated.
 DEPRECATE_LIF_THRESHOLD = 0.1
 
+_schema_migrated = False
+
+
+def _ensure_schema() -> None:
+    """Idempotent back-fill of ``original_lif`` for legacy fact tables.
+
+    schema.sql adds the column on fresh DBs, but ``CREATE TABLE IF NOT
+    EXISTS`` skips existing tables — so pre-ADR-8idempotent DBs need an ALTER.
+    Backfills ``original_lif = LIF`` so the first decay pass rebases from the
+    current LIF snapshot (best available base). Runs once per process.
+    """
+    global _schema_migrated
+    if _schema_migrated:
+        return
+    conn = db.get_conn()
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(fact)").fetchall()}
+    if "original_lif" not in cols:
+        # ponytail: ALTER ADD COLUMN with DEFAULT fills existing rows; we then
+        # copy each row's current LIF in (decay rebases from that snapshot).
+        conn.execute("ALTER TABLE fact ADD COLUMN original_lif REAL NOT NULL DEFAULT 0.5")
+        conn.execute("UPDATE fact SET original_lif = LIF")
+        conn.commit()
+    _schema_migrated = True
+
 
 def _parse_iso(ts: str) -> datetime:
     """Parse an ISO-8601 timestamp (``created_at``) to an aware datetime.
@@ -51,7 +79,11 @@ def _parse_iso(ts: str) -> datetime:
 def _decay_one(fact: dict[str, Any], now: datetime) -> tuple[float, bool]:
     """Return (new LIF, deprecate?) for a Fact per ADR-8.
 
-    permanent Facts and Facts with unparseable ``created_at`` keep their LIF.
+    Idempotent rebasing: ``new_lif = original_lif * 0.5**(Δt/half_life)``,
+    Δt = ``now - created_at`` (created_at immutable). original_lif is frozen at
+    store time, so repeated consolidate calls with the same wall clock produce
+    the same new_lif — decay never compounds across passes. permanent Facts and
+    Facts with unparseable ``created_at`` keep their LIF.
     """
     half_life = HALF_LIFE_DAYS.get(fact.get("fact_type") or "stable", 90.0)
     if half_life == float("inf"):
@@ -61,7 +93,8 @@ def _decay_one(fact: dict[str, Any], now: datetime) -> tuple[float, bool]:
     except (ValueError, TypeError):
         return float(fact["LIF"]), False
     delta_days = max(0.0, (now - created).total_seconds() / 86400.0)
-    new_lif = float(fact["LIF"]) * (0.5 ** (delta_days / half_life))
+    base = float(fact.get("original_lif", fact["LIF"]))
+    new_lif = base * (0.5 ** (delta_days / half_life))
     return new_lif, new_lif < DEPRECATE_LIF_THRESHOLD
 
 
@@ -72,18 +105,23 @@ def _object_key(fact: dict[str, Any]) -> str:
 
 
 def decay() -> dict[str, int]:
-    """Run one LIF decay pass over the active Fact set (ADR-8).
+    """Run one LIF decay pass over the active Fact set (ADR-8, idempotent).
 
-    For each active Fact: LIF *= 0.5**(Δt/half_life), Δt = age in days from
-    ``created_at`` to now. Facts whose LIF drops below 0.1 flip
-    ``active → deprecated`` (schema status permits it; v1 had no writer).
+    For each active Fact: ``new_lif = original_lif * 0.5**(Δt/half_life)``,
+    Δt = age in days from ``created_at`` to now; ``original_lif`` is frozen at
+    store time and ``created_at`` is immutable, so the same wall clock yields
+    the same new_lif on every call (no compounding). Facts whose LIF drops
+    below 0.1 flip ``active → deprecated`` (schema status permits it; v1 had
+    no writer).
 
-    Idempotent: re-running applies the next Δt slice. Already-deprecated
-    Facts are excluded so their LIF is frozen at the threshold-crossing pass.
+    Idempotent: re-running with no wall-clock progress produces no LIF change.
+    Already-deprecated Facts are excluded so their LIF is frozen at the
+    threshold-crossing pass.
 
     Returns ``{"decayed": <Facts whose LIF changed>, "deprecated": <Facts
     flipped active→deprecated this pass>}``.
     """
+    _ensure_schema()
     conn = db.get_conn()
     now = datetime.now(timezone.utc)
     rows = conn.execute(

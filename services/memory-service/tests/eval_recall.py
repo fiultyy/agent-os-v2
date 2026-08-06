@@ -170,7 +170,10 @@ QUERY_GROUPS: list[tuple[str, str, str, str]] = [
 def _hit_at_k(hits: list[dict], expected_value: str, k: int) -> bool:
     """expected_value ∈ top-k recall hits(by ``value`` field)→ 命中。
 
-    ADR-9 hit@k:expected fact 的 value 出现在 recall 结果前 k 条。
+    ADR-9 hit@k:expected fact 的 value 出现在 recall 结果前 k 条。注意此处用
+    严格相等 (``==``) 而非子串包含 —— QUERY_GROUPS 的 expected_value 是
+    fact.value 的完整字面量(与 _FACTS_* 中标注的 value 子串对齐为整值),
+    子串匹配会引入误命中(如 "VS" 子串命中 "VS Code" 之外含 VS 的串)。
     """
     top = hits[: max(0, k)]
     return any(h.get("value") == expected_value for h in top)
@@ -280,4 +283,23 @@ def test_eval_recall_baseline(fresh_db, capsys):
 if __name__ == "__main__":
     # 直接运行:初始化默认 db 跑评测(不入 pytest)。供手动对照 v2。
     db.init()
-    _r = _eval(None)  # fresh_db=None 时用默认 db;_seed_kg 已 init
+    _r = _eval()  # _eval() 无参;__main__ 用默认 db,_seed_kg 已在上面 init
+    # 打印基线表(与 pytest 入口同款输出),供手动对照 v2。
+    bk = _r["by_kind"]
+    ov = _r["overall"]
+    blind_total = sum(bk[k]["total"] for k in ("synonym", "abbr", "rewrite"))
+    blind_hit5 = sum(bk[k]["hit@5"] for k in ("synonym", "abbr", "rewrite"))
+    blind_rate = blind_hit5 / blind_total if blind_total else 0.0
+    print("\n" + "=" * 64)
+    print("ADR-9 recall baseline (v1) — hit@k 命中率")
+    print("=" * 64)
+    print(f"queries: {ov['total']} (10 groups)")
+    print("-" * 64)
+    print(f"{'kind':<12} {'total':>6} {'hit@3':>6} {'hit@5':>6} {'rate@5':>8}")
+    for k in ("positive", "synonym", "abbr", "rewrite"):
+        r = bk[k]
+        print(f"{k:<12} {r['total']:>6} {r['hit@3']:>6} {r['hit@5']:>6} {_pct(r['hit@5'], r['total']):>8}")
+    print("-" * 64)
+    print(f"{'OVERALL':<12} {ov['total']:>6} {ov['hit@3']:>6} {ov['hit@5']:>6} {_pct(ov['hit@5'], ov['total']):>8}")
+    print(f"blind(syn+abbr+rewrite) hit@5: {blind_hit5}/{blind_total} = {blind_rate:.1%}")
+    print("=" * 64)
