@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import db
+import scoring
 import store
 
 # ADR-8 half-life table (days). permanent ⇒ ∞ ⇒ never decays.
@@ -39,14 +40,10 @@ HALF_LIFE_DAYS: dict[str, float] = {
 # ADR-8: LIF below this threshold after decay ⇒ active → deprecated.
 DEPRECATE_LIF_THRESHOLD = 0.1
 
-# ADR-8v2 source-dim weight by extractor (canonical LIF-Scorer value; mirrored
-# here only for legacy backfill so _ensure_schema has no cross-node dep).
-SOURCE_WEIGHT: dict[str, float] = {
-    "regex": 0.4,
-    "llm": 0.7,
-    "human": 0.9,
-    "vote": 0.85,
-}
+# ADR-8v2 source-dim weight by extractor. Canonical home is scoring.py (the
+# LIF-Scorer node); re-exported here so store.put_fact and _ensure_schema's
+# legacy backfill keep a single source of truth.
+SOURCE_WEIGHT: dict[str, float] = scoring.SOURCE_WEIGHT
 
 _schema_migrated = False
 
