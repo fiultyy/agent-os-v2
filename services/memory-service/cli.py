@@ -106,7 +106,7 @@ def _ensure_entity(name: str, cache: dict[str, str]) -> str | None:
 
 # ── recall ──────────────────────────────────────────────────────────
 
-def recall(query: str, verbose: bool = False) -> list[dict[str, Any]]:
+def recall(query: str, verbose: bool = False, weights=None) -> list[dict[str, Any]]:
     """Return Facts relevant to ``query``, ordered by α·match+β·centrality+γ·LIF
     加权排序 (ADR-4v2).
 
@@ -115,7 +115,7 @@ def recall(query: str, verbose: bool = False) -> list[dict[str, Any]]:
     subcommand and ``cli.recall(...)`` drive the same pipeline as the
     deepened module.
     """
-    return recall_mod.recall(query, verbose=verbose)
+    return recall_mod.recall(query, verbose=verbose, weights=weights)
 
 
 # ── consolidate ────────────────────────────────────────────────────

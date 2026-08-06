@@ -116,6 +116,7 @@ def recall(
     *,
     verbose: bool = False,
     top_k: int | None = None,
+    weights: tuple[float, float, float] | None = None,
 ) -> list[dict[str, Any]]:
     """Recall Facts relevant to ``query``, ranked by ``α·match + β·centrality + γ·LIF``.
 
@@ -130,6 +131,9 @@ def recall(
             "lif":..., "score":..., "entities":[...]}`` dicts (debug detail for
             ``recall --verbose``); else bare Fact dicts.
         top_k: Truncate to top-k by score; None = no truncation.
+        weights: Optional ``(α, β, γ)`` override forwarded to ``score_fact``
+            (ADR-4v2 调参); None ⇒ module defaults. eval_recall grid passes
+            candidate triples here.
 
     Returns:
         Sorted list of Facts (bare) or score-detail dicts (verbose).
@@ -163,7 +167,7 @@ def recall(
     # pagerank of its most-central connected entity.
     centralities = _build_centralities()
     scored = [
-        scoring.score_fact(f, query, centrality=_fact_centrality(f, centralities))
+        scoring.score_fact(f, query, centrality=_fact_centrality(f, centralities), weights=weights)
         for f in candidates
     ]
     # drop zero-score (no match) unless verbose wants them; mirrors "hit" semantics

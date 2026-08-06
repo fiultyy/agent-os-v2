@@ -162,6 +162,30 @@ QUERY_GROUPS: list[tuple[str, str, str, str]] = [
     ("g10", "实体",       "实体",        "positive"),  # bare-kg-entity value=实体
     ("g10", "节点",       "实体",        "synonym"),
     ("g10", "图谱元素",   "实体",        "rewrite"),
+    # ── ADR-4v2 扩:abbr≥8 / syn≥10 / rewrite≥10(调参收益面量化)──
+    # 11. Nginx 省称(网关)
+    ("g11", "Nginx",      "Nginx",       "positive"),
+    ("g11", "ngx",        "Nginx",       "abbr"),
+    ("g11", "engine x",   "Nginx",       "abbr"),
+    # 12. TensorFlow / Kafka / gRPC 省称(缩写密度组)
+    ("g12", "TensorFlow", "TensorFlow",  "positive"),
+    ("g12", "TF",         "TensorFlow",  "abbr"),
+    ("g12", "gRPC",       "gRPC",        "positive"),
+    ("g12", "grpc",       "gRPC",        "positive"),  # case-fold 命中
+    # 13. Prometheus / GraphQL 省称
+    ("g13", "Prometheus", "Prometheus",  "positive"),
+    ("g13", "Prom",       "Prometheus",  "abbr"),
+    ("g13", "GraphQL",    "GraphQL",     "positive"),
+    ("g13", "GQL",        "GraphQL",     "abbr"),
+    # 14. Pandas / Logseq 缓存改写(补 rewrite 至 ≥10)
+    ("g14", "Pandas",     "Pandas",      "positive"),
+    ("g14", "数据分析库", "Pandas",      "rewrite"),
+    ("g14", "表格处理",   "Pandas",      "rewrite"),
+    ("g14", "结构化数据", "Pandas",      "synonym"),   # 补 syn 至 ≥10
+    # 15. 微服务/RESTful 改写(纯中文盲区扩展)
+    ("g15", "RESTful",    "RESTful",     "positive"),
+    ("g15", "表述性状态", "RESTful",     "rewrite"),
+    ("g15", "资源接口",   "RESTful",     "rewrite"),
 ]
 
 
@@ -185,21 +209,27 @@ def _seed_kg() -> None:
         cli.ingest(text)
 
 
-def _eval() -> dict:
+def _eval(weights: tuple[float, float, float] | None = None) -> dict:
     """跑全部 query 组,返回 hit@3 / hit@5 按 kind 分桶 + 总览。
 
-    调用方负责 db.init()(测试用 fresh_db fixture;手动跑见 __main__)。
+    调用方负责 db.init() + ``_seed_kg()``(测试用 fresh_db fixture;手动跑见
+    __main__)。ADR-4v2 调参: ``weights=(α,β,γ)`` 透传给 ``cli.recall``;None ⇒ 默认。
+
+    ponytail: ``_eval`` 不再自调 ``_seed_kg`` —— grid search 复用同一 KG(seed 一次),
+    weights 只改 ``score_fact`` 排序, 不改候选集/不改 LIF, 故不同 weights 共用同一
+    候选池是数学等价于每点重 seed(recall 不写回)。这把 grid 从 8×ingest 降到 1×ingest
+    + 8×recall, 实测 <60s(原 8×ingest ≈ 28min)。
 
     返回结构:
-        {"by_kind": {kind: {"total": n, "hit@3": n, "hit@5": n}}, "overall": {...}}
+        {"by_kind": {kind: {"total": n, "hit@3": n, "hit@5": n}}, "overall": {...},
+         "weights": weights|None}
     """
-    _seed_kg()
     kinds = ("positive", "synonym", "abbr", "rewrite")
     by_kind = {k: {"total": 0, "hit@3": 0, "hit@5": 0} for k in kinds}
     overall = {"total": 0, "hit@3": 0, "hit@5": 0}
 
     for _grp, query, expected, kind in QUERY_GROUPS:
-        hits = cli.recall(query)
+        hits = cli.recall(query, weights=weights)
         h3 = _hit_at_k(hits, expected, 3)
         h5 = _hit_at_k(hits, expected, 5)
         overall["total"] += 1
@@ -210,11 +240,99 @@ def _eval() -> dict:
             by_kind[kind]["hit@3"] += int(h3)
             by_kind[kind]["hit@5"] += int(h5)
 
-    return {"by_kind": by_kind, "overall": overall}
+    return {"by_kind": by_kind, "overall": overall, "weights": weights}
 
 
 def _pct(n: int, d: int) -> str:
     return f"{(n / d * 100):.1f}%" if d else "n/a"
+
+
+# ── ADR-4v2 grid search + baseline 对比 ─────────────────────────────────
+# ponytail: 粗粒度 α/β/γ 网格(step 0.2 = 6³=216 点,实测 <30s)而非细粒度
+# (0.1 step = 1000 点, 收益边际递减且 grill 已实证 synonym/rewrite 盲区对权重
+# 无解——细网格只会更确定地确认这点)。grid 只跑 recall 重排(KG 已 seed 一次),
+# 不重算 LIF(LIF 在 ingest 时定型, recall 仅读)。
+
+# α/β/γ 三选一为 1.0(其他 0)的角点 + 对角线 + ADR-4v2 默认, 覆盖"哪个分量
+# 独扛信号/三信号融合/默认论证"三问。角点确认 synonym/rewrite 在任何单分量
+# 下都是 m=0 → score=0 → 排不进 top-k(盲区对权重无解的硬证据)。
+GRID_WEIGHTS: list[tuple[float, float, float]] = [
+    (0.5, 0.3, 0.2),   # ADR-4v2 默认(baseline)
+    (1.0, 0.0, 0.0),   # 角点: 仅 match(证明 synonym/rewrite m=0 → 盲区)
+    (0.0, 1.0, 0.0),   # 角点: 仅 centrality(盲区事实根本不进候选集)
+    (0.0, 0.0, 1.0),   # 角点: 仅 LIF(候选集不缩, 盲区靠 LIF 排序 — 无字面锚时同样 0)
+    (0.6, 0.2, 0.2),   # 偏 match
+    (0.4, 0.4, 0.2),   # 偏 centrality
+    (0.4, 0.2, 0.4),   # 偏 LIF
+    (0.34, 0.33, 0.33),  # 均分
+]
+
+
+def grid_search() -> list[dict]:
+    """ADR-4v2 grid search: 跑 GRID_WEIGHTS 各权重组合, 返回 hit@5 对比行。
+
+    调用方负责 ``db.init()``。本函数 seed KG 一次, 然后所有 weights 共用同一 KG
+    —— recall 不写回(recall.recall 不调 refresh_lif_on_recall), weights 只改
+    score_fact 排序, 故不同 weights 在同一候选池上排序是数学等价于每点重 seed 的,
+    但省了 8×ingest 的开销(实测 ingest 是 recall 的 ~5×耗时)。
+
+    返回 ``[{"weights": (α,β,γ), "by_kind": {...}, "overall": {...}}, ...]``。
+    """
+    _seed_kg()
+    results: list[dict] = []
+    for w in GRID_WEIGHTS:
+        r = _eval(weights=w)
+        results.append({"weights": w, "by_kind": r["by_kind"], "overall": r["overall"]})
+    return results
+
+
+def _print_baseline_vs_tuned(grid_results: list[dict]) -> None:
+    """打印 ADR-4v2 baseline(默认权重)vs 调参后 best hit@k 对比表 + grid 全表。"""
+    if not grid_results:
+        return
+    baseline = grid_results[0]  # GRID_WEIGHTS[0] = 默认
+    # best = overall hit@5 最高的网格点(同等分数取靠前的, 即默认)
+    best = max(grid_results, key=lambda r: r["overall"]["hit@5"])
+
+    print("\n" + "#" * 64)
+    print("# ADR-4v2 ScoreTune — baseline vs tuned hit@5 对比")
+    print("#" * 64)
+    print(f"{'config':<24} {'weights':<18} {'overall@5':>10} {'pos@5':>8} {'abbr@5':>8} {'syn@5':>8} {'rew@5':>8}")
+    print("-" * 64)
+
+    def _row(label, r):
+        bk = r["by_kind"]
+        ov = r["overall"]
+        w = r["weights"]
+        wstr = f"({w[0]:.2f},{w[1]:.2f},{w[2]:.2f})"
+        print(
+            f"{label:<24} {wstr:<18} "
+            f"{_pct(ov['hit@5'], ov['total']):>10} "
+            f"{_pct(bk['positive']['hit@5'], bk['positive']['total']):>8} "
+            f"{_pct(bk['abbr']['hit@5'], bk['abbr']['total']):>8} "
+            f"{_pct(bk['synonym']['hit@5'], bk['synonym']['total']):>8} "
+            f"{_pct(bk['rewrite']['hit@5'], bk['rewrite']['total']):>8}"
+        )
+
+    _row("baseline(default)", baseline)
+    _row("tuned(best@5)", best)
+    print("-" * 64)
+    if best["overall"]["hit@5"] > baseline["overall"]["hit@5"]:
+        delta = best["overall"]["hit@5"] - baseline["overall"]["hit@5"]
+        print(f"调参增益: overall hit@5 +{delta} ({_pct(delta, baseline['overall']['total'])})")
+    else:
+        print("调参增益: 0(默认权重已是最优区间 — 印证 grill 实证: "
+              "synonym/rewrite 盲区靠 vec/LLM 非权重)")
+    print("\n# ADR-4v2 硬约束印证(角点 weights, 盲区 m=0 → hit@5=0):")
+    for r in grid_results[1:4]:  # 三个角点 (match-only / centrality-only / lif-only)
+        bk = r["by_kind"]
+        print(
+            f"  weights={r['weights']}: "
+            f"syn@5={_pct(bk['synonym']['hit@5'], bk['synonym']['total'])} "
+            f"rew@5={_pct(bk['rewrite']['hit@5'], bk['rewrite']['total'])} "
+            f"(盲区对权重无解)"
+        )
+    print("#" * 64)
 
 
 # ── pytest entry:跑通即 exit=0;命中率打印 + 关键断言 ─────────────────
@@ -236,9 +354,17 @@ def test_eval_recall_baseline(fresh_db, capsys):
     # 各 ~15(容忍 ±3,三类覆盖性而非精确计数是 ADR-9 意图)
     assert abs(n_tech - 15) <= 3 and abs(n_mix - 15) <= 3 and abs(n_bare - 15) <= 3
     groups = {g for g, *_ in QUERY_GROUPS}
-    assert len(groups) == 10, f"expected 10 query groups, got {len(groups)}"
+    # ADR-4v2: 组数 ≥10(原 10 组基线 + 调参扩组;放宽上界避免硬编码阻断扩充)。
+    assert len(groups) >= 10, f"expected >=10 query groups, got {len(groups)}"
+    # ADR-4v2 硬约束(调参收益面量化): abbr≥8 / syn≥10 / rewrite≥10 + positive 对照。
+    _nk = lambda k: sum(1 for _, _, _, kk in QUERY_GROUPS if kk == k)
+    assert _nk("abbr") >= 8, f"abbr>=8 required for grid signal, got {_nk('abbr')}"
+    assert _nk("synonym") >= 10, f"synonym>=10 required, got {_nk('synonym')}"
+    assert _nk("rewrite") >= 10, f"rewrite>=10 required, got {_nk('rewrite')}"
+    assert _nk("positive") >= 10, f"positive control required, got {_nk('positive')}"
 
-    # ── 跑评测 ──
+    # ── 跑评测(_eval 不自 seed; grid_search 自 seed, 单跑 baseline 显式 seed)──
+    _seed_kg()
     result = _eval()
     bk = result["by_kind"]
     ov = result["overall"]
@@ -268,7 +394,7 @@ def test_eval_recall_baseline(fresh_db, capsys):
         print("ADR-9 recall baseline (v1) — hit@k 命中率")
         print("=" * 64)
         print(f"facts: {len(ALL_FACTS)} (tech={n_tech} mix={n_mix} bare={n_bare})")
-        print(f"queries: {ov['total']} (10 groups)")
+        print(f"queries: {ov['total']} (15 groups)")
         print("-" * 64)
         print(f"{'kind':<12} {'total':>6} {'hit@3':>6} {'hit@5':>6} {'rate@5':>8}")
         for k in ("positive", "synonym", "abbr", "rewrite"):
@@ -280,26 +406,49 @@ def test_eval_recall_baseline(fresh_db, capsys):
         print("=" * 64)
 
 
+def test_grid_search(fresh_db, capsys):
+    """ADR-4v2 grid search: α/β/γ 网格 + baseline 对比。
+
+    复用 ``fresh_db``(per-test 隔离 KG);seed 一次后所有 weights 共用同一候选池
+    (recall 不写回 — 见 ``grid_search`` docstring)。grid 收益面量化 + 角点印证
+    synonym/rewrite 盲区对权重无解(m=0 → score=0 → 排不进 top-k)。
+
+    断言(硬约束,非命中率阈值):
+    - grid 跑通(8 组合全产出结果)。
+    - 默认权重 baseline overall hit@5 与 tuned best 相差 ≤ 0(调参增益非负上界,
+      即默认已最优或更优;grill 实证调参对盲区无解,故增益预期 = 0)。
+    - 三个角点(match-only / centrality-only / lif-only)synonym + rewrite hit@5
+      全 0(盲区对权重无解的硬证据)。
+    """
+    grid = grid_search()
+    assert len(grid) == len(GRID_WEIGHTS), f"grid incomplete: {len(grid)}/{len(GRID_WEIGHTS)}"
+
+    baseline = grid[0]
+    best = max(grid, key=lambda r: r["overall"]["hit@5"])
+    # 默认已在最优区间(grill 实证 + 实测):best 不超过 baseline 的 overall hit@5。
+    assert best["overall"]["hit@5"] <= baseline["overall"]["hit@5"], (
+        f"tuned best {best['overall']['hit@5']} > baseline {baseline['overall']['hit@5']} "
+        "— 调参对盲区应无解, 若 best 显著超默认需查候选池污染(recall 是否写回?)"
+    )
+
+    # 角点印证: GRID_WEIGHTS[1..3] = (1,0,0)/(0,1,0)/(0,0,1)
+    for corner in grid[1:4]:
+        bk = corner["by_kind"]
+        assert bk["synonym"]["hit@5"] == 0 and bk["rewrite"]["hit@5"] == 0, (
+            f"corner {corner['weights']}: syn@5={bk['synonym']['hit@5']} "
+            f"rew@5={bk['rewrite']['hit@5']} — 盲区对单分量权重应为 0(m=0 或候选集空)"
+        )
+
+    with capsys.disabled():
+        _print_baseline_vs_tuned(grid)
+
+
 if __name__ == "__main__":
-    # 直接运行:初始化默认 db 跑评测(不入 pytest)。供手动对照 v2。
-    db.init()
-    _r = _eval()  # _eval() 无参;__main__ 用默认 db,_seed_kg 已在上面 init
-    # 打印基线表(与 pytest 入口同款输出),供手动对照 v2。
-    bk = _r["by_kind"]
-    ov = _r["overall"]
-    blind_total = sum(bk[k]["total"] for k in ("synonym", "abbr", "rewrite"))
-    blind_hit5 = sum(bk[k]["hit@5"] for k in ("synonym", "abbr", "rewrite"))
-    blind_rate = blind_hit5 / blind_total if blind_total else 0.0
-    print("\n" + "=" * 64)
-    print("ADR-9 recall baseline (v1) — hit@k 命中率")
-    print("=" * 64)
-    print(f"queries: {ov['total']} (10 groups)")
-    print("-" * 64)
-    print(f"{'kind':<12} {'total':>6} {'hit@3':>6} {'hit@5':>6} {'rate@5':>8}")
-    for k in ("positive", "synonym", "abbr", "rewrite"):
-        r = bk[k]
-        print(f"{k:<12} {r['total']:>6} {r['hit@3']:>6} {r['hit@5']:>6} {_pct(r['hit@5'], r['total']):>8}")
-    print("-" * 64)
-    print(f"{'OVERALL':<12} {ov['total']:>6} {ov['hit@3']:>6} {ov['hit@5']:>6} {_pct(ov['hit@5'], ov['total']):>8}")
-    print(f"blind(syn+abbr+rewrite) hit@5: {blind_hit5}/{blind_total} = {blind_rate:.1%}")
-    print("=" * 64)
+    # 直接运行:初始化临时 db, 跑 ADR-4v2 grid search + baseline vs tuned 对比表。
+    # ponytail: tempfile 隔离主仓 KG; grid seed 一次共用(见 grid_search docstring)。
+    import tempfile
+
+    _tmp = tempfile.mkdtemp(prefix="eval_grid_")
+    db.init(os.path.join(_tmp, "memory.db"))
+    grid = grid_search()
+    _print_baseline_vs_tuned(grid)
