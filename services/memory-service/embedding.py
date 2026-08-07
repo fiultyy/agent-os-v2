@@ -8,9 +8,11 @@ Ollama (11434, qwen3-embedding:4b, dim 2560) fallback. Both expose OpenAI-compat
 raise — caller falls back to next provider or treats as no signal). Memory cache
 (text→vector) avoids re-embedding the same text.
 
-Feasibility (实测 2026-08-07): synonym/rewrite pairs cosine 0.44-1.0 (nomic) vs
-irrelevant 0.37-0.44 — 区分度 nomic 优于 qwen3(后者 syn/rew 与 irr 重叠)。
-解 recall 字面盲区(synonym/rewrite hit@5=0%, ADR-9 baseline) — #2 向量层 query 侧正解。
+Feasibility (实测 2026-08-07, 完整 vec baseline eval KG 21 syn/rew query):
+qwen3-embedding-4b blind hit@5 = **57.1%** / positive 89.5% — 碾压 nomic(blind
+14.3% / positive 68%); 中文原生 4B, 中英跨语言强(铁锈→rust HIT, nomic miss)。
+注: 早期 9 对 cosine 小样本误导(qwen3 syn 0.575 ≈ irr 0.566 "重叠")选了 nomic,
+完整 baseline 证伪 — **cosine 绝对值 ≠ 相对排序, 必跑 hit@k baseline**(教训)。
 
 ADR-13: provider 抽象 local-first(LM Studio 用户指定 + Ollama fallback), OpenAI-compat
 ``/v1/embeddings`` seam(新 provider slot in by 实现 embed).
@@ -56,16 +58,17 @@ class OpenAICompatEmbedding:
             return []
 
 
-# 默认 provider 列表: LM Studio(用户指定 nomic)优先, Ollama qwen3 fallback。
+# 默认 provider 列表: LM Studio qwen3-embedding-4b(中文原生 4B, 实测 blind hit@5
+# 57.1% 碾压 nomic 14.3%)优先, Ollama qwen3 fallback(同模型容错)。
 LM_STUDIO = OpenAICompatEmbedding(
-    "http://127.0.0.1:16666", "text-embedding-nomic-embed-text-v1.5")
+    "http://127.0.0.1:16666", "text-embedding-qwen3-embedding-4b")
 OLLAMA = OpenAICompatEmbedding(
     "http://127.0.0.1:11434", "qwen3-embedding:4b")
 
 
 def default_providers() -> list[EmbeddingProvider]:
-    """LM Studio nomic first, Ollama qwen3 fallback. ponytail: 两 provider 都
-    local OpenAI-compat, 同 seam; unreachable 自剔除(embed 返 [])。"""
+    """LM Studio qwen3-embedding-4b first, Ollama qwen3 fallback(同模型容错).
+    ponytail: 两 provider 都 local OpenAI-compat, 同 seam; unreachable 自剔除。"""
     return [LM_STUDIO, OLLAMA]
 
 

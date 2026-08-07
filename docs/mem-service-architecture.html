@@ -61,7 +61,7 @@ mem-service 是一个 <b>KG (Entity + Fact reified) 结构化记忆服务</b>。
 </div>
 <div class="layer">
   <div class="layer-title">向量层 (query)</div>
-  <span class="mod">embedding.py</span><span class="mod-desc">EmbeddingProvider + OpenAICompatEmbedding(LM Studio nomic-768 + Ollama qwen3-2560 fallback)ADR-13</span>
+  <span class="mod">embedding.py</span><span class="mod-desc">EmbeddingProvider + OpenAICompatEmbedding(LM Studio qwen3-embedding-4b-2560 默认 + Ollama fallback)ADR-13</span>
 </div>
 <div class="layer">
   <div class="layer-title">KG 层</div>
@@ -175,9 +175,9 @@ autodream 增量: deleted=15(矛盾 supersede)<br>
 <div class="stat">
 <b>v6 向量层盲区解</b>(eval KG, 21 syn/rew query)<br>
 字面 baseline: hit@5 <b>0%</b>(ADR-9 盲区)<br>
-纯向量 baseline: <b>14.3%</b><br>
-recall --vector 融合: <b>23.8%</b><br>
-<span class="mod-desc">→ centrality/LIF 辅助排序</span>
+recall --vector 融合(qwen3-embedding-4b): <b>57.1%</b><br>
+<span class="mod-desc">(nomic 融合 23.8% 对比; qwen3-4b 中文原生 4B 碾压)</span><br>
+<span class="mod-desc">教训: cosine 绝对值 ≠ 相对排序, 选模型必跑 hit@k baseline</span>
 </div>
 <div class="stat">
 <b>PreCompact hook 实测</b><br>
@@ -224,7 +224,7 @@ recall --vector 融合: <b>23.8%</b><br>
 <div class="layer">
 <div class="layer-title">本机 LLM/embedding 基础设施(mem-service 依赖)</div>
 <span class="mod">CCR 3456</span><span class="mod-desc">LLM 路由 glm-4.5-air(蝴蝶翼抽取)</span><br>
-<span class="mod">LM Studio 16666</span><span class="mod-desc">nomic-embed-text-v1.5 dim 768(embedding 默认, 需 lms load)</span><br>
+<span class="mod">LM Studio 16666</span><span class="mod-desc">qwen3-embedding-4b dim 2560(embedding 默认, 需 lms load)</span><br>
 <span class="mod">Ollama 11434</span><span class="mod-desc">qwen3-embedding:4b dim 2560(embedding fallback)</span><br>
 <span class="mod">~/.claude/settings.json</span><span class="mod-desc">PreCompact hook 注册(command → AO2 仓内源绝对路径)</span><br>
 <span class="mod">~/.claude/skills/mem</span><span class="mod-desc">软链 → services/memory-service/(deploy)</span>
