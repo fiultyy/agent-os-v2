@@ -33,6 +33,7 @@ from llm_provider import (
     Extraction,
     FactOut,
     LLMProvider,
+    ZhipuAnthropicProvider,
 )
 
 # Butterfly-wing fan-out. N=3 per ADR-5b Decision. Today CCRProvider is the
@@ -222,10 +223,9 @@ def _tcp_reachable(base_url: str, timeout: float = 2.0) -> bool:
 # ── default providers (cli uses this) ─────────────────────────────────
 
 def default_providers() -> list[LLMProvider]:
-    """The provider list cli.ingest uses when callers don't override. Today
-    only CCRProvider; the stubs self-exclude via ``_is_reachable`` so adding
-    them here is harmless (they fall back)."""
-    return [CCRProvider()]
+    """LLM provider list(蝴蝶翼抽取): ZhipuAnthropicProvider 直连智谱(glm-5-turbo,
+    少一跳)优先, CCRProvider(localhost:3456 路由)fallback。stubs 自剔除(_is_reachable)。"""
+    return [ZhipuAnthropicProvider(), CCRProvider()]
 
 
 def _demo() -> None:  # ponytail self-check
