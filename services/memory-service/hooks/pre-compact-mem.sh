@@ -62,6 +62,9 @@ if [ -f "${CLI}" ] && [ -r "${TRANSCRIPT_PATH}" ]; then
           python3 cli.py autodream --session "${SESSION_ID}" \
                                     --transcript "${TRANSCRIPT_PATH}" \
                                     ${CWD:+--cwd "$CWD"} \
+              >/dev/null 2>&1 || true
+          # ADR-15 分布式 index: autodream 后硬编 build-index(投影 KG 高 LIF fact → CC memory + MEMORY.md [mem])
+          python3 cli.py build-index ${CWD:+--scope "$CWD"} \
               >/dev/null 2>&1 || true )
     fi
 fi
