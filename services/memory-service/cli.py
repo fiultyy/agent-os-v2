@@ -174,8 +174,11 @@ def build_index(scope: str | None = None, top_k: int = 20, memory_dir: str | Non
     cwd = scope or os.getcwd()
     mem_dir = Path(memory_dir) if memory_dir else projection.cc_memory_dir(cwd)
     conn = db.get_conn()
+    # 严格 source_cwd = cwd(不 OR NULL): MEMORY 投影不能混 cwd, NULL 老数据不归属任何
+    # cwd 不投影(避免同一 NULL fact 被所有 cwd MEMORY.md 重复投影 = 混)。
+    # 对比 recall --cwd 用 OR NULL(召回兼容老数据不丢), 投影严格(不混)。
     rows = conn.execute(
-        "SELECT * FROM fact WHERE status='active' AND (source_cwd=? OR source_cwd IS NULL) "
+        "SELECT * FROM fact WHERE status='active' AND source_cwd=? "
         "ORDER BY LIF DESC LIMIT ?",
         (cwd, top_k)).fetchall()
     facts = [store._decode_fact(r) for r in rows]
