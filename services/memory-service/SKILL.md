@@ -9,6 +9,8 @@ mem-service 是独立 Python 服务,在 CC 现有记忆(~/.claude memory md,即�
 
 v1 形态: **CC 按需调 cli**(用户手动触发,或你读完本 skill 后主动调),无三频 hook 自动注入(per-turn 连续性 defer, Spec Defer)。
 
+> **⚠ 本 SKILL.md 部分描述为 v1(正则抽取/字面召回),已过时**。当前能力:LLM 蝴蝶翼抽取 + `α·match+β·centrality+γ·LIF+δ·vec` 召回 + 向量召回 + PreCompact autoDream + 多值共存。**接线/部署详见 [INSTALL.md](INSTALL.md)**,能力详见 `docs/mem-service-iteration-log.md`。
+
 ---
 
 ## 触发条件
@@ -148,4 +150,6 @@ $ python3 cli.py consolidate             # → {"superseded": 0, "active": 1}
 
 ## 实现边界(v1 defer 项, 见 Spec §3/§9)
 
-三频 hook / 向量实体 tag / 聚合度重排 / 冷层类聚 / autoDream daemon / type-aware 衰减 / LLM 抽取 / query 独立 cli / skill 投影回 CC md — 均 defer。v1 = 正则抽取 + 字面召回 + 去重骨架。
+**已实现(非 defer)**:LLM 蝴蝶翼抽取(ADR-5b)+ `α·match+β·centrality+γ·LIF+δ·vec` 召回(ADR-4v2)+ 向量召回 `--vector`(ADR-13)+ PreCompact autoDream hook(ADR-10/11)+ type-aware decay(ADR-8v2)+ 多值谓词共存 + KG→CC 投影 `build-index`(ADR-15)。
+
+仍 defer:autoDream daemon(常驻)/ 冷层类聚 / query 独立 cli / 跨 scope 向量联邦。
