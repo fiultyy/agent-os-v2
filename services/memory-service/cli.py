@@ -141,18 +141,20 @@ def consolidate() -> dict[str, int]:
 
 # ── autodream ──────────────────────────────────────────────────────
 
-def autodream(session_id: str, transcript_path: str) -> dict[str, int]:
-    """PreCompact autoDream: session transcript raw→KG incremental (ADR-10).
+def autodream(session_id: str, transcript_path: str, use_regex: bool = False) -> dict[str, int]:
+    """PreCompact autoDream: session transcript raw→KG incremental (ADR-10/11).
 
     Thin wrapper over ``autodream.autodream``. Reads the CC transcript JSONL,
-    reuses ``extractor.extract()`` regex (蝴蝶翼 LLM defer, adapter 预留), runs
-    ``consolidate.consolidate()`` (decay+dedup 复用 v2/v3), then makes the
+    reuses ``adapter.extract_facts()`` (ADR-5b 蝴蝶翼 LLM, ADR-5 regex fallback),
+    runs ``consolidate.consolidate()`` (decay+dedup 复用 v2/v3), then makes the
     incremental decision per fact (ADD / UPDATE / DELETE / NOOP). Returns
     ``{added, updated, deleted, noop}``.
 
+    ``use_regex=True`` forces the regex path (调试/fallback); default LLM.
     Driven by the ``cli autodream`` subcommand from the PreCompact hook.
     """
-    return autodream_mod.autodream(session_id, transcript_path)
+    providers = [] if use_regex else None  # None → default_providers (LLM 蝴蝶翼)
+    return autodream_mod.autodream(session_id, transcript_path, providers=providers)
 
 
 # ── argv entry ──────────────────────────────────────────────────────
@@ -178,11 +180,15 @@ def _main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("consolidate", help="dedup skeleton")
 
-    dream = sub.add_parser("autodream", help="session transcript raw→KG incremental (ADR-10)")
+    dream = sub.add_parser("autodream", help="session transcript raw→KG incremental (ADR-10/11)")
     dream.add_argument("--session", dest="session", required=True, help="CC session id")
     dream.add_argument(
         "--transcript", dest="transcript", required=True,
         help="path to CC transcript JSONL",
+    )
+    dream.add_argument(
+        "--regex", action="store_true",
+        help="强制 regex 抽取(调试/fallback, 默认 LLM 蝴蝶翼 ADR-5b)",
     )
 
     args = p.parse_args(argv)
@@ -196,7 +202,7 @@ def _main(argv: list[str] | None = None) -> int:
     elif args.cmd == "consolidate":
         print(json.dumps(consolidate()))
     elif args.cmd == "autodream":
-        print(json.dumps(autodream(args.session, args.transcript), ensure_ascii=False))
+        print(json.dumps(autodream(args.session, args.transcript, use_regex=args.regex), ensure_ascii=False))
     return 0
 
 

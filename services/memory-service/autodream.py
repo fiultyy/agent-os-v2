@@ -1,8 +1,8 @@
 """mem-service autoDream — session transcript raw→KG incremental (ADR-10).
 
-PreCompact hook entry: ``autodream(session_id, transcript_path)`` reads a CC
-transcript JSONL (user/assistant ``message.content`` 拼文本), reuses
-``extractor.extract()`` regex (ADR-5; 蝴蝶翼 LLM defer, adapter 预留) to pull
+PreCompact hook entry: ``autodream(session_id, transcript_path, providers=None)``
+reads a CC transcript JSONL (user/assistant ``message.content`` 拼文本), reuses
+``adapter.extract_facts()`` (ADR-5b 蝴蝶翼 LLM with ADR-5 regex fallback) to pull
 facts, runs ``consolidate.consolidate()`` (decay+dedup, v2/v3 复用), then makes
 an incremental decision per extracted fact:
 
@@ -28,9 +28,9 @@ import json
 from pathlib import Path
 from typing import Any
 
+import adapter
 import consolidate as consolidate_mod
 import db
-import extractor
 import store
 
 
@@ -108,7 +108,7 @@ def _has_active_for_predicate(subject_id: str, predicate: str) -> list[dict[str,
     ]
 
 
-def autodream(session_id: str, transcript_path: str) -> dict[str, int]:
+def autodream(session_id: str, transcript_path: str, providers: list | None = None) -> dict[str, int]:
     """Incrementally整理 a session transcript into the KG (ADR-10).
 
     Pipeline (ADR-10 Decision (a)/(b)/(c)):
@@ -135,10 +135,13 @@ def autodream(session_id: str, transcript_path: str) -> dict[str, int]:
     # stable wall clock, so re-runs add no churn.
     consolidate_mod.consolidate()
 
-    # Phase b — session→facts regex. 蝴蝶翼 LLM defer; adapter 预留 (replace the
-    # extract call with adapter.extract_facts + provider list when wired).
+    # Phase b — session→facts via adapter (ADR-5b 蝴蝶翼 LLM, ADR-5 regex
+    # fallback). providers=None → default_providers (CCRProvider, LLM 默认);
+    # providers=[] → 强制 regex fallback (测试/调试, ADR-5 upheld).
     text = _read_transcript(transcript_path)
-    extracted = extractor.extract(text)
+    active_providers = adapter.default_providers() if providers is None else providers
+    result = adapter.extract_facts(text, providers=active_providers)
+    ext_label = "regex" if result.source_meta.get("provider") == "regex" else "llm"
 
     src_ref = f"session:{session_id}" if session_id else None
     added = updated = deleted = noop = 0
@@ -147,10 +150,10 @@ def autodream(session_id: str, transcript_path: str) -> dict[str, int]:
     # ponytail: rebuild a name→entity_id cache per call (autodream is the
     # single writer in a PreCompact hook; no cross-call cache needed).
     name_to_id: dict[str, str] = {}
-    for fact in extracted["facts"]:
-        subject = (fact.get("subject") or "").strip()
-        predicate = (fact.get("predicate") or "").strip()
-        value = (fact.get("object") or "").strip()
+    for fact in result.facts:
+        subject = (fact.subject or "").strip()
+        predicate = (fact.predicate or "").strip()
+        value = (fact.object or "").strip()
         if not subject or not predicate or not value:
             continue
 
@@ -190,7 +193,7 @@ def autodream(session_id: str, transcript_path: str) -> dict[str, int]:
                 subject_id=subject_id,
                 predicate=predicate,
                 value=value,
-                extractor="regex",
+                extractor=ext_label,
                 source_refs=[src_ref] if src_ref else [],
                 seen_sessions=[session_id] if session_id else [],
             )
@@ -205,7 +208,7 @@ def autodream(session_id: str, transcript_path: str) -> dict[str, int]:
             subject_id=subject_id,
             predicate=predicate,
             value=value,
-            extractor="regex",
+            extractor=ext_label,
             source_refs=[src_ref] if src_ref else [],
             seen_sessions=[session_id] if session_id else [],
         )
