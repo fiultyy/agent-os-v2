@@ -143,6 +143,12 @@ def put_fact(
         ),
     )
     conn.commit()
+    if value:
+        try:
+            import embedding
+            embedding.embed(value)  # ponytail: L2 cache 预热 (on-ingest), passive 失败不影响写入
+        except Exception:
+            pass
     return fid
 
 

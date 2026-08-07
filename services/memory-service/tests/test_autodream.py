@@ -124,25 +124,56 @@ def test_update_refresh_on_new_session(fresh_db):
 
 # ── DELETE path (supersede on contradiction) ────────────────────────
 
-def test_delete_supersede_on_value_change(fresh_db):
-    """Same (subject, predicate) but a *different* value ⇒ the old fact flips
-    to superseded (deleted += 1), the new one is added. Two passes, two
-    different values."""
-    tp1 = _write_transcript(fresh_db, [_user("用户使用 rust")])
+def test_functional_predicate_supersede_on_value_change(fresh_db):
+    """is_a (functional/single-valued): same (subject, is_a) different value ⇒
+    real contradiction ⇒ old superseded, new added. (uses would now coexist.)"""
+    tp1 = _write_transcript(fresh_db, [_user("Logseq 是笔记工具")])
     autodream.autodream("s1", tp1)
-    # Subject now uses 'rust'. Same predicate, new value ⇒ contradiction.
-    tp2 = _write_transcript(fresh_db, [_user("用户使用 python")])
+    tp2 = _write_transcript(fresh_db, [_user("Logseq 是数据库")])
     r2 = autodream.autodream("s1", tp2)
     assert r2["deleted"] >= 1, r2
     assert r2["added"] >= 1, r2
-    # The superseded fact points at the new survivor.
-    subj = store.find_entities_by_name("用户")
+    subj = store.find_entities_by_name("Logseq")
     all_facts = store.get_facts_by_subject(subj[0]["id"], status=None)
-    superseded = [f for f in all_facts if f["status"] == "superseded" and f["value"] == "rust"]
-    survivors = [f for f in all_facts if f["status"] == "active" and f["predicate"] == "uses"]
-    assert superseded, "old 'rust' fact must be superseded"
-    assert any(f["value"] == "python" for f in survivors), survivors
-    assert all(s["supersedes_id"] for s in superseded), superseded
+    superseded = [f for f in all_facts if f["status"] == "superseded" and f["value"] == "笔记工具"]
+    survivors = [f for f in all_facts if f["status"] == "active" and f["predicate"] == "is_a"]
+    assert superseded, "old '笔记工具' fact must be superseded"
+    assert any(f["value"] == "数据库" for f in survivors), survivors
+
+
+# ── multivalue predicates coexist (Design 1: 不当矛盾 supersede) ─────
+
+def test_multivalue_predicate_coexists(fresh_db):
+    """uses 是多值谓词: 同 (用户, uses) 不同 value 共存, 不互相 supersede。"""
+    tp = _write_transcript(fresh_db, [_user("用户使用 rust"), _user("用户使用 docker")])
+    r = autodream.autodream("s1", tp)
+    assert r["deleted"] == 0, r  # 关键: 零 supersede
+    assert r["added"] >= 2, r
+    subj = store.find_entities_by_name("用户")
+    active = [f for f in store.get_facts_by_subject(subj[0]["id"], status="active")
+              if f["predicate"] == "uses"]
+    assert {f["value"] for f in active} >= {"rust", "docker"}, active
+
+
+def test_multivalue_idempotent_rerun(fresh_db):
+    """多值 transcript 重跑第二次 added==0 deleted==0 (不再震荡 supersede)。"""
+    tp = _write_transcript(fresh_db,
+        [_user("用户使用 rust"), _user("用户使用 docker"), _user("用户使用 sqlite")])
+    autodream.autodream("s1", tp)
+    r2 = autodream.autodream("s1", tp)
+    assert r2["added"] == 0 and r2["deleted"] == 0, r2
+    assert r2["noop"] >= 3, r2
+
+
+def test_functional_contradiction_idempotent_rerun(fresh_db):
+    """is_a 矛盾 supersede 后, 重跑原 transcript 不再震荡 (被 supersede 的 fact
+    仍可 exact-match → UPDATE/NOOP, 不再 supersede 链)。"""
+    tp1 = _write_transcript(fresh_db, [_user("Logseq 是笔记工具")])
+    autodream.autodream("s1", tp1)
+    tp2 = _write_transcript(fresh_db, [_user("Logseq 是数据库")])
+    autodream.autodream("s1", tp2)
+    r3 = autodream.autodream("s1", tp2)  # 重跑 tp2
+    assert r3["added"] == 0 and r3["deleted"] == 0, r3  # 不再 supersede 震荡
 
 
 # ── NOOP + idempotency (acceptance contract) ────────────────────────

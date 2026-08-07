@@ -89,15 +89,32 @@ def _resolve_subject(name: str) -> str | None:
 
 
 def _find_active_fact(subject_id: str, predicate: str, value: str) -> dict[str, Any] | None:
-    """Lookup an active Fact by exact (subject_id, predicate, value).
+    """Lookup a Fact by exact (subject_id, predicate, value).
 
-    Returns the decoded Fact or None. ponytail: linear scan of the subject's
-    active facts — single-machine MVP ceiling, fact count per subject is small.
+    Scans active first (main path); falls back to superseded so a re-extracted
+    value that was previously superseded is still recognised (UPDATE/NOOP) —
+    prevents the supersede oscillation on rerun. Returns the decoded Fact or None.
+    ponytail: linear scan, single-machine MVP ceiling.
     """
-    for f in store.get_facts_by_subject(subject_id, status="active"):
-        if f["predicate"] == predicate and (f.get("value") or "") == value:
-            return f
+    for status in ("active", "superseded"):
+        for f in store.get_facts_by_subject(subject_id, status=status):
+            if f["predicate"] == predicate and (f.get("value") or "") == value:
+                return f
     return None
+
+
+# ponytail: predicate 基数 — functional(单值, 不同 value 才算矛盾) vs multivalue(多值共存)。
+# 与 extractor 7 谓词对应。升级路径: LLM 自由谓词时改读 fact schema cardinality 字段。
+_FUNCTIONAL_PREDICATES = frozenset({"is_a", "belongs_to"})
+
+
+def _is_contradiction(predicate: str, new_value: str, old_value: str) -> bool:
+    """True only for functional (single-valued) predicates with a different value.
+
+    Multivalue predicates (uses/depends_on/contains/implements/connected_to) coexist:
+    "项目 uses rust AND docker" 非矛盾, 是并存。
+    """
+    return predicate in _FUNCTIONAL_PREDICATES and new_value != old_value
 
 
 def _has_active_for_predicate(subject_id: str, predicate: str) -> list[dict[str, Any]]:
@@ -185,10 +202,14 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
             updated += 1
             continue
 
-        # Same (subject, predicate), different value ⇒ contradiction ⇒ DELETE
-        # the old(s) via supersede, then ADD the new pointing at it.
+        # Same (subject, predicate), different value: supersede ONLY if the
+        # predicate is functional (single-valued: is_a/belongs_to) — a real
+        # contradiction. Multivalue predicates (uses/depends_on/contains/...)
+        # coexist (项目 uses rust AND docker 非矛盾) ⇒ fall through to ADD.
         siblings = _has_active_for_predicate(subject_id, predicate)
-        if siblings:
+        contradicting = [s for s in siblings
+                         if _is_contradiction(predicate, value, s.get("value") or "")]
+        if contradicting:
             new_id = store.put_fact(
                 subject_id=subject_id,
                 predicate=predicate,
@@ -199,11 +220,12 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
                 source_refs=[src_ref] if src_ref else [],
                 seen_sessions=[session_id] if session_id else [],
             )
-            for old in siblings:
+            for old in contradicting:
                 store.update_fact_status(old["id"], "superseded", supersedes_id=new_id)
-            deleted += len(siblings)
+            deleted += len(contradicting)
             added += 1
             continue
+        # 多值共存 / 无矛盾 ⇒ 落到下方 brand-new ADD (不 continue)。
 
         # Brand new — ADD.
         store.put_fact(

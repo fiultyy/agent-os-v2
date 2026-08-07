@@ -72,8 +72,14 @@ class LLMProvider(Protocol):
 # hardened prompt beats N hand-tuned variants at v3-stage-1 scale.
 _EXTRACT_PROMPT = """从下面的文本抽取事实三元组,只返回 JSON。
 格式: {"facts": [{"subject": "...", "predicate": "...", "object": "..."}]}
-predicate 从这些里选: is_a, uses, depends_on, contains, belongs_to, implements, connected_to
-找不到任何事实就返回 {"facts": []},不要解释。
+predicate 从这些里选: is_a, uses, depends_on, contains, belongs_to, implements, connected_to, part_of, relates_to
+规则:
+- 保留专有名词/技术术语/缩略词(如 a2a, mesh, A2A, ratatui, pydantic-ai)原样作为 subject/object,不要泛化成"系统/框架/agent"。
+- 同义不同写法(a2a/A2A)视为同一实体,用原文形式。
+- 找不到任何事实就返回 {"facts": []},不要解释。
+示例:
+文本: native agent 自成 A2A 节点, 形成内部 mesh
+{"facts": [{"subject": "native agent", "predicate": "is_a", "object": "A2A node"}, {"subject": "native agent", "predicate": "part_of", "object": "A2A mesh"}]}
 文本: """
 
 # CCRProvider removed — ZhipuAnthropicProvider 直连 open.bigmodel.cn/api/anthropic,

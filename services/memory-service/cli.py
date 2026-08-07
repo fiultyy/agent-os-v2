@@ -184,6 +184,22 @@ def build_index(scope: str | None = None, top_k: int = 20, memory_dir: str | Non
     return projection.build_index(facts, ent_names, mem_dir)
 
 
+# ── embed-backfill (存量 active fact value → L2 cache, ADR-13 通电) ──
+
+def embed_backfill() -> dict[str, int]:
+    """回填存量 active fact 的 value embedding 到 L2 cache (on-ingest 预计算补存量)。
+    命中 cache 跳过 (embed 内部 lookup); provider 不可达 → embedded 不增 (passive)。"""
+    import db
+    import embedding
+    conn = db.get_conn()
+    rows = conn.execute(
+        "SELECT value FROM fact WHERE status='active' AND value IS NOT NULL AND value != ''"
+    ).fetchall()
+    distinct = {r["value"] for r in rows}
+    embedded = sum(1 for v in distinct if embedding.embed(v))
+    return {"active_facts": len(rows), "distinct_values": len(distinct), "embedded": embedded}
+
+
 # ── argv entry ──────────────────────────────────────────────────────
 
 def _main(argv: list[str] | None = None) -> int:
@@ -238,6 +254,8 @@ def _main(argv: list[str] | None = None) -> int:
     bi.add_argument("--top-k", dest="top_k", type=int, default=20)
     bi.add_argument("--memory-dir", dest="memory_dir", default=None,
                     help="CC memory dir(默认 ~/.claude/projects/<encoded>/memory/)")
+    sub.add_parser("embed-backfill",
+                   help="回填 active fact value → L2 embedding cache (ADR-13 向量通电)")
 
     args = p.parse_args(argv)
     if args.cmd == "ingest":
@@ -256,6 +274,8 @@ def _main(argv: list[str] | None = None) -> int:
         print(json.dumps(init_memory(args.memory_dir, source_cwd=args.cwd), ensure_ascii=False))
     elif args.cmd == "build-index":
         print(json.dumps(build_index(scope=args.scope, top_k=args.top_k, memory_dir=args.memory_dir), ensure_ascii=False))
+    elif args.cmd == "embed-backfill":
+        print(json.dumps(embed_backfill(), ensure_ascii=False))
     return 0
 
 

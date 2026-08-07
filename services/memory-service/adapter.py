@@ -89,27 +89,27 @@ def extract_facts(
 def _vote(extractions: list[Extraction]) -> Extraction:
     """Majority vote per (subject, predicate, object) triple; confidence = max.
 
-    A triple survives if it appears in ≥ ⌈n/2⌉ wings (majority/quorum per
-    ADR-5b). Confidence of the voted result is the max wing confidence among
-    wings that contributed a surviving triple. source_meta records wing count +
-    agreement histogram.
+    case-fold 投票 key (A2A/a2a 合并达 quorum), 但 surviving 保留原 FactOut
+    (大小写原样存 KG)。ponytail: 最浅归一 (case-fold only), 不做 lemmatize/
+    alias (upgrade path)。A triple survives if it appears in ≥ ⌈n/2⌉ wings.
     """
     n = len(extractions)
     quorum = (n + 1) // 2  # ⌈n/2⌉: 3→2, 2→1, 1→1
-    triple_wings: dict[tuple[str, str, str], list[int]] = {}
+    triple_wings: dict[tuple[str, str, str], list[tuple[int, FactOut]]] = {}
     for wi, ext in enumerate(extractions):
         for f in ext.facts:
-            key = (f.subject, f.predicate, f.object)
-            triple_wings.setdefault(key, []).append(wi)
+            key = (f.subject.strip().lower(), f.predicate.strip().lower(),
+                   f.object.strip().lower())
+            triple_wings.setdefault(key, []).append((wi, f))
 
     surviving: list[FactOut] = []
     contributing_confidences: list[float] = []
     agree_hist: list[int] = []
-    for key, wing_idxs in triple_wings.items():
-        agree_hist.append(len(wing_idxs))
-        if len(wing_idxs) >= quorum:
-            surviving.append(FactOut(*key))
-            for wi in wing_idxs:
+    for key, wing_facts in triple_wings.items():
+        agree_hist.append(len(wing_facts))
+        if len(wing_facts) >= quorum:
+            surviving.append(wing_facts[0][1])  # 保留首个原 FactOut (大小写原样)
+            for wi, _ in wing_facts:
                 contributing_confidences.append(extractions[wi].confidence)
 
     conf = max(contributing_confidences) if contributing_confidences else 0.0

@@ -49,3 +49,20 @@ def _mock_default_providers(monkeypatch):
     """
     monkeypatch.setattr(adapter, "default_providers",
                         lambda: [RegexMockProvider()])
+
+
+class _NoVecProvider:
+    """测试默认禁向量 (store.put_fact 下沉 embed 后, 防真发网络 LM Studio/Ollama)。
+    embed 返 [] → embedding.embed passive → cache 不写, put_fact 不崩。"""
+    base_url = None
+    model = "no-vec-test"
+    def embed(self, text: str) -> list:
+        return []
+
+
+@pytest.fixture(autouse=True)
+def _mock_embedding(monkeypatch):
+    """Patch embedding.default_providers → [_NoVecProvider()] for all tests.
+    显式测向量的 test (test_vec_recall) 自己 monkeypatch 覆盖此 patch。"""
+    import embedding
+    monkeypatch.setattr(embedding, "default_providers", lambda: [_NoVecProvider()])
