@@ -19,10 +19,13 @@ ADR-13: provider 抽象 local-first(LM Studio 用户指定 + Ollama fallback), O
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import sqlite3
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 
@@ -72,28 +75,88 @@ def default_providers() -> list[EmbeddingProvider]:
     return [LM_STUDIO, OLLAMA]
 
 
-_cache: dict[str, list[float]] = {}
+# Two-tier cache: L1 内存(进程内, 跨 cli 调用丢) + L2 SQLite(跨进程持久, 解 cli 短命)。
+# ADR-13 向量持久化方案 A(即时持久, 本地文件 embeddings.db, 每次 embed 查/写)。
+_CACHE_DB: Path = Path(__file__).parent / "data" / "embeddings.db"
+_cache: dict[str, list[float]] = {}   # L1
+_cache_conn: sqlite3.Connection | None = None
+
+
+def _cache_get_conn() -> sqlite3.Connection:
+    """L2 SQLite 连接(惰性建表)。跨进程持久 text_hash → vector JSON。"""
+    global _cache_conn
+    if _cache_conn is None:
+        _CACHE_DB.parent.mkdir(parents=True, exist_ok=True)
+        _cache_conn = sqlite3.connect(str(_CACHE_DB), check_same_thread=False)
+        _cache_conn.execute(
+            "CREATE TABLE IF NOT EXISTS embed_cache ("
+            "text_hash TEXT PRIMARY KEY, text TEXT, vector TEXT, model TEXT, created_at TEXT)")
+        _cache_conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_embed_hash ON embed_cache(text_hash)")
+        _cache_conn.commit()
+    return _cache_conn
+
+
+def _cache_key(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _cache_lookup(text: str) -> list[float] | None:
+    """L1 内存 → L2 SQLite。hit 返回 vector(提升 L1), miss None。"""
+    if text in _cache:
+        return _cache[text]
+    try:
+        row = _cache_get_conn().execute(
+            "SELECT vector FROM embed_cache WHERE text_hash=?", (_cache_key(text),)
+        ).fetchone()
+        if row:
+            v = json.loads(row[0])
+            _cache[text] = v   # 提升 L1(同进程后续命中免 SQLite 查)
+            return v
+    except (sqlite3.Error, json.JSONDecodeError):
+        pass
+    return None
+
+
+def _cache_store(text: str, vector: list[float], model: str = "") -> None:
+    """写 L1 + L2(INSERT OR REPLACE 即时持久)。"""
+    _cache[text] = vector
+    try:
+        _cache_get_conn().execute(
+            "INSERT OR REPLACE INTO embed_cache (text_hash, text, vector, model, created_at) "
+            "VALUES (?,?,?,?,?)",
+            (_cache_key(text), text, json.dumps(vector), model, ""),
+        )
+        _cache_get_conn().commit()
+    except sqlite3.Error:
+        pass
 
 
 def embed(text: str, providers: list[EmbeddingProvider] | None = None) -> list[float]:
-    """Embed ``text`` via providers (LM Studio default + Ollama fallback). Cached.
+    """Embed ``text`` via providers (LM Studio default + Ollama fallback). Two-tier cache。
 
     Returns [] if no provider yields a vector (caller treats as no vec signal —
     recall should fall back to the字面/centrality/LIF score path).
     """
-    if text in _cache:
-        return _cache[text]
+    cached = _cache_lookup(text)
+    if cached is not None:
+        return cached
     for p in (providers if providers is not None else default_providers()):
         v = p.embed(text)
         if v:
-            _cache[text] = v
+            _cache_store(text, v, getattr(p, "model", ""))
             return v
     return []
 
 
 def clear_cache() -> None:
-    """Reset the in-memory cache (tests / db switch)."""
+    """清 L1 内存 + 关 L2 连接(下次 _cache_get_conn 重连当前 _CACHE_DB)。
+    测试 monkeypatch _CACHE_DB 后调此重置连接到 tmp db。"""
+    global _cache_conn
     _cache.clear()
+    if _cache_conn is not None:
+        _cache_conn.close()
+        _cache_conn = None
 
 
 def _demo() -> None:  # ponytail self-check
