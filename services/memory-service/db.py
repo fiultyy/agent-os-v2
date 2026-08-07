@@ -33,6 +33,11 @@ def init(db_path: str | Path | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+    # ADR-14 migration: 老 db fact 表无 source_cwd 列(b 方案 cwd 隔离)→ ALTER ADD。
+    # CREATE TABLE IF NOT EXISTS 不改老表; PRAGMA table_info 检测 + ALTER 补列。
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(fact)")}
+    if "source_cwd" not in cols:
+        conn.execute("ALTER TABLE fact ADD COLUMN source_cwd TEXT")
     conn.commit()
     _conn = conn
     _conn_path = str(path)

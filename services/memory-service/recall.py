@@ -137,6 +137,7 @@ def recall(
     weights: tuple[float, float, float] | None = None,
     use_vec: bool = False,
     delta: float | None = None,
+    cwd: str | None = None,
 ) -> list[dict[str, Any]]:
     """Recall Facts relevant to ``query``, ranked by ``α·match + β·centrality + γ·LIF``.
 
@@ -176,7 +177,14 @@ def recall(
     # subject name does not echo the query (e.g. "用户" subject, "rust" in value).
     # Ceiling: linear scan of all active facts; fine for single-machine MVP.
     conn = db.get_conn()
-    value_rows = conn.execute("SELECT * FROM fact WHERE status='active'").fetchall()
+    # ADR-14 cwd 隔离(b 方案): cwd 给定时只扫该 cwd 的 fact(+ NULL 老数据兼容)。
+    if cwd:
+        value_rows = conn.execute(
+            "SELECT * FROM fact WHERE status='active' AND (source_cwd = ? OR source_cwd IS NULL)",
+            (cwd,),
+        ).fetchall()
+    else:
+        value_rows = conn.execute("SELECT * FROM fact WHERE status='active'").fetchall()
     seen_ids: set[str] = set()
     candidates: list[dict[str, Any]] = []
     for r in _facts_for_entities([e["id"] for e in entities]):
@@ -214,6 +222,12 @@ def recall(
             if f["id"] not in seen_ids:
                 seen_ids.add(f["id"])
                 candidates.append(f)
+
+    # ADR-14 cwd 过滤 entity-based candidates(entity 可跨 cwd, Python 过滤; NULL 兼容老数据)
+    if cwd:
+        candidates = [f for f in candidates
+                      if not f.get("source_cwd") or f["source_cwd"] == cwd]
+        seen_ids = {f["id"] for f in candidates}
 
     # ADR-2v2: on-the-fly pagerank centrality over the full active-fact graph
     # (one build per recall, no persistence). Each fact's centrality = the
