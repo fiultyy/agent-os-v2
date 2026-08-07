@@ -55,6 +55,16 @@ def fresh_db(tmp_path):
     yield tmp_path
 
 
+@pytest.fixture(autouse=True)
+def _isolated_embed_cache(tmp_path, monkeypatch):
+    """每测试隔离 embedding cache(L1 内存 + L2 SQLite)到 tmp, 避免跨测试/生产污染。"""
+    import embedding
+    monkeypatch.setattr(embedding, "_CACHE_DB", tmp_path / "embeddings.db")
+    embedding.clear_cache()
+    yield
+    embedding.clear_cache()
+
+
 class _MatchEmbedding:
     """Deterministic embedding stand-in: '铁锈' 与 'rust' embed 相同(cosine 1.0),
     其他 → [0,1,0]。模拟 synonym 语义近, 不依赖 LM Studio。"""
