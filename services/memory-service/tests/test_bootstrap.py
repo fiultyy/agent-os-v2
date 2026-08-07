@@ -20,6 +20,7 @@ if _SRV_DIR not in sys.path:
 import bootstrap  # noqa: E402
 import db  # noqa: E402
 import store  # noqa: E402
+from conftest import RegexMockProvider  # noqa: E402
 
 
 @pytest.fixture()
@@ -100,6 +101,6 @@ def test_init_memory_multiple_files_accumulate(fresh_db):
     d.mkdir()
     (d / "a.md").write_text("用户使用 rust", encoding="utf-8")
     (d / "b.md").write_text("Bob uses Java.", encoding="utf-8")
-    r = bootstrap.init_memory(str(d), providers=[])  # regex path (deterministic)
+    r = bootstrap.init_memory(str(d), providers=[RegexMockProvider()])  # mock LLM (deterministic)
     assert r["files"] == 2, r
     assert r["added"] >= 1, r

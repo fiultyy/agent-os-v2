@@ -10,11 +10,11 @@ Providers are *passive*: a provider that is unreachable, errors, or returns
 garbage yields an empty facts list + low confidence (0.0), never raises. The
 adapter decides whether to trust / fall back.
 
-Only CCRProvider ships today (reuses the already-deployed ccr router at
-``127.0.0.1:3456``, Anthropic Messages API, model-routed). claude-api /
-LMstudio providers are stubs — concrete impl deferred until a deploy target
-exists (ADR-5b Decision: "claude-api/LMstudio 备"). Kept minimal: the Protocol
-is the seam, new providers slot in by implementing ``extract_facts``.
+ZhipuAnthropicProvider 直连智谱 (open.bigmodel.cn/api/anthropic, glm-5-turbo).
+CCR router proxy removed — provider 直连少一跳. claude-api / LMstudio
+providers are stubs — concrete impl deferred until a deploy target exists.
+Kept minimal: the Protocol is the seam, new providers slot in by implementing
+``extract_facts``.
 """
 
 from __future__ import annotations
@@ -66,8 +66,6 @@ class LLMProvider(Protocol):
     def extract_facts(self, text: str) -> Extraction: ...
 
 
-# ── CCRProvider — reuses the deployed ccr router (Anthropic Messages API) ──
-
 # Fixed prompt: zero-shot fact extraction → strict JSON. One prompt, no
 # variation: per-call variation (the "butterfly wing" diversity) lives in the
 # adapter (prompt transforms / multi-provider), not here. ponytail: a single
@@ -78,58 +76,8 @@ predicate 从这些里选: is_a, uses, depends_on, contains, belongs_to, impleme
 找不到任何事实就返回 {"facts": []},不要解释。
 文本: """
 
-
-@dataclass
-class CCRProvider:
-    """LLMProvider backed by the ccr router at 127.0.0.1:3456.
-
-    ccr exposes Anthropic's /v1/messages format and routes by ``model``
-    (see ~/.claude-code-router/config.json: model → upstream provider).
-    Default model glm-4.5-air (zhipu-anthropic route, present in config).
-
-    Failures (network, non-200, unparseable body, empty content) collapse to
-    an empty Extraction with confidence 0.0 — the adapter's fallback logic
-    handles them uniformly.
-    """
-    base_url: str = "http://127.0.0.1:3456"
-    model: str = "glm-4.5-air"
-    timeout: float = 30.0
-
-    def extract_facts(self, text: str) -> Extraction:
-        body = json.dumps({
-            "model": self.model,
-            "max_tokens": 512,
-            "messages": [{"role": "user", "content": _EXTRACT_PROMPT + text}],
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            f"{self.base_url}/v1/messages",
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                raw = resp.read().decode("utf-8", "replace")
-        except (urllib.error.URLError, TimeoutError, OSError) as e:
-            return Extraction(confidence=0.0, source_meta={
-                "provider": "ccr", "error": f"network: {e!r}"})
-        except ValueError as e:
-            return Extraction(confidence=0.0, source_meta={
-                "provider": "ccr", "error": f"http: {e!r}"})
-
-        content = _extract_text(raw)
-        if content is None:
-            return Extraction(confidence=0.0, source_meta={
-                "provider": "ccr", "model": self.model,
-                "error": "no content block", "raw": raw[:200]})
-        facts = _parse_facts(content)
-        # Confidence heuristic: provider reported facts → 0.7 (single-shot,
-        # no consensus); empty → 0.0. The adapter raises effective confidence
-        # via N-way voting; a lone provider is never fully trusted.
-        conf = 0.7 if facts else 0.0
-        return Extraction(
-            facts=facts, confidence=conf,
-            source_meta={"provider": "ccr", "model": self.model})
+# CCRProvider removed — ZhipuAnthropicProvider 直连 open.bigmodel.cn/api/anthropic,
+# 不经 localhost:3456 ccr 路由 (provider 直连, 少一跳)。
 
 
 # ── ZhipuAnthropicProvider — 智谱直连 Anthropic 协议(glm-5-turbo, coding plan)──
@@ -147,7 +95,7 @@ class ZhipuAnthropicProvider:
     base_url: str = "https://open.bigmodel.cn/api/anthropic"
     model: str = "glm-5-turbo"
     api_key: str = ""  # 空 → _load_zhipu_key 从 env/CCR config 读
-    timeout: float = 30.0
+    timeout: float = 60.0
 
     def extract_facts(self, text: str) -> Extraction:
         key = self.api_key or _load_zhipu_key()

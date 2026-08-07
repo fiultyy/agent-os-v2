@@ -114,9 +114,8 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
     Pipeline (ADR-10 Decision (a)/(b)/(c)):
 
     1. ``consolidate.consolidate()`` — decay+dedup 复用 v2/v3 (phase a).
-    2. ``_read_transcript`` + ``extractor.extract()`` regex — session→facts
-       (phase b; 蝴蝶翼 LLM defer, adapter 预留 — swap ``extractor.extract`` for
-       ``adapter.extract_facts`` when the LLM layer is wired).
+    2. ``_read_transcript`` + ``adapter.extract_facts()`` 蝴蝶翼 LLM — session→facts
+       (phase b; 无 regex 降级 — LLM 不可用即 raise block)。
     3. Incremental decision per extracted fact (phase c): ADD / UPDATE / DELETE
        (supersede) / NOOP, tally counts.
 
@@ -135,13 +134,14 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
     # stable wall clock, so re-runs add no churn.
     consolidate_mod.consolidate()
 
-    # Phase b — session→facts via adapter (ADR-5b 蝴蝶翼 LLM, ADR-5 regex
-    # fallback). providers=None → default_providers (CCRProvider, LLM 默认);
-    # providers=[] → 强制 regex fallback (测试/调试, ADR-5 upheld).
+    # Phase b — session→facts via adapter (ADR-5b 蝴蝶翼 LLM 直连, 无 regex 降级 —
+    # LLM 不可用即 raise block, 不静默产低质量 fact)。
     text = _read_transcript(transcript_path)
+    if len(text) > 4000:
+        text = text[:4000]  # ponytail: 截断长 session (防 LLM 超时, 同 bootstrap)
     active_providers = adapter.default_providers() if providers is None else providers
     result = adapter.extract_facts(text, providers=active_providers)
-    ext_label = "regex" if result.source_meta.get("provider") == "regex" else "llm"
+    ext_label = "llm"
 
     src_ref = f"session:{session_id}" if session_id else None
     added = updated = deleted = noop = 0

@@ -3,7 +3,7 @@
 Drives the top seams end-to-end against an isolated per-test SQLite file:
 
 - ``cli.ingest`` (Node B) extracts entities+facts via the adapter's regex
-  fallback path (``providers=[]``, deterministic — ADR-5 upheld; the LLM path
+  fallback path (``providers=[RegexMockProvider()]``, deterministic — ADR-5 upheld; the LLM path
   is exercised in tests/test_adapter.py) and persists them; ``cli.recall``
   (Spec §6 seam) navigates the KG, scores
   ``α·match + β·centrality + γ·LIF`` (ADR-4v2, weighted — supersedes v1
@@ -33,6 +33,7 @@ import cli  # noqa: E402
 import db  # noqa: E402
 import scoring  # noqa: E402
 import store  # noqa: E402
+from conftest import RegexMockProvider  # noqa: E402
 
 
 @pytest.fixture()
@@ -67,8 +68,8 @@ def _assert_schema_join(facts):
             assert obj is not None, f"Fact.object_id {f['object_id']} dangling"
         # ADR-4: LIF is a [0,1] storage scalar (not NeuralField rank).
         assert 0.0 <= f["LIF"] <= 1.0
-        # ADR-5: facts ingested via the regex cli carry extractor="regex".
-        assert f["extractor"] == "regex"
+        # extractor: "llm" (adapter LLM 路径, mock 或真) 或测试 seed 字面。
+        assert f["extractor"] in ("llm", "regex")
 
 
 # ── closed loop: ingest → recall (literal hit) ────────────────────────
@@ -76,7 +77,7 @@ def _assert_schema_join(facts):
 def test_ingest_then_recall_literal_hit(fresh_db):
     """User Story 6: ingest '用户使用 rust 进行开发' → recall 'rust' returns
     Fact(subject=用户, predicate=uses, object=rust). Literal/substring hit."""
-    summary = cli.ingest("用户使用 rust 进行开发", providers=[])
+    summary = cli.ingest("用户使用 rust 进行开发", providers=[RegexMockProvider()])
     assert summary["facts"], "ingest produced no facts"
     assert summary["entities"] >= 1
 
@@ -98,9 +99,9 @@ def test_multi_ingest_recall_each_query(fresh_db):
     ADR-4: match is a substring hit on Fact.value (the content carrier), so
     queries target value tokens ('rust'/'Pydantic'/'笔记'), not subject names.
     """
-    cli.ingest("用户使用 rust 进行开发", providers=[])  # value='rust'
-    cli.ingest("FastAPI uses Pydantic.", providers=[])  # value='Pydantic'
-    cli.ingest("Logseq 是笔记工具", providers=[])      # value='笔记工具'
+    cli.ingest("用户使用 rust 进行开发", providers=[RegexMockProvider()])  # value='rust'
+    cli.ingest("FastAPI uses Pydantic.", providers=[RegexMockProvider()])  # value='Pydantic'
+    cli.ingest("Logseq 是笔记工具", providers=[RegexMockProvider()])      # value='笔记工具'
 
     rust = cli.recall("rust")
     pyd = cli.recall("Pydantic")
@@ -125,7 +126,7 @@ def test_recall_orders_by_weighted_fusion(fresh_db):
     and that scores equal the weighted sum, returned sorted desc. cli.ingest
     stamps LIF=0.5; one higher-LIF fact is seeded directly via store."""
     # Entity + a cli-ingested fact (LIF=0.5 default).
-    cli.ingest("用户使用 rust 进行开发", providers=[])
+    cli.ingest("用户使用 rust 进行开发", providers=[RegexMockProvider()])
     alice = store.put_entity("Alice", "person")
     # Higher-LIF fact whose value also contains 'rust' ⇒ match equal, LIF up.
     store.put_fact(
@@ -159,7 +160,7 @@ def test_recall_zero_match_and_isolated_centrality_filtered(fresh_db):
     filter instead drops facts with zero total signal (no match AND a
     disconnected/isolated entity → centrality 0). v1's ``LIF=0 ⇒ dropped``
     is a deliberate ADR-4v2 consequence (supersedes ADR-4 multiplicative)."""
-    cli.ingest("用户使用 rust 进行开发", providers=[])  # LIF=0.5 default — survives
+    cli.ingest("用户使用 rust 进行开发", providers=[RegexMockProvider()])  # LIF=0.5 default — survives
     bob = store.put_entity("Bob", "person")
     # LIF=0 but literal-hit 'rust': weighted score = α·1 + β·c + γ·0 > 0 ⇒ kept
     # (ADR-4v2 consequence — LIF=0 no longer forces a drop).
@@ -175,9 +176,9 @@ def test_schema_fact_entity_join_consistent(fresh_db):
     """Every Fact returned joins cleanly to entity (FK integrity); the ADR-2/3
     content-carrier columns are present and well-formed. Cross-table
     consistency = Node F scope."""
-    cli.ingest("用户使用 rust 进行开发", providers=[])
-    cli.ingest("FastAPI uses Pydantic.", providers=[])
-    cli.ingest("Logseq 是笔记工具", providers=[])
+    cli.ingest("用户使用 rust 进行开发", providers=[RegexMockProvider()])
+    cli.ingest("FastAPI uses Pydantic.", providers=[RegexMockProvider()])
+    cli.ingest("Logseq 是笔记工具", providers=[RegexMockProvider()])
 
     # ADR-3 content-carrier + identity columns every Fact must carry.
     required_cols = {

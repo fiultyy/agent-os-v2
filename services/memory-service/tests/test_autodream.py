@@ -40,18 +40,6 @@ def fresh_db(tmp_path):
     yield tmp_path
 
 
-@pytest.fixture(autouse=True)
-def _force_regex_default(monkeypatch):
-    """测试默认强制 regex(确定性, 不依赖 CCR); LLM 路径由显式 mock 测试覆盖。
-
-    autodream 默认 providers=None → adapter.default_providers() → LLM(CCR)。
-    patch 返 [] → adapter fallback regex(ADR-5 upheld)。LLM mock 测试显式传
-    providers=[mock] 绕过 default_providers, 不受此 patch 影响。
-    """
-    import adapter
-    monkeypatch.setattr(adapter, "default_providers", lambda: [])
-
-
 def _write_transcript(tmp_path, records):
     """Write a list of CC transcript records as JSONL, return the path."""
     tp = tmp_path / "transcript.jsonl"
@@ -216,19 +204,6 @@ def test_cli_autodream_subcommand(fresh_db, monkeypatch):
     buf = io.StringIO()
     monkeypatch.setattr(sys, "stdout", buf)
     rc = cli._main(["autodream", "--session", "s1", "--transcript", tp])
-    assert rc == 0
-    out = json.loads(buf.getvalue())
-    assert out["added"] >= 1, out
-
-
-def test_cli_autodream_regex_flag(fresh_db, monkeypatch):
-    """cli autodream --regex forces regex path (use_regex=True → providers=[]).
-    Explicit at the cli seam (default LLM via autouse-patched default_providers)."""
-    tp = _write_transcript(fresh_db, [_user("用户使用 rust")])
-    import io
-    buf = io.StringIO()
-    monkeypatch.setattr(sys, "stdout", buf)
-    rc = cli._main(["autodream", "--session", "s1", "--transcript", tp, "--regex"])
     assert rc == 0
     out = json.loads(buf.getvalue())
     assert out["added"] >= 1, out

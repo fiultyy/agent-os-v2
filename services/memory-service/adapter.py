@@ -1,55 +1,31 @@
-"""mem-service adapter — butterfly-wing LLM extraction + regex fallback (ADR-5b).
+"""mem-service adapter — butterfly-wing LLM extraction (ADR-5b).
 
-The adapter is the ingest seam that picks LLM facts when available and falls
-back to the regex ``extractor`` (ADR-5) otherwise. Two layers:
+Ingest seam: N-way fan-out over LLM providers → majority vote → confidence.
+**No regex fallback** (ADR-5 fallback removed by directive): if no provider is
+reachable, or every wing errors out with no facts, ``extract_facts`` **raises**
+— the caller sees LLM is down rather than silently ingesting low-quality regex
+facts. An empty vote *without* errors is legitimate (the LLM judged the text
+holds no fact) and is returned as-is.
 
-1. ``extract_facts(text, providers=None)`` — the public entry. Returns an
-   ``llm_provider.Extraction``. With ``providers=[]`` (or none reachable) it
-   goes straight to the regex fallback (Spec §4 story 5; acceptance cmd).
-2. Internally: N-way fan-out over the providers (default 3 wings = the same
-   provider run 3× via prompt transforms, since CCRProvider is the only
-   concrete provider today) → vote (majority per (subject,predicate,object)
-   tuple) → confidence aggregation (max of wing confidences). If the voted
-   result is empty or below a low-confidence floor, fall back to regex.
-
-Regex fallback (ADR-5, upheld — not superseded): the regex ``extractor`` runs
-and its facts are wrapped into ``FactOut`` triples, confidence 0.5 (determin-
-istic regex, lower than a voted LLM consensus but higher than a stub).
-
-API contract (acceptance cmd): ``adapter.extract_facts(text, providers=[])``
-returns an ``Extraction`` whose ``.facts`` is non-empty for any text the regex
-layer hits and whose ``.confidence`` is ≥ 0. ``Extraction`` is imported from
-``llm_provider`` so callers hold one type.
+API: ``adapter.extract_facts(text, providers=None)`` → ``llm_provider.Extraction``.
+``providers=None`` ⇒ ``default_providers()`` = [ZhipuAnthropicProvider] 直连智谱.
 """
 
 from __future__ import annotations
 
-from collections import Counter
-from typing import Any
-
-import extractor as regex_extractor
 from llm_provider import (
-    CCRProvider,
     Extraction,
     FactOut,
     LLMProvider,
     ZhipuAnthropicProvider,
 )
 
-# Butterfly-wing fan-out. N=3 per ADR-5b Decision. Today CCRProvider is the
-# only concrete provider, so the 3 wings are the same provider under 3 prompt
-# transforms (diversity via prompt variation). When more providers exist, the
-# adapter fans across them; N is the wing count, not the provider count.
+# Butterfly-wing fan-out. N=3 per ADR-5b: the same provider under 3 prompt
+# transforms (diversity via prompt variation).
 DEFAULT_WINGS = 3
-
-# Below this voted confidence, distrust the LLM result and fall back to regex.
-# 0.6 = a single 0.7-confidence provider (no consensus) is NOT enough; two
-# agreeing wings (0.7 each, voted) clear it. Tunable knob for v3 score-tune.
-FALLBACK_CONFIDENCE = 0.6
 
 # Prompt transforms for butterfly-wing diversity. Each wraps the input text in
 # a different framing; the JSON contract is identical, only the surface varies.
-# ponytail: 3 hand-written transforms; a templating engine is overkill at N=3.
 _WING_PROMPTS = [
     "抽取事实:",                        # bare
     "请仔细阅读并提取其中的事实三元组:",  # careful reframe
@@ -62,53 +38,50 @@ def extract_facts(
     providers: list[LLMProvider] | None = None,
     wings: int = DEFAULT_WINGS,
 ) -> Extraction:
-    """Extract facts from ``text`` via butterfly-wing LLM voting, regex fallback.
+    """Extract facts from ``text`` via butterfly-wing LLM voting.
 
-    - ``providers=[]`` or all-unreachable → regex fallback (Spec §4 story 5).
-    - Otherwise: fan out ``wings`` calls across ``providers`` (round-robin when
-      len(providers) < wings, else one wing per provider), vote on identical
-      (subject, predicate, object) triples, aggregate confidence as the max.
-    - Voted result with confidence ≥ ``FALLBACK_CONFIDENCE`` and ≥ quorum
-      agreement → returned as-is.
-    - Below the floor or empty: run regex fallback, then **merge** any voted
-      LLM facts regex did not independently surface (dedup by
-      (subject,predicate,object)). A low-confidence vote is *down-weighted,
-      not discarded* — a single 0.5-confidence wing that regex missed would
-      otherwise vanish silently. Final confidence = max(fb, voted);
-      ``source_meta`` records ``llm_attempted`` and ``merged_voted`` count.
-
-    The returned ``Extraction`` is never None and ``confidence`` ≥ 0.
+    - ``providers=None`` ⇒ ``default_providers()`` (ZhipuAnthropicProvider 直连).
+    - **No reachable provider ⇒ ``RuntimeError``** (block; regex fallback removed).
+    - Otherwise: fan out ``wings`` calls across the providers (round-robin when
+      len(providers) < wings), vote on identical (subject, predicate, object)
+      triples (quorum ⌈n/2⌉), aggregate confidence as the max.
+    - Empty vote **with provider errors** ⇒ ``RuntimeError`` (LLM unavailable:
+      no key / network / parse). Empty vote **without errors** ⇒ returned
+      as-is (the LLM legitimately found no fact).
     """
-    active = [p for p in (providers or []) if _is_reachable(p)]
+    if providers is None:
+        providers = default_providers()
+    active = [p for p in providers if _is_reachable(p)]
     if not active:
-        return _regex_fallback(text)
+        raise RuntimeError(
+            "no reachable LLM provider — regex fallback removed; "
+            "set ZHIPU_API_KEY (or CCR config zhipu-anthropic) to unblock")
 
-    extractions: list[Extraction] = []
-    for i in range(wings):
+    # 蝴蝶翼并行 fan-out (N wing 并发, 非 serial — N× 加速, 单 wing 超时不拖累其他)
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _wing(i: int) -> Extraction:
         provider = active[i % len(active)]
-        # Apply wing-i prompt transform by re-asking with a reframed prefix.
-        # CCRProvider (and any LLMProvider) gets the wing prompt inline.
         framed = f"{_WING_PROMPTS[i % len(_WING_PROMPTS)]}\n{text}"
-        extractions.append(provider.extract_facts(framed))
+        try:
+            return provider.extract_facts(framed)
+        except Exception as e:  # Protocol forbids raising, but defend anyway
+            return Extraction(
+                confidence=0.0,
+                source_meta={"provider": type(provider).__name__, "error": repr(e)})
+
+    with ThreadPoolExecutor(max_workers=wings) as ex:
+        extractions = list(ex.map(_wing, range(wings)))
 
     voted = _vote(extractions)
-    if voted.facts and voted.confidence >= FALLBACK_CONFIDENCE:
-        return voted
-
-    # Low confidence or empty LLM result → regex fallback, then merge any
-    # voted LLM facts regex did not surface (ADR-5b: a low-confidence vote is
-    # down-weighted, not silently dropped). Dedup on the triple so a fact both
-    # layers surface isn't double-counted.
-    fb = _regex_fallback(text)
-    existing = {(f.subject, f.predicate, f.object) for f in fb.facts}
-    merged = [f for f in voted.facts
-              if (f.subject, f.predicate, f.object) not in existing]
-    fb.facts.extend(merged)
-    fb.confidence = max(fb.confidence, voted.confidence)
-    fb.source_meta["llm_attempted"] = True
-    fb.source_meta["llm_confidence"] = voted.confidence
-    fb.source_meta["merged_voted"] = len(merged)
-    return fb
+    if not voted.facts:
+        errs = [e.source_meta.get("error") for e in extractions
+                if e.source_meta.get("error")]
+        if errs:
+            raise RuntimeError(
+                f"LLM providers returned no facts (errors: {errs[:2]}). "
+                "regex fallback removed — block instead of silent low-quality ingest.")
+    return voted
 
 
 # ── voting / aggregation ──────────────────────────────────────────────
@@ -118,9 +91,8 @@ def _vote(extractions: list[Extraction]) -> Extraction:
 
     A triple survives if it appears in ≥ ⌈n/2⌉ wings (majority/quorum per
     ADR-5b). Confidence of the voted result is the max wing confidence among
-    wings that contributed a surviving triple (max aggregation per ADR-5b:
-    "confidence 聚合 max/mean" — max is the more conservative, picks the wing
-    that was most sure). source_meta records wing count + agreement histogram.
+    wings that contributed a surviving triple. source_meta records wing count +
+    agreement histogram.
     """
     n = len(extractions)
     quorum = (n + 1) // 2  # ⌈n/2⌉: 3→2, 2→1, 1→1
@@ -151,42 +123,11 @@ def _vote(extractions: list[Extraction]) -> Extraction:
     )
 
 
-# ── regex fallback (ADR-5, upheld — extractor.py unchanged) ───────────
-
-def _regex_fallback(text: str) -> Extraction:
-    """Run the ADR-5 regex extractor and lift its facts into FactOut triples.
-
-    Confidence 0.5: deterministic regex coverage, below a voted LLM consensus
-    but above a stub/empty provider. extractor.py is imported UNCHANGED per
-    task scope (it stays the fallback, not superseded — ADR-5 upheld).
-    """
-    extracted = regex_extractor.extract(text)
-    facts: list[FactOut] = []
-    for f in extracted["facts"]:
-        facts.append(FactOut(
-            subject=f["subject"], predicate=f["predicate"], object=f["object"]))
-    conf = 0.5 if facts else 0.0
-    return Extraction(
-        facts=facts, confidence=conf,
-        source_meta={"provider": "regex", "entities": len(extracted["entities"])})
-
-
 # ── provider reachability (cheap pre-check, no full call) ─────────────
 
 def _is_reachable(provider: LLMProvider) -> bool:
-    """True if ``provider`` looks usable.
-
-    Two cheap paths, no LLM call:
-
-    - **Has ``base_url``** (CCRProvider, LMStudioProvider, any HTTP-backed
-      provider): TCP-connect the host:port from the URL. No model in the
-      request → no token spend, ~ms latency. Replaces the previous
-      ``extract_facts("")`` probe which fired a real LLM call per wing
-      (N=3 wings = 4 billable calls at CCRProvider).
-    - **No ``base_url``** (stubs, fakes): fall back to ``extract_facts("")``
-      and inspect source_meta for a stub sentinel. Deterministic for fakes
-      (they ignore the input); stubs self-exclude via their error string.
-    """
+    """True if ``provider`` looks usable. Cheap TCP probe (base_url) or a
+    stub-excluding ``extract_facts("")`` probe (no base_url). No token spend."""
     base_url = getattr(provider, "base_url", None)
     if base_url:
         return _tcp_reachable(base_url, timeout=2.0)
@@ -220,18 +161,32 @@ def _tcp_reachable(base_url: str, timeout: float = 2.0) -> bool:
         return False
 
 
-# ── default providers (cli uses this) ─────────────────────────────────
+# ── default providers ─────────────────────────────────────────────────
 
 def default_providers() -> list[LLMProvider]:
-    """LLM provider list(蝴蝶翼抽取): ZhipuAnthropicProvider 直连智谱(glm-5-turbo,
-    少一跳)优先, CCRProvider(localhost:3456 路由)fallback。stubs 自剔除(_is_reachable)。"""
-    return [ZhipuAnthropicProvider(), CCRProvider()]
+    """LLM provider list(蝴蝶翼抽取): ZhipuAnthropicProvider 直连智谱
+    (glm-5-turbo, open.bigmodel.cn/api/anthropic)。CCR 代理已移除 — provider
+    直连少一跳。key 从 env ZHIPU_API_KEY 或 CCR config(zhipu-anthropic.api_key)读。"""
+    return [ZhipuAnthropicProvider()]
 
 
-def _demo() -> None:  # ponytail self-check
-    r = extract_facts("用户使用 rust", providers=[])
-    assert r.facts and r.confidence >= 0, (r.facts, r.confidence)
-    print("regex fallback ok:", r.facts[0])
+def _demo() -> None:  # ponytail self-check (mock provider, no network)
+    class _Fake:
+        base_url = None
+        def extract_facts(self, text: str) -> Extraction:
+            return Extraction(facts=[FactOut("用户", "uses", "rust")],
+                              confidence=0.7, source_meta={"provider": "fake"})
+
+    r = extract_facts("用户使用 rust", providers=[_Fake()])
+    assert r.facts and r.confidence >= 0.6, (r.facts, r.confidence)
+    # 无 provider → block (不降级 regex)
+    try:
+        extract_facts("x", providers=[])
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("expected RuntimeError on no reachable provider")
+    print("adapter ok:", r.facts[0])
 
 
 if __name__ == "__main__":

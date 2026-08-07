@@ -31,7 +31,7 @@ import bootstrap
 import consolidate as consolidate_mod
 import recall as recall_mod
 import store
-from llm_provider import CCRProvider, LLMProvider
+from llm_provider import LLMProvider
 
 
 # ── ingest ──────────────────────────────────────────────────────────
@@ -55,7 +55,7 @@ def ingest(text: str, source_ref: str | None = None,
     Returns a summary ``{"entities": n, "facts": [...]}`` (fact ids).
     """
     if providers is None:
-        providers = [CCRProvider()]
+        providers = adapter.default_providers()
     extracted = adapter.extract_facts(text, providers=providers)
     # "llm" when the adapter's LLM vote produced the surviving facts (its
     # source_meta carries provider ≠ "regex"); "regex" on fallback.
@@ -140,27 +140,25 @@ def consolidate() -> dict[str, int]:
 
 # ── autodream ──────────────────────────────────────────────────────
 
-def autodream(session_id: str, transcript_path: str, use_regex: bool = False,
+def autodream(session_id: str, transcript_path: str,
               cwd: str | None = None) -> dict[str, int]:
     """PreCompact autoDream: session transcript raw→KG incremental (ADR-10/11).
 
-    Thin wrapper over ``autodream.autodream``. ``cwd`` ADR-14 b 方案: 记 source_cwd
-    (fact 来源 cwd, recall --cwd 过滤)。Driven by ``cli autodream`` from PreCompact hook。
+    Thin wrapper over ``autodream.autodream`` (LLM 蝴蝶翼 直连, 无 regex 降级 —
+    LLM 不可用即 block)。``cwd`` ADR-14 b 方案: 记 source_cwd, recall --cwd 过滤。
     """
-    providers = [] if use_regex else None  # None → default_providers (LLM 蝴蝶翼)
-    return autodream_mod.autodream(session_id, transcript_path, providers=providers, source_cwd=cwd)
+    return autodream_mod.autodream(session_id, transcript_path, source_cwd=cwd)
 
 
 # ── init-memory (bootstrap) ─────────────────────────────────────────
 
-def init_memory(memory_dir: str | None = None, use_regex: bool = False,
+def init_memory(memory_dir: str | None = None,
                 source_cwd: str | None = None) -> dict[str, int]:
     """Seed KG from CC memory .md files (ADR-12). ``source_cwd`` ADR-14 记来源 cwd。
-    Thin wrapper over ``bootstrap.init_memory``."""
+    Thin wrapper over ``bootstrap.init_memory`` (LLM 蝴蝶翼 直连, 无 regex 降级)。"""
     if memory_dir is None:
         memory_dir = str(Path.home() / ".claude" / "projects" / "-home-yy--claude" / "memory")
-    providers = [] if use_regex else None
-    return bootstrap.init_memory(memory_dir, providers=providers, source_cwd=source_cwd)
+    return bootstrap.init_memory(memory_dir, source_cwd=source_cwd)
 
 
 # ── build-index (投影 → CC memory, ADR-15 分布式 index) ─────────────
@@ -220,10 +218,6 @@ def _main(argv: list[str] | None = None) -> int:
         help="path to CC transcript JSONL",
     )
     dream.add_argument(
-        "--regex", action="store_true",
-        help="强制 regex 抽取(调试/fallback, 默认 LLM 蝴蝶翼 ADR-5b)",
-    )
-    dream.add_argument(
         "--cwd", dest="cwd", default=None,
         help="ADR-14 记 source_cwd(来源 cwd, 从 hook stdin cwd 传)",
     )
@@ -232,10 +226,6 @@ def _main(argv: list[str] | None = None) -> int:
     initmem.add_argument(
         "--memory-dir", dest="memory_dir", default=None,
         help="CC memory dir (默认 ~/.claude/projects/-home-yy--claude/memory/)",
-    )
-    initmem.add_argument(
-        "--regex", action="store_true",
-        help="强制 regex 抽取(调试/fallback, 默认 LLM 蝴蝶翼)",
     )
     initmem.add_argument(
         "--cwd", dest="cwd", default=None,
@@ -261,9 +251,9 @@ def _main(argv: list[str] | None = None) -> int:
     elif args.cmd == "consolidate":
         print(json.dumps(consolidate()))
     elif args.cmd == "autodream":
-        print(json.dumps(autodream(args.session, args.transcript, use_regex=args.regex, cwd=args.cwd), ensure_ascii=False))
+        print(json.dumps(autodream(args.session, args.transcript, cwd=args.cwd), ensure_ascii=False))
     elif args.cmd == "init-memory":
-        print(json.dumps(init_memory(args.memory_dir, use_regex=args.regex, source_cwd=args.cwd), ensure_ascii=False))
+        print(json.dumps(init_memory(args.memory_dir, source_cwd=args.cwd), ensure_ascii=False))
     elif args.cmd == "build-index":
         print(json.dumps(build_index(scope=args.scope, top_k=args.top_k, memory_dir=args.memory_dir), ensure_ascii=False))
     return 0
