@@ -111,21 +111,15 @@ def _ensure_entity(name: str, cache: dict[str, str]) -> str | None:
 
 def recall(query: str, verbose: bool = False,
            session_id: str | None = None, boost: bool = True,
-           weights=None) -> list[dict[str, Any]]:
-    """Return Facts relevant to ``query``, ordered by α·match+β·centrality+γ·LIF
-    加权排序 (ADR-4v2).
+           weights=None, use_vec: bool = False, delta: float | None = None) -> list[dict[str, Any]]:
+    """Return Facts relevant to ``query``, ordered by α·match+β·centrality+γ·LIF(+δ·vec_sim use_vec) 加权排序 (ADR-4v2/ADR-13).
 
-    Thin wrapper over ``recall.recall`` (scoring.ALPHA_MATCH·match +
-    BETA_CENTRALITY·pagerank + GAMMA_LIF·LIF). Spec §6 seam — the cli
-    subcommand and ``cli.recall(...)`` drive the same pipeline as the
-    deepened module.
-
-    Recall reinforcement (ADR-8v2) defaults on: hit facts' access stats +
-    LIF refresh on recall (boost=False for a pure read). ``session_id`` drives
-    lif_spread on the refresh.
+    Thin wrapper over ``recall.recall``. ``use_vec=True`` 启用向量召回融合
+    (ADR-13: query embed → cosine vs fact.value → vec_sim 维, 解 synonym/rewrite
+    字面盲区); 默认 off 不改 ADR-4v2 score。
     """
     return recall_mod.recall(query, verbose=verbose, session_id=session_id,
-                             boost=boost, weights=weights)
+                             boost=boost, weights=weights, use_vec=use_vec, delta=delta)
 
 
 # ── consolidate ────────────────────────────────────────────────────
@@ -194,6 +188,8 @@ def _main(argv: list[str] | None = None) -> int:
     rec = sub.add_parser("recall", help="recall facts for query")
     rec.add_argument("query")
     rec.add_argument("--verbose", action="store_true")
+    rec.add_argument("--vector", action="store_true",
+                     help="启用向量召回融合(ADR-13, 解 synonym/rewrite 字面盲区)")
 
     sub.add_parser("consolidate", help="dedup skeleton")
 
@@ -225,7 +221,7 @@ def _main(argv: list[str] | None = None) -> int:
             ensure_ascii=False,
         ))
     elif args.cmd == "recall":
-        print(json.dumps(recall(args.query, verbose=args.verbose), ensure_ascii=False, default=str))
+        print(json.dumps(recall(args.query, verbose=args.verbose, use_vec=args.vector), ensure_ascii=False, default=str))
     elif args.cmd == "consolidate":
         print(json.dumps(consolidate()))
     elif args.cmd == "autodream":

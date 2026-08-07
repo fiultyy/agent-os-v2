@@ -16,12 +16,28 @@ centrality/lif/score) as a debug surface in lieu of a dedicated ``query`` cli.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import db
+import embedding
 import networkx as nx
 import scoring
 import store
+
+# ADR-13 向量层(use_vec): 候选扩展 + vec_sim 阈值/top-N。
+VEC_MIN = 0.30   # cosine ≥ 此的 active fact 入向量候选(避免全 noise 污染 top-k)
+VEC_TOP_N = 20   # 向量候选上限(扩展 entity/value 候选集)
+
+
+def _cosine(a: list[float] | None, b: list[float] | None) -> float:
+    """Cosine similarity; 0.0 on empty/zero-norm. ponytail: 纯 Python, 无 numpy 依赖。"""
+    if not a or not b:
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    return dot / (na * nb) if na and nb else 0.0
 
 
 def _build_centralities() -> dict[str, float]:
@@ -119,6 +135,8 @@ def recall(
     session_id: str | None = None,
     boost: bool = True,
     weights: tuple[float, float, float] | None = None,
+    use_vec: bool = False,
+    delta: float | None = None,
 ) -> list[dict[str, Any]]:
     """Recall Facts relevant to ``query``, ranked by ``α·match + β·centrality + γ·LIF``.
 
@@ -174,15 +192,46 @@ def recall(
             seen_ids.add(rid)
             candidates.append(store._decode_fact(r))
 
+    # ADR-13 向量候选扩展(use_vec): query embed → cosine vs active fact.value →
+    # top-N 加入候选集。解 synonym/rewrite 字面盲区(铁锈↔rust cosine 信号 > 字面 0)。
+    # embedding passive([]); use_vec 且 qv 空时跳过(回退纯字面/centrality/LIF)。
+    qv = embedding.embed(query) if use_vec else []
+    if qv:
+        vec_cands: list[tuple[dict[str, Any], float]] = []
+        for r in value_rows:
+            rid = r["id"]
+            val = r["value"]
+            if not val or rid in seen_ids:
+                continue
+            fv = embedding.embed(val)
+            if not fv:
+                continue
+            sim = _cosine(qv, fv)
+            if sim >= VEC_MIN:
+                vec_cands.append((store._decode_fact(r), sim))
+        vec_cands.sort(key=lambda x: -x[1])
+        for f, _sim in vec_cands[:VEC_TOP_N]:
+            if f["id"] not in seen_ids:
+                seen_ids.add(f["id"])
+                candidates.append(f)
+
     # ADR-2v2: on-the-fly pagerank centrality over the full active-fact graph
     # (one build per recall, no persistence). Each fact's centrality = the
     # pagerank of its most-central connected entity.
     centralities = _build_centralities()
-    scored = [
-        scoring.score_fact(f, query, centrality=_fact_centrality(f, centralities), weights=weights)
-        for f in candidates
-    ]
-    # drop zero-score (no match) unless verbose wants them; mirrors "hit" semantics
+    scored = []
+    for f in candidates:
+        vs = 0.0
+        if qv and f.get("value"):
+            fv = embedding.embed(f["value"])  # cache hit(向量候选扩展已 embed)
+            vs = _cosine(qv, fv) if fv else 0.0
+        scored.append(scoring.score_fact(
+            f, query,
+            centrality=_fact_centrality(f, centralities),
+            vec_sim=vs, weights=weights, delta=delta,
+        ))
+    # drop zero-score (no match) unless verbose wants them; mirrors "hit" semantics.
+    # vec_sim>0(use_vec) 的候选 score>0 不 drop — 即使字面 m=0(盲区解)。
     scored = [s for s in scored if s["score"] > 0.0]
     scored.sort(key=lambda s: s["score"], reverse=True)
     if top_k is not None:
