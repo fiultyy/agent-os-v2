@@ -160,6 +160,7 @@ mod tests {
                 m
             },
             event_id: String::new(),
+            agent_id: String::new(),
         };
         let evs = vec![
             mk("tick_completed", "old"),

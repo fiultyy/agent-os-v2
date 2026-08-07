@@ -50,7 +50,7 @@ def test_get_toolset_no_policy_makes_all(monkeypatch):
     called = []
     orig = mod._make_named_tool
     monkeypatch.setattr(mod, "_make_named_tool",
-                        lambda ex, pf, n, d, p: (called.append(n) or orig(ex, pf, n, d, p)))
+                        lambda ex, pf, n, d, p, sid="", aid="": (called.append(n) or orig(ex, pf, n, d, p, sid, aid)))
     cap = ToolBridgeCapability(tool_executor=_executor(["read", "write", "search"]))
     cap.get_toolset()
     assert sorted(called) == ["read", "search", "write"]
@@ -61,7 +61,7 @@ def test_get_toolset_allow_filters_to_whitelist(monkeypatch):
     called = []
     orig = mod._make_named_tool
     monkeypatch.setattr(mod, "_make_named_tool",
-                        lambda ex, pf, n, d, p: (called.append(n) or orig(ex, pf, n, d, p)))
+                        lambda ex, pf, n, d, p, sid="", aid="": (called.append(n) or orig(ex, pf, n, d, p, sid, aid)))
     cap = ToolBridgeCapability(
         tool_executor=_executor(["read", "write", "search"]), tool_allow=["read"],
     )
@@ -74,7 +74,7 @@ def test_get_toolset_deny_hides_blacklisted(monkeypatch):
     called = []
     orig = mod._make_named_tool
     monkeypatch.setattr(mod, "_make_named_tool",
-                        lambda ex, pf, n, d, p: (called.append(n) or orig(ex, pf, n, d, p)))
+                        lambda ex, pf, n, d, p, sid="", aid="": (called.append(n) or orig(ex, pf, n, d, p, sid, aid)))
     cap = ToolBridgeCapability(
         tool_executor=_executor(["read", "write", "search"]), tool_deny=["write"],
     )

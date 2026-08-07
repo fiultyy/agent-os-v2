@@ -19,6 +19,7 @@ background-connects + maps events → observe /ws/ingest.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import copy
@@ -1038,6 +1039,13 @@ async def fork_session(
         src_agent_id = rec.get("spec_id")
         src_messages = rec.get("messages") or []
 
+        # P2-3: fork 锚(fork 时刻 parent 的 message 量 + 内容指纹)→ observe 锚定 child
+        # 分支起点。repr→sha256[:16]:确定性 + 避免巨 message list 全量 hash 开销(只取指纹)。
+        _anchor = {
+            "messages_count": len(src_messages),
+            "messages_hash": hashlib.sha256(repr(src_messages).encode()).hexdigest()[:16],
+        }
+
         # fan-out targets:空 → 单 first_message(向后兼容);非空 → 每 target 一 fork(同父克隆)。
         targets = req.targets or [ForkTarget(first_message=req.first_message)]
         forks: List[Dict[str, Any]] = []
@@ -1067,6 +1075,7 @@ async def fork_session(
                         "agent-os-v2", new_rec.get("harness_id", ""),
                         new_sid, branch_id=new_sid, parent_branch_id=source,
                         agent_id=src_agent_id or "",
+                        parent_context_anchor=_anchor,
                     ))
                 except Exception:
                     logger.warning("branch_created emit failed for %s", new_sid)
@@ -1103,7 +1112,10 @@ async def fork_session(
             "native_sid": new_sid,   # fork 直接产原生 UUID → ext = native
             "cwd": cwd or None,
         }
-        _store.create(new_sid, harness_type, native_sid=new_sid, cwd=cwd or None)
+        # P2-3: cc fork lineage —— native fork 已传 parent_session_id,cc fork 漏了。
+        # 补 source 让 observe fork 树能链 cc 分支(cc fork 原生 UUID = ext 可链)。
+        _store.create(new_sid, harness_type, native_sid=new_sid, cwd=cwd or None,
+                      parent_session_id=source)
         return {"new_session_id": new_sid, "source": source,
                 "forked": True, "detail": r}
 

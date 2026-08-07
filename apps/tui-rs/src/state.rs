@@ -71,6 +71,10 @@ pub struct ObserveEvent {
     /// drain_ws 据 event_id 去重。serde default="" 兼容旧数据(空不过滤)。
     #[serde(default)]
     pub event_id: String,
+    /// P2-2: agent 标识(D 模型埋点顶层 agent_id;native main / wf sub / a2a consumed 各异)。
+    /// observe REST 顶层 agent_id(harness events.py _base 加键)。空=旧数据/未埋点。
+    #[serde(default)]
+    pub agent_id: String,
 }
 #[derive(Deserialize)]
 struct EventsResp {
@@ -3333,14 +3337,14 @@ mod tests {
         app.sync_orch_selection();
 
         // tick_started(c1)→ Running。
-        let ev_started = ObserveEvent { event_type: "tick_started".into(), tick_id: "t1".into(), harness_id: "h".into(), data: HashMap::new(), event_id: "e1".into() };
+        let ev_started = ObserveEvent { event_type: "tick_started".into(), tick_id: "t1".into(), harness_id: "h".into(), data: HashMap::new(), event_id: "e1".into() , agent_id: String::new()};
         app.apply_orch_tree_event("c1", &ev_started);
         assert_eq!(app.fork_tree.nodes.get("c1").unwrap().state, NodeState::Running);
 
         // tick_completed(c1)→ Done。
         let mut data = HashMap::new();
         data.insert("status".into(), serde_json::json!("success"));
-        let ev_done = ObserveEvent { event_type: "tick_completed".into(), tick_id: "t2".into(), harness_id: "h".into(), data, event_id: "e2".into() };
+        let ev_done = ObserveEvent { event_type: "tick_completed".into(), tick_id: "t2".into(), harness_id: "h".into(), data, event_id: "e2".into() , agent_id: String::new()};
         app.apply_orch_tree_event("c1", &ev_done);
         assert_eq!(app.fork_tree.nodes.get("c1").unwrap().state, NodeState::Done);
         // 选中投影同步(光标在 c1)。
@@ -3678,6 +3682,7 @@ mod tests {
                 d
             },
             event_id: String::new(),
+            agent_id: String::new(),
         };
         app.apply_flow_event("flow_test1", &ev);
         let tf = &app.flows[0];
@@ -3710,6 +3715,7 @@ mod tests {
                 d
             },
             event_id: String::new(),
+            agent_id: String::new(),
         };
         app.apply_flow_event("flow_test2", &ev);
         assert_eq!(app.flows[0].status.as_ref().unwrap().status, "completed");
@@ -3734,7 +3740,7 @@ mod tests {
             tick_id: "t1".to_string(),
             harness_id: harness_id.to_string(),
             data: HashMap::new(),
-            event_id: id.to_string(),
+            event_id: id.to_string(), agent_id: String::new(),
         }
     }
 
@@ -3798,7 +3804,7 @@ mod tests {
                     tick_id: "t1".to_string(),
                     harness_id: "h1".to_string(),
                     data,
-                    event_id: "".to_string(),
+                    event_id: "".to_string(), agent_id: String::new(),
                 },
             }).unwrap();
         }
@@ -3830,7 +3836,7 @@ mod tests {
                 tick_id: "t1".to_string(),
                 harness_id: "h1".to_string(),
                 data: HashMap::new(),
-                event_id: "e1".to_string(),
+                event_id: "e1".to_string(), agent_id: String::new(),
             },
         }).unwrap();
         app.drain_ws();
@@ -4591,7 +4597,7 @@ mod tests {
             tick_id: "t1".to_string(),
             harness_id: "h".to_string(),
             data,
-            event_id: "e1".to_string(),
+            event_id: "e1".to_string(), agent_id: String::new(),
         };
         tx.send(WsMsg::Event { key: key.clone(), ev }).unwrap();
         app.drain_ws();

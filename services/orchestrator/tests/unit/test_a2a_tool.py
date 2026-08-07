@@ -129,7 +129,7 @@ class TestRuntimePrefixedName:
         import unittest.mock as _um
         with _um.patch.object(
             mod, "_make_named_tool",
-            lambda ex, pf, n, d, p: (kept.append(n) or orig(ex, pf, n, d, p))):
+            lambda ex, pf, n, d, p, sid="", aid="": (kept.append(n) or orig(ex, pf, n, d, p, sid, aid))):
             # allow
             cap_allow = ToolBridgeCapability(
                 tool_executor=_executor_with_a2a_call(), tool_allow=["a2a_call"])
@@ -139,7 +139,7 @@ class TestRuntimePrefixedName:
         kept2 = []
         with _um.patch.object(
             mod, "_make_named_tool",
-            lambda ex, pf, n, d, p: (kept2.append(n) or orig(ex, pf, n, d, p))):
+            lambda ex, pf, n, d, p, sid="", aid="": (kept2.append(n) or orig(ex, pf, n, d, p, sid, aid))):
             cap_deny = ToolBridgeCapability(
                 tool_executor=_executor_with_a2a_call(), tool_deny=["a2a_call"])
             cap_deny.get_toolset()

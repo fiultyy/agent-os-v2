@@ -31,7 +31,7 @@ class _StubExecutor:
     def list_tools(self):  # registry.list_tools() 接口
         return self._tools
 
-    async def execute(self, name, args):
+    async def execute(self, name, args, _ctx=None):
         if self._raises:
             raise self._raises
         return self._result

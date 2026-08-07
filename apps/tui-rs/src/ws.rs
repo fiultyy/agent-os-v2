@@ -76,6 +76,9 @@ struct WsPayload {
     data: HashMap<String, serde_json::Value>,
     #[serde(default)]
     event_id: String,
+    /// P2-2: WS payload 顶层 agent_id(对齐 ObserveEvent.agent_id)。
+    #[serde(default)]
+    agent_id: String,
 }
 
 impl From<WsPayload> for ObserveEvent {
@@ -86,6 +89,7 @@ impl From<WsPayload> for ObserveEvent {
             harness_id: p.harness_id,
             data: p.data,
             event_id: p.event_id,
+            agent_id: p.agent_id,
         }
     }
 }

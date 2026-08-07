@@ -312,6 +312,9 @@ async def execute(req: ExecuteRequest) -> StreamingResponse:
             ),
             ToolBridgeCapability(
                 tool_executor=_state.tool_executor, pitfail_registry=_state.pitfail_registry,
+                # P2-1: 透传父 turn session_id/agent_id → workflow_run_handler(_ctx) →
+                # ctx.session_id 真值(替代 "workflow" 常量),observe 正确分组 workflow 事件。
+                turn_session_id=session_id, turn_agent_id=req.agent_id,
             ),
             GuardrailCapability(guardrail=Guardrail()),
         ],

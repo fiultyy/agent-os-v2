@@ -234,6 +234,7 @@ async def workflow_run_handler(
     fan_in: str = "list",
     timeout_per_node_ms: int = 120000,
     concurrency: int = 8,
+    _ctx: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """P0 入口 — workflow_run 工具薄桥。
 
@@ -267,16 +268,15 @@ async def workflow_run_handler(
         logger.warning("workflow_run_handler: invalid nodes spec: %s", exc)
         return {"status": "error", "error": "invalid nodes spec"}
 
-    # ── ctx 构造(P0 默认 session_id / agent_id_prefix,见模块 docstring)──
-    # F5:journal 通电(此前 ctx.journal 恒 None 致 W-P2-4 双写全 no-op,resume
-    # 不可用)。_build_journal fire-and-forget 降级 None 时,engine 侧 no-op,run 不崩。
-    # F6 worktree 接通:isolation='worktree' 真生效(此前 ctx.worktree_manager 恒 None 致
-    # engine.py:363 use_worktree 短路)。base=Path.cwd()=repo root;async with 兜底释放
-    # 未 release 的 worktree(__aexit__ 遍历 _refs,防泄漏残留)。
+    # ── ctx 构造(P2-1:session_id 从 _ctx 取父 turn 真值,替代 "workflow" 常量)──
+    # _ctx 由 ToolBridgeCapability(主 turn chat.py 注入 turn_session_id)经 executor
+    # introspect 透传(模型不可见,不进 schema)。空(wf 子 agent / 旧实例化点)→ "workflow"
+    # 默认(向后兼容)。F5 journal / F6 worktree 通电见模块 docstring。
     run_id = f"wf_{uuid.uuid4().hex[:12]}"
     wt_manager = WorktreeManager(base=Path.cwd())
+    turn_session_id = (_ctx or {}).get("session_id") or "workflow"
     ctx = WorkflowContext(
-        session_id="workflow",
+        session_id=turn_session_id,
         agent_id_prefix="wf",
         run_id=run_id,
         concurrency=concurrency,
@@ -321,6 +321,7 @@ async def workflow_loop_handler(
     schema_ref: str | None = None,
     seen_key_fn: str = "content_hash",
     dry_limit: int = 2,
+    _ctx: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """P1 入口 — workflow_loop 工具薄桥(design §2.2.3)。
 
@@ -345,11 +346,12 @@ async def workflow_loop_handler(
         logger.warning("workflow_loop_handler: invalid loop spec: %s", exc)
         return {"status": "error", "error": "invalid loop spec"}
 
-    # ── ctx 构造(复用 _build_journal F5 通电 + F6 worktree 接通)──
+    # ── ctx 构造(P2-1:session_id 从 _ctx 取父 turn 真值;复用 F5/F6 通电)──
     run_id = f"wfl_{uuid.uuid4().hex[:12]}"
     wt_manager = WorktreeManager(base=Path.cwd())
+    turn_session_id = (_ctx or {}).get("session_id") or "workflow"
     ctx = WorkflowContext(
-        session_id="workflow",
+        session_id=turn_session_id,
         agent_id_prefix="wf",
         run_id=run_id,
         concurrency=1,  # loop 是单 node 串行(finder 每轮一次),无 fan-out

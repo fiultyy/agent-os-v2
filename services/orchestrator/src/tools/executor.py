@@ -13,11 +13,33 @@ firing — tests that don't depend on guardrail blocking stay unchanged.
 """
 
 import asyncio
+import inspect
 from typing import Any
 
 from src.memory.event_bus import EventType, MemoryEventBus
 from src.memory.hooks import ToolContext
 from src.tools.registry import ToolRegistry
+
+
+# P2-1: 少数 handler(workflow_run_handler)声明 ``_ctx`` kw 接收父 turn 上下文
+# (session_id/agent_id)。introspect 签名才透传,所有不带 ``_ctx`` 的 handler 零影响
+# (向后兼容 —— executor 是通用 tool 执行器,跑 registry 全量 tool)。
+# ponytail: 缓存避免每 tool call 重复 signature 反射;handler 函数对象可哈希作 key。
+_accepts_ctx_cache: dict[Any, bool] = {}
+
+
+def _handler_accepts_ctx(handler: Any) -> bool:
+    """handler 签名是否含 ``_ctx`` 参数。缓存 + 异常降级 False(绝不阻断 tool 执行)。"""
+    cached = _accepts_ctx_cache.get(handler)
+    if cached is not None:
+        return cached
+    try:
+        sig = inspect.signature(handler)
+        accepts = "_ctx" in sig.parameters
+    except (ValueError, TypeError):  # builtin/不可内省 → 安全降级不透传
+        accepts = False
+    _accepts_ctx_cache[handler] = accepts
+    return accepts
 
 
 class ToolExecutor:
@@ -58,6 +80,7 @@ class ToolExecutor:
         tool_name: str,
         arguments: dict[str, Any],
         timeout: float = 30.0,
+        _ctx: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Execute a tool call and return the result.
 
@@ -72,6 +95,9 @@ class ToolExecutor:
             tool_name: Name of the registered tool.
             arguments: Tool call arguments.
             timeout: Execution timeout in seconds.
+            _ctx: P2-1 父 turn 上下文({session_id,agent_id,...}),仅透传给声明
+                ``_ctx`` kw 的 handler(workflow_run_handler);ToolBridgeCapability 从主
+                turn 实例字段注入,模型不可见(不进 tool schema)。
 
         Returns:
             Tool execution result with status and output.
@@ -102,7 +128,7 @@ class ToolExecutor:
         handler = tool_entry["handler"]
         try:
             result = await asyncio.wait_for(
-                self._invoke_handler(handler, arguments),
+                self._invoke_handler(handler, arguments, _ctx),
                 timeout=timeout,
             )
         except asyncio.TimeoutError as exc:
@@ -156,9 +182,17 @@ class ToolExecutor:
         self,
         handler: Any,
         arguments: dict[str, Any],
+        _ctx: dict[str, Any] | None = None,
     ) -> Any:
-        """Invoke a tool handler, supporting both sync and async callables."""
-        result = handler(**arguments)
+        """Invoke a tool handler, supporting both sync and async callables.
+
+        P2-1: handler 声明 ``_ctx`` kw 时透传父 turn 上下文,其余 handler 零影响
+        (``_handler_accepts_ctx`` introspect 跳过)。_ctx 不进模型可见 arguments。
+        """
+        kwargs = dict(arguments)
+        if _ctx is not None and _handler_accepts_ctx(handler):
+            kwargs["_ctx"] = _ctx
+        result = handler(**kwargs)
         if asyncio.iscoroutine(result):
             result = await result
         return result

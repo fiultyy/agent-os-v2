@@ -411,7 +411,7 @@ mod tests {
             tick_id: tick.to_string(),
             harness_id: "h".to_string(),
             data: d,
-            event_id: String::new(),
+            event_id: String::new(), agent_id: String::new(),
         }
     }
 

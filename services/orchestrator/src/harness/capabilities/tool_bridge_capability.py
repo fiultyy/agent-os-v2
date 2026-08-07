@@ -64,6 +64,13 @@ class ToolBridgeCapability(AbstractCapability[Any]):
     # 子代理/chat/workflow 实例化不传→全量。
     tool_allow: list[str] | None = None
     tool_deny: list[str] | None = None
+    # P2-1: 父 turn 上下文(session_id/agent_id),per-session 稳定(主 turn chat.py 实例化
+    # 注入)。透传给声明 ``_ctx`` kw 的 handler(workflow_run_handler)→ workflow run 用真
+    # session_id 分组 observe 事件(替代 v2_workflow.py 的 "workflow" 常量)。其余实例化点
+    # (wf 子 agent engine.py:327 / assemble routes.py:405 / agent_runner)不传 → 空 →
+    # 向后兼容(workflow_run_handler 走 "workflow" 默认)。
+    turn_session_id: str = ""
+    turn_agent_id: str = ""
 
     def get_instructions(self) -> str:
         # V1:tool 清单不再进 system prompt(ADR L27 — name/desc/schema 各自独立字段
@@ -88,7 +95,9 @@ class ToolBridgeCapability(AbstractCapability[Any]):
             t = by_name[name]
             desc = t.get("description") or ""
             params = t.get("parameters") or {"type": "object", "properties": {}}
-            ts.add_tool(_make_named_tool(executor, self.pitfail_registry, name, desc, params))
+            ts.add_tool(_make_named_tool(
+                executor, self.pitfail_registry, name, desc, params,
+                self.turn_session_id, self.turn_agent_id))
         return ts.prefixed("v2")
 
     @staticmethod
@@ -133,15 +142,19 @@ class ToolBridgeCapability(AbstractCapability[Any]):
 
 async def _execute_via_registry(
     executor: Any, pitfail: Any, tool_name: str, arguments: dict,
+    ctx_payload: dict | None = None,
 ) -> str:
     """execute_tool 核心逻辑(抽 module-level 便单测,不依赖 pydantic-ai Tool wrapper)。
 
     success → str(output);失败状态/异常 → pitfall 计数 + ``[Tool error]`` 串。
+
+    P2-1: ``ctx_payload`` 透传给 ``executor.execute(_ctx=...)``,仅 workflow_run_handler
+    等声明 ``_ctx`` kw 的 handler 接收(executor introspect 跳过其余)。
     """
     if executor is None:
         return "[Tool error] tool_executor unavailable"
     try:
-        result = await executor.execute(tool_name, arguments or {})
+        result = await executor.execute(tool_name, arguments or {}, _ctx=ctx_payload)
     except Exception as exc:
         ToolBridgeCapability._record_pitfall(pitfail, tool_name, str(exc))
         return f"[Tool error] {tool_name}: {exc}"
@@ -156,6 +169,7 @@ async def _execute_via_registry(
 
 def _make_named_tool(
     executor: Any, pitfail: Any, name: str, description: str, parameters: dict,
+    turn_session_id: str = "", turn_agent_id: str = "",
 ) -> Tool[Any]:
     """V1:为 registry 单个 tool 造一个具名 pydantic-ai Tool(强 schema 路径 a)。
 
@@ -163,9 +177,16 @@ def _make_named_tool(
     ``parameters_json_schema``(any_schema validator 跳过 pydantic 校验,
     模型原样传 arguments dict)。每 tool 一独立字段进 tools[](ADR L27)。
     wrapper dispatch 到 ``_execute_via_registry``(P7 pitfall 计数语义零回归)。
+
+    P2-1: ``turn_session_id``/``turn_agent_id`` 从 ToolBridgeCapability 实例字段(主 turn
+    chat.py 注入)闭包进 ``_wrapper`` → ``ctx_payload`` → ``executor.execute(_ctx=...)``。
+    空 → ``ctx_payload=None``(向后兼容,等价改前行为)。
     """
     async def _wrapper(**arguments: Any) -> str:
-        return await _execute_via_registry(executor, pitfail, name, arguments)
+        ctx_payload = None
+        if turn_session_id or turn_agent_id:
+            ctx_payload = {"session_id": turn_session_id, "agent_id": turn_agent_id}
+        return await _execute_via_registry(executor, pitfail, name, arguments, ctx_payload)
 
     return Tool.from_schema(
         function=_wrapper,

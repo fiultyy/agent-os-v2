@@ -169,7 +169,15 @@ pub fn observe_lanes(evs: &[ObserveEvent]) -> Vec<Line<'static>> {
     let mut inst_order: Vec<String> = vec![];
     let mut by_inst: std::collections::HashMap<String, Vec<&ObserveEvent>> = std::collections::HashMap::new();
     for e in evs {
-        let key = if e.harness_id.is_empty() { "__nohid__".to_string() } else { e.harness_id.clone() };
+        // P2-2: 分轨 key 优先 agent_id(同 session 多 agent:main/wf/a2a 各一 lane),
+        // 空(旧数据/未埋点)→ fallback harness_id(实例,ADR-5 多 PTY)。
+        let key = if !e.agent_id.is_empty() {
+            e.agent_id.clone()
+        } else if !e.harness_id.is_empty() {
+            e.harness_id.clone()
+        } else {
+            "__nohid__".to_string()
+        };
         if !by_inst.contains_key(&key) {
             inst_order.push(key.clone());
         }
@@ -670,11 +678,18 @@ pub fn draw_stack(f: &mut Frame, area: Rect, app: &mut App) {
                     }
                     for e in evs {
                         let (tag, color, body) = event_log_parts(e);
-                        out.push(Line::from(vec![
+                        // P2-2: tag 后加 agent_id 色块(非空;区分同 session 谁在说话)。
+                        let mut spans = vec![
                             Span::styled(format!(" {} ", tag),
                                 Style::default().fg(Color::Black).bg(color).add_modifier(Modifier::BOLD)),
-                            Span::raw(format!(" {}", trunc(&body, 60))),
-                        ]));
+                        ];
+                        if !e.agent_id.is_empty() {
+                            spans.push(Span::styled(
+                                format!(" {} ", trunc(&e.agent_id, 12)),
+                                Style::default().fg(Color::Black).bg(DARK.accent2)));
+                        }
+                        spans.push(Span::raw(format!(" {}", trunc(&body, 60))));
+                        out.push(Line::from(spans));
                     }
                 }
                 None => out.push(Line::from(Span::styled(

@@ -174,3 +174,30 @@ def test_executor_has_no_hardcoded_guardrail_attribute():
     through the bus, not a direct ``self._guardrail.check`` call."""
     ex = ToolExecutor(ToolRegistry())
     assert not hasattr(ex, "_guardrail")
+
+
+# ── P2-1: _ctx 透传 introspect(workflow_run_handler session_id 真值)────
+
+
+def test_execute_passes_ctx_only_to_handlers_that_declare_it():
+    """P2-1: ``executor.execute(_ctx=...)`` 仅透传给签名声明 ``_ctx`` kw 的 handler;
+    其余 handler 零影响(``_handler_accepts_ctx`` introspect 跳过)。保护通用 executor
+    不炸非 workflow tool —— executor 跑 registry 全量 tool,_ctx 仅 workflow_run_handler 用。
+    """
+    received: dict = {}
+
+    async def h_with_ctx(a: int, _ctx: dict | None = None) -> int:
+        received["ctx"] = _ctx
+        return a
+
+    async def h_without_ctx(a: int) -> int:
+        received["plain"] = a
+        return a
+
+    ex = ToolExecutor(_registry(h_with_ctx))
+    _run(ex.execute("probe", {"a": 1}, _ctx={"session_id": "real-sid"}))
+    assert received["ctx"] == {"session_id": "real-sid"}
+
+    ex2 = ToolExecutor(_registry(h_without_ctx))
+    _run(ex2.execute("probe", {"a": 2}, _ctx={"session_id": "real-sid"}))
+    assert received["plain"] == 2  # 未收 _ctx,亦未炸(TypeError 会在这行前 raise)

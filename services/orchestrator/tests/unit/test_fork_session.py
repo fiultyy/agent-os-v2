@@ -296,6 +296,61 @@ def test_cc_fork_path_unbroken(store, monkeypatch):
     fake_cc.fork.assert_awaited_once()
 
 
+def test_native_fork_branch_created_carries_context_anchor(store, monkeypatch):
+    """P2-3: native fork emit 的 branch_created 含 parent_context_anchor
+    (messages_count + messages_hash)→ observe 锚定 child 分支起点。"""
+    import hashlib
+    src_msgs = [
+        ModelRequest(parts=[UserPromptPart(content="hello")]),
+        ModelResponse(parts=[TextPart(content="hi")]),
+    ]
+    src_sid = "src-anchor"
+    routes._sessions[routes._key("agent-os-v2", src_sid)] = _native_rec(
+        messages=src_msgs, spec_id="native")
+    store.create(src_sid, "agent-os-v2", native_sid=src_sid, agent_id="native")
+
+    new_recs = {}
+
+    async def fake_build(sid, messages=None, agent_id=None):
+        rec = _native_rec(messages=messages, spec_id=agent_id)
+        new_recs[sid] = rec
+        return rec
+    monkeypatch.setattr(routes, "_build_native_session", fake_build)
+
+    asyncio.run(routes.fork_session(
+        "agent-os-v2", routes.ForkReq(source_session_id=src_sid, first_message="x"),
+    ))
+    forked_sid = next(iter(new_recs))
+    ev = new_recs[forked_sid]["emitter"].emit.call_args.args[0]
+    assert ev["event_type"] == "branch_created"
+    anchor = ev["data"]["parent_context_anchor"]
+    assert anchor["messages_count"] == 2
+    # 确定性指纹:同 messages → 同 sha256[:16]
+    assert anchor["messages_hash"] == hashlib.sha256(
+        repr(src_msgs).encode()).hexdigest()[:16]
+
+
+def test_cc_fork_sets_parent_session_id(store, monkeypatch):
+    """P2-3: cc fork 落库 parent_session_id == source(native fork 已传,cc fork 此前漏;
+    observe fork 树能链 cc 分支)。"""
+    src_sid = "cc-src-lineage"
+    fake_cc = MagicMock()
+    fake_cc.fork = AsyncMock(return_value={"new_sid": "cc-new-lineage"})
+    fake_cc.cwd = "/tmp"
+    routes._sessions[routes._key("claude-code", src_sid)] = {
+        "client": fake_cc, "session_id": src_sid, "harness_type": "claude-code",
+        "agent_id": None, "native_sid": src_sid, "cwd": "/tmp",
+    }
+    store.create(src_sid, "claude-code", native_sid=src_sid, cwd="/tmp")
+    monkeypatch.setattr(routes, "_create_claude", AsyncMock(return_value=MagicMock()))
+
+    r = asyncio.run(routes.fork_session(
+        "claude-code", routes.ForkReq(source_session_id=src_sid, first_message="hi"),
+    ))
+    row = store.get("claude-code", r["new_session_id"])
+    assert row["parent_session_id"] == src_sid
+
+
 def test_claw_fork_still_501_stub(store, monkeypatch):
     """claw fork 仍是 ADR-4 stub(forked=False)→ 501,未碰。"""
     src_sid = "agent:main:main"
