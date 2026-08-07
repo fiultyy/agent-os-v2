@@ -21,10 +21,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 from typing import Any
 
 import adapter
 import autodream as autodream_mod
+import bootstrap
 import consolidate as consolidate_mod
 import recall as recall_mod
 import store
@@ -157,6 +159,21 @@ def autodream(session_id: str, transcript_path: str, use_regex: bool = False) ->
     return autodream_mod.autodream(session_id, transcript_path, providers=providers)
 
 
+# ── init-memory (bootstrap) ─────────────────────────────────────────
+
+def init_memory(memory_dir: str | None = None, use_regex: bool = False) -> dict[str, int]:
+    """Seed KG from CC memory .md files (ADR-12).
+
+    Thin wrapper over ``bootstrap.init_memory``. ``memory_dir=None`` → default
+    ~/.claude/projects/-home-yy--claude/memory/ (本环境 CC scope). ``use_regex``
+    forces regex path (调试/fallback); default LLM 蝴蝶翼.
+    """
+    if memory_dir is None:
+        memory_dir = str(Path.home() / ".claude" / "projects" / "-home-yy--claude" / "memory")
+    providers = [] if use_regex else None
+    return bootstrap.init_memory(memory_dir, providers=providers)
+
+
 # ── argv entry ──────────────────────────────────────────────────────
 
 def _main(argv: list[str] | None = None) -> int:
@@ -191,6 +208,16 @@ def _main(argv: list[str] | None = None) -> int:
         help="强制 regex 抽取(调试/fallback, 默认 LLM 蝴蝶翼 ADR-5b)",
     )
 
+    initmem = sub.add_parser("init-memory", help="seed KG from CC memory .md (ADR-12)")
+    initmem.add_argument(
+        "--memory-dir", dest="memory_dir", default=None,
+        help="CC memory dir (默认 ~/.claude/projects/-home-yy--claude/memory/)",
+    )
+    initmem.add_argument(
+        "--regex", action="store_true",
+        help="强制 regex 抽取(调试/fallback, 默认 LLM 蝴蝶翼)",
+    )
+
     args = p.parse_args(argv)
     if args.cmd == "ingest":
         print(json.dumps(
@@ -203,6 +230,8 @@ def _main(argv: list[str] | None = None) -> int:
         print(json.dumps(consolidate()))
     elif args.cmd == "autodream":
         print(json.dumps(autodream(args.session, args.transcript, use_regex=args.regex), ensure_ascii=False))
+    elif args.cmd == "init-memory":
+        print(json.dumps(init_memory(args.memory_dir, use_regex=args.regex), ensure_ascii=False))
     return 0
 
 

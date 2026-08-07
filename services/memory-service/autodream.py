@@ -108,7 +108,7 @@ def _has_active_for_predicate(subject_id: str, predicate: str) -> list[dict[str,
     ]
 
 
-def autodream(session_id: str, transcript_path: str, providers: list | None = None) -> dict[str, int]:
+def autodream(session_id: str, transcript_path: str, providers: list | None = None, fact_type: str = "stable") -> dict[str, int]:
     """Incrementally整理 a session transcript into the KG (ADR-10).
 
     Pipeline (ADR-10 Decision (a)/(b)/(c)):
@@ -194,6 +194,7 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
                 predicate=predicate,
                 value=value,
                 extractor=ext_label,
+                fact_type=fact_type,
                 source_refs=[src_ref] if src_ref else [],
                 seen_sessions=[session_id] if session_id else [],
             )
@@ -209,6 +210,7 @@ def autodream(session_id: str, transcript_path: str, providers: list | None = No
             predicate=predicate,
             value=value,
             extractor=ext_label,
+            fact_type=fact_type,
             source_refs=[src_ref] if src_ref else [],
             seen_sessions=[session_id] if session_id else [],
         )
