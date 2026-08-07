@@ -40,6 +40,18 @@ def fresh_db(tmp_path):
     yield tmp_path
 
 
+@pytest.fixture(autouse=True)
+def _force_regex_default(monkeypatch):
+    """测试默认强制 regex(确定性, 不依赖 CCR); LLM 路径由显式 mock 测试覆盖。
+
+    autodream 默认 providers=None → adapter.default_providers() → LLM(CCR)。
+    patch 返 [] → adapter fallback regex(ADR-5 upheld)。LLM mock 测试显式传
+    providers=[mock] 绕过 default_providers, 不受此 patch 影响。
+    """
+    import adapter
+    monkeypatch.setattr(adapter, "default_providers", lambda: [])
+
+
 def _write_transcript(tmp_path, records):
     """Write a list of CC transcript records as JSONL, return the path."""
     tp = tmp_path / "transcript.jsonl"
@@ -159,6 +171,39 @@ def test_idempotent_same_transcript_second_call_all_noop(fresh_db):
     assert r2["updated"] == 0 and r2["deleted"] == 0, r2
 
 
+# ── LLM 路径(mock provider, ADR-11)──────────────────────────────────
+
+class _FakeLLMProvider:
+    """Deterministic LLM stand-in: always surfaces one fixed fact.
+
+    Exercises the autodream→adapter LLM path without a real CCR call.
+    _is_reachable: no base_url → extract_facts("") probe (returns the fixed
+    fact, no stub sentinel) → reachable. adapter fans out 3 wings, all return
+    the same triple ⇒ voted consensus (confidence 0.7 ≥ floor) ⇒ ext_label llm.
+    """
+
+    def extract_facts(self, text):
+        from llm_provider import Extraction, FactOut
+        return Extraction(
+            facts=[FactOut("Alice", "uses", "Python")],
+            confidence=0.7,
+            source_meta={"provider": "fake-llm"},
+        )
+
+
+def test_add_via_llm_mock_provider(fresh_db):
+    """ADR-11: autodream(providers=[mock]) → adapter LLM path → ADD fact with
+    extractor='llm' (not 'regex'). Mock avoids real CCR dependency."""
+    tp = _write_transcript(fresh_db, [_user("任何文本, mock 不看内容")])
+    r = autodream.autodream("s1", tp, providers=[_FakeLLMProvider()])
+    assert r["added"] >= 1, r
+    subj = store.find_entities_by_name("Alice")
+    assert subj, "LLM-extracted subject entity created"
+    facts = store.get_facts_by_subject(subj[0]["id"], status="active")
+    the_fact = next(f for f in facts if f["predicate"] == "uses" and f["value"] == "Python")
+    assert the_fact["extractor"] == "llm", the_fact  # ADR-11: LLM path labeled
+
+
 # ── cli seam ─────────────────────────────────────────────────────────
 
 def test_cli_autodream_subcommand(fresh_db, monkeypatch):
@@ -171,6 +216,19 @@ def test_cli_autodream_subcommand(fresh_db, monkeypatch):
     buf = io.StringIO()
     monkeypatch.setattr(sys, "stdout", buf)
     rc = cli._main(["autodream", "--session", "s1", "--transcript", tp])
+    assert rc == 0
+    out = json.loads(buf.getvalue())
+    assert out["added"] >= 1, out
+
+
+def test_cli_autodream_regex_flag(fresh_db, monkeypatch):
+    """cli autodream --regex forces regex path (use_regex=True → providers=[]).
+    Explicit at the cli seam (default LLM via autouse-patched default_providers)."""
+    tp = _write_transcript(fresh_db, [_user("用户使用 rust")])
+    import io
+    buf = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", buf)
+    rc = cli._main(["autodream", "--session", "s1", "--transcript", tp, "--regex"])
     assert rc == 0
     out = json.loads(buf.getvalue())
     assert out["added"] >= 1, out
