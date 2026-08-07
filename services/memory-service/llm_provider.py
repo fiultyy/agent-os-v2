@@ -20,6 +20,8 @@ is the seam, new providers slot in by implementing ``extract_facts``.
 from __future__ import annotations
 
 import json
+import os
+import pathlib
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -128,6 +130,71 @@ class CCRProvider:
         return Extraction(
             facts=facts, confidence=conf,
             source_meta={"provider": "ccr", "model": self.model})
+
+
+# ── ZhipuAnthropicProvider — 智谱直连 Anthropic 协议(glm-5-turbo, coding plan)──
+
+@dataclass
+class ZhipuAnthropicProvider:
+    """智谱 Anthropic 协议直连(不经 CCR localhost:3456 中转), model glm-5-turbo。
+
+    base_url https://open.bigmodel.cn/api/anthropic, Anthropic Messages 格式
+    (/v1/messages, x-api-key + anthropic-version)。api_key 从 env ZHIPU_API_KEY
+    或 CCR config(~/.claude-code-router/config.json Providers zhipu-anthropic)读
+    (key 不进 git)。比 CCRProvider 少一跳(直连智谱)。国内服务(open.bigmodel.cn)
+    → ProxyHandler({}) 禁境外代理直连(host-network-proxy 教训)。Failures → empty conf 0.0。
+    """
+    base_url: str = "https://open.bigmodel.cn/api/anthropic"
+    model: str = "glm-5-turbo"
+    api_key: str = ""  # 空 → _load_zhipu_key 从 env/CCR config 读
+    timeout: float = 30.0
+
+    def extract_facts(self, text: str) -> Extraction:
+        key = self.api_key or _load_zhipu_key()
+        if not key:
+            return Extraction(confidence=0.0, source_meta={
+                "provider": "zhipu", "error": "no api_key (set ZHIPU_API_KEY or CCR config)"})
+        body = json.dumps({
+            "model": self.model, "max_tokens": 512,
+            "messages": [{"role": "user", "content": _EXTRACT_PROMPT + text}],
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.base_url}/v1/messages", data=body,
+            headers={"Content-Type": "application/json",
+                     "x-api-key": key, "anthropic-version": "2023-06-01"},
+            method="POST")
+        try:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(req, timeout=self.timeout) as resp:
+                raw = resp.read().decode("utf-8", "replace")
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+            return Extraction(confidence=0.0, source_meta={
+                "provider": "zhipu", "error": f"network: {e!r}"})
+        content = _extract_text(raw)
+        if content is None:
+            return Extraction(confidence=0.0, source_meta={
+                "provider": "zhipu", "model": self.model,
+                "error": "no content block", "raw": raw[:200]})
+        facts = _parse_facts(content)
+        conf = 0.7 if facts else 0.0
+        return Extraction(facts=facts, confidence=conf,
+                          source_meta={"provider": "zhipu", "model": self.model})
+
+
+def _load_zhipu_key() -> str:
+    """智谱 API key: env ZHIPU_API_KEY 优先, 否则 CCR config
+    (~/.claude-code-router/config.json Providers zhipu-anthropic.api_key)。空 if 都无。"""
+    key = os.environ.get("ZHIPU_API_KEY", "")
+    if key:
+        return key
+    try:
+        cfg = pathlib.Path.home() / ".claude-code-router" / "config.json"
+        for prov in json.loads(cfg.read_text(encoding="utf-8")).get("Providers", []):
+            if prov.get("name") == "zhipu-anthropic":
+                return prov.get("api_key", "") or ""
+    except (OSError, ValueError, KeyError):
+        pass
+    return ""
 
 
 def _extract_text(raw: str) -> str | None:
