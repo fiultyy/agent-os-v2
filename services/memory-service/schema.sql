@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS fact (
     access_count    INTEGER NOT NULL DEFAULT 0,     -- recall hit count
     last_accessed_at TEXT,                          -- recall refresh timestamp (drives lif_recency)
     seen_sessions   TEXT NOT NULL DEFAULT '[]',     -- JSON array: sessions that recalled this fact (drives lif_spread)
+    source_cwd    TEXT,                             -- ADR-14: 来源 cwd(b 方案, 跨 cwd 隔离; NULL=老数据/未知, recall --cwd 过滤含 NULL)
     created_at    TEXT NOT NULL,
     FOREIGN KEY (subject_id) REFERENCES entity(id),
     FOREIGN KEY (object_id)  REFERENCES entity(id),
@@ -50,3 +51,4 @@ CREATE INDEX IF NOT EXISTS idx_fact_subject ON fact(subject_id);
 CREATE INDEX IF NOT EXISTS idx_fact_object  ON fact(object_id);
 CREATE INDEX IF NOT EXISTS idx_fact_pred    ON fact(predicate);
 CREATE INDEX IF NOT EXISTS idx_fact_status  ON fact(status);
+CREATE INDEX IF NOT EXISTS idx_fact_source_cwd ON fact(source_cwd);  -- ADR-14 b 方案

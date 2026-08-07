@@ -103,6 +103,7 @@ def put_fact(
     access_count: int = 0,
     last_accessed_at: str | None = None,
     seen_sessions: list[str] | None = None,
+    source_cwd: str | None = None,
 ) -> str:
     """Insert a Fact (reified), return its id.
 
@@ -128,8 +129,8 @@ def put_fact(
             fact_type, LIF, original_lif, confidence, source_refs, extractor,
             status, supersedes_id, created_at,
             lif_freq, lif_recency, lif_spread, lif_coherence, lif_source,
-            access_count, last_accessed_at, seen_sessions)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            access_count, last_accessed_at, seen_sessions, source_cwd)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             fid, subject_id, predicate, object_id, value, valid_from, valid_to,
             fact_type, LIF, frozen_lif, confidence,
@@ -138,6 +139,7 @@ def put_fact(
             lif_freq, lif_recency, lif_spread, lif_coherence, lif_source,
             access_count, last_accessed_at,
             json.dumps(seen_sessions or [], ensure_ascii=False),
+            source_cwd,
         ),
     )
     conn.commit()
@@ -201,4 +203,5 @@ def _decode_fact(row: Any) -> dict[str, Any]:
         "access_count": row["access_count"],
         "last_accessed_at": row["last_accessed_at"],
         "seen_sessions": json.loads(row["seen_sessions"]) if row["seen_sessions"] else [],
+        "source_cwd": row["source_cwd"] if "source_cwd" in row.keys() else None,
     }

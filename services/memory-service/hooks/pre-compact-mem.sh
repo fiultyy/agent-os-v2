@@ -28,17 +28,19 @@ STDIN="$(cat 2>/dev/null || true)"
 # back to python3 if jq isn't installed; if neither, give up cleanly.
 TRANSCRIPT_PATH=""
 SESSION_ID=""
+CWD=""
 if command -v jq >/dev/null 2>&1; then
     TRANSCRIPT_PATH="$(printf '%s' "${STDIN}" | jq -r '.transcript_path // empty' 2>/dev/null || true)"
     SESSION_ID="$(printf '%s' "${STDIN}" | jq -r '.session_id // empty' 2>/dev/null || true)"
+    CWD="$(printf '%s' "${STDIN}" | jq -r '.cwd // empty' 2>/dev/null || true)"
 elif command -v python3 >/dev/null 2>&1; then
-    read -r TRANSCRIPT_PATH SESSION_ID <<EOF 2>/dev/null || true
+    read -r TRANSCRIPT_PATH SESSION_ID CWD <<EOF 2>/dev/null || true
 $(printf '%s' "${STDIN}" | python3 -c 'import json,sys
 try:
     d=json.load(sys.stdin)
 except Exception:
     d={}
-print(d.get("transcript_path","") or "", d.get("session_id","") or "")' 2>/dev/null || true)
+print(d.get("transcript_path","") or "", d.get("session_id","") or "", d.get("cwd","") or "")' 2>/dev/null || true)
 EOF
 fi
 
@@ -59,6 +61,7 @@ if [ -f "${CLI}" ] && [ -r "${TRANSCRIPT_PATH}" ]; then
         ( cd "${SVC_DIR}" && \
           python3 cli.py autodream --session "${SESSION_ID}" \
                                     --transcript "${TRANSCRIPT_PATH}" \
+                                    ${CWD:+--cwd "$CWD"} \
               >/dev/null 2>&1 || true )
     fi
 fi

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -37,7 +38,8 @@ from llm_provider import CCRProvider, LLMProvider
 
 def ingest(text: str, source_ref: str | None = None,
            fact_type: str = "stable",
-           providers: list[LLMProvider] | None = None) -> dict[str, Any]:
+           providers: list[LLMProvider] | None = None,
+           source_cwd: str | None = None) -> dict[str, Any]:
     """Extract facts from ``text`` via the adapter and persist them to the KG.
 
     The adapter runs butterfly-wing LLM extraction (ADR-5b) and falls back to
@@ -80,6 +82,7 @@ def ingest(text: str, source_ref: str | None = None,
             object_id=obj_id,
             extractor=ext_label,
             fact_type=fact_type,
+            source_cwd=source_cwd,
             source_refs=source_refs,
         )
         fact_ids.append(fid)
@@ -111,15 +114,15 @@ def _ensure_entity(name: str, cache: dict[str, str]) -> str | None:
 
 def recall(query: str, verbose: bool = False,
            session_id: str | None = None, boost: bool = True,
-           weights=None, use_vec: bool = False, delta: float | None = None) -> list[dict[str, Any]]:
+           weights=None, use_vec: bool = False, delta: float | None = None,
+           cwd: str | None = None) -> list[dict[str, Any]]:
     """Return Facts relevant to ``query``, ordered by α·match+β·centrality+γ·LIF(+δ·vec_sim use_vec) 加权排序 (ADR-4v2/ADR-13).
 
     Thin wrapper over ``recall.recall``. ``use_vec=True`` 启用向量召回融合
-    (ADR-13: query embed → cosine vs fact.value → vec_sim 维, 解 synonym/rewrite
-    字面盲区); 默认 off 不改 ADR-4v2 score。
+    (ADR-13); ``cwd`` ADR-14 b 方案: 过滤 source_cwd(含 NULL 老数据兼容)。
     """
     return recall_mod.recall(query, verbose=verbose, session_id=session_id,
-                             boost=boost, weights=weights, use_vec=use_vec, delta=delta)
+                             boost=boost, weights=weights, use_vec=use_vec, delta=delta, cwd=cwd)
 
 
 # ── consolidate ────────────────────────────────────────────────────
@@ -137,35 +140,27 @@ def consolidate() -> dict[str, int]:
 
 # ── autodream ──────────────────────────────────────────────────────
 
-def autodream(session_id: str, transcript_path: str, use_regex: bool = False) -> dict[str, int]:
+def autodream(session_id: str, transcript_path: str, use_regex: bool = False,
+              cwd: str | None = None) -> dict[str, int]:
     """PreCompact autoDream: session transcript raw→KG incremental (ADR-10/11).
 
-    Thin wrapper over ``autodream.autodream``. Reads the CC transcript JSONL,
-    reuses ``adapter.extract_facts()`` (ADR-5b 蝴蝶翼 LLM, ADR-5 regex fallback),
-    runs ``consolidate.consolidate()`` (decay+dedup 复用 v2/v3), then makes the
-    incremental decision per fact (ADD / UPDATE / DELETE / NOOP). Returns
-    ``{added, updated, deleted, noop}``.
-
-    ``use_regex=True`` forces the regex path (调试/fallback); default LLM.
-    Driven by the ``cli autodream`` subcommand from the PreCompact hook.
+    Thin wrapper over ``autodream.autodream``. ``cwd`` ADR-14 b 方案: 记 source_cwd
+    (fact 来源 cwd, recall --cwd 过滤)。Driven by ``cli autodream`` from PreCompact hook。
     """
     providers = [] if use_regex else None  # None → default_providers (LLM 蝴蝶翼)
-    return autodream_mod.autodream(session_id, transcript_path, providers=providers)
+    return autodream_mod.autodream(session_id, transcript_path, providers=providers, source_cwd=cwd)
 
 
 # ── init-memory (bootstrap) ─────────────────────────────────────────
 
-def init_memory(memory_dir: str | None = None, use_regex: bool = False) -> dict[str, int]:
-    """Seed KG from CC memory .md files (ADR-12).
-
-    Thin wrapper over ``bootstrap.init_memory``. ``memory_dir=None`` → default
-    ~/.claude/projects/-home-yy--claude/memory/ (本环境 CC scope). ``use_regex``
-    forces regex path (调试/fallback); default LLM 蝴蝶翼.
-    """
+def init_memory(memory_dir: str | None = None, use_regex: bool = False,
+                source_cwd: str | None = None) -> dict[str, int]:
+    """Seed KG from CC memory .md files (ADR-12). ``source_cwd`` ADR-14 记来源 cwd。
+    Thin wrapper over ``bootstrap.init_memory``."""
     if memory_dir is None:
         memory_dir = str(Path.home() / ".claude" / "projects" / "-home-yy--claude" / "memory")
     providers = [] if use_regex else None
-    return bootstrap.init_memory(memory_dir, providers=providers)
+    return bootstrap.init_memory(memory_dir, providers=providers, source_cwd=source_cwd)
 
 
 # ── argv entry ──────────────────────────────────────────────────────
@@ -190,6 +185,8 @@ def _main(argv: list[str] | None = None) -> int:
     rec.add_argument("--verbose", action="store_true")
     rec.add_argument("--vector", action="store_true",
                      help="启用向量召回融合(ADR-13, 解 synonym/rewrite 字面盲区)")
+    rec.add_argument("--cwd", dest="cwd", default=None,
+                     help="ADR-14 过滤 source_cwd(本 cwd fact + NULL 老数据; 默认全 cwd)")
 
     sub.add_parser("consolidate", help="dedup skeleton")
 
@@ -203,6 +200,10 @@ def _main(argv: list[str] | None = None) -> int:
         "--regex", action="store_true",
         help="强制 regex 抽取(调试/fallback, 默认 LLM 蝴蝶翼 ADR-5b)",
     )
+    dream.add_argument(
+        "--cwd", dest="cwd", default=None,
+        help="ADR-14 记 source_cwd(来源 cwd, 从 hook stdin cwd 传)",
+    )
 
     initmem = sub.add_parser("init-memory", help="seed KG from CC memory .md (ADR-12)")
     initmem.add_argument(
@@ -213,21 +214,26 @@ def _main(argv: list[str] | None = None) -> int:
         "--regex", action="store_true",
         help="强制 regex 抽取(调试/fallback, 默认 LLM 蝴蝶翼)",
     )
+    initmem.add_argument(
+        "--cwd", dest="cwd", default=None,
+        help="ADR-14 记 source_cwd(来源 cwd, 默认 NULL)",
+    )
 
     args = p.parse_args(argv)
     if args.cmd == "ingest":
         print(json.dumps(
-            ingest(args.text, source_ref=args.source, fact_type=args.fact_type),
+            ingest(args.text, source_ref=args.source, fact_type=args.fact_type,
+                   source_cwd=os.getcwd()),
             ensure_ascii=False,
         ))
     elif args.cmd == "recall":
-        print(json.dumps(recall(args.query, verbose=args.verbose, use_vec=args.vector), ensure_ascii=False, default=str))
+        print(json.dumps(recall(args.query, verbose=args.verbose, use_vec=args.vector, cwd=args.cwd), ensure_ascii=False, default=str))
     elif args.cmd == "consolidate":
         print(json.dumps(consolidate()))
     elif args.cmd == "autodream":
-        print(json.dumps(autodream(args.session, args.transcript, use_regex=args.regex), ensure_ascii=False))
+        print(json.dumps(autodream(args.session, args.transcript, use_regex=args.regex, cwd=args.cwd), ensure_ascii=False))
     elif args.cmd == "init-memory":
-        print(json.dumps(init_memory(args.memory_dir, use_regex=args.regex), ensure_ascii=False))
+        print(json.dumps(init_memory(args.memory_dir, use_regex=args.regex, source_cwd=args.cwd), ensure_ascii=False))
     return 0
 
 

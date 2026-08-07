@@ -25,6 +25,7 @@ def init_memory(
     memory_dir: str | Path,
     providers: list | None = None,
     fact_type: str = "permanent",
+    source_cwd: str | None = None,
 ) -> dict[str, int]:
     """Seed the KG from CC memory ``.md`` files (ADR-12).
 
@@ -60,6 +61,7 @@ def init_memory(
                 transcript_path=tmp.name,
                 providers=providers,
                 fact_type=fact_type,
+                source_cwd=source_cwd,
             )
         finally:
             Path(tmp.name).unlink(missing_ok=True)
