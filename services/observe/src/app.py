@@ -168,6 +168,26 @@ async def get_session_events(
     return {"events": events}
 
 
+@app.get("/sessions/{harness_type}/{session_id}/context")
+async def get_session_context(
+    harness_type: str,
+    session_id: str,
+    tick_id: str = Query(...),
+    agent_id: str = Query(""),
+):
+    """L3:重建某 tick 时的 agent context(system+tools+messages,D 模型 event=context 投影)。
+
+    system+tools 从 session 首 tick_started.data.context_snapshot(L1 emit);
+    messages 从 session 头到该 tick 的事件流累积重建。
+    """
+    if not event_store:
+        return JSONResponse(status_code=503, content={"error": "Service not ready"})
+    ctx = event_store.get_context_at(harness_type, session_id, tick_id, agent_id=agent_id)
+    if ctx is None:
+        return JSONResponse(status_code=404, content={"error": "tick not found"})
+    return ctx
+
+
 # ── WebSocket Endpoints ──────────────────────────────────────────────
 
 @app.websocket("/ws/ingest")

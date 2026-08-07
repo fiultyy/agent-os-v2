@@ -52,9 +52,36 @@ class ObserveCapability(AbstractCapability[Any]):
     # is the TARGET id (set by assemble_capabilities from spec_id), NOT the
     # caller's — so observe can tell whose turn each event belongs to.
     agent_id: str = ""
+    # L1(D 模型 event=context 投影):agent spec 注入,首次 tick_started 附 context_snapshot
+    # (system+tools policy+skills+model)进 data — session 级一次(spec 不变),observe 端
+    # get_context_at join snapshot + replay 重建完整 context(system/tools 固定,messages 累积)
+    spec: Any = None
+    _snapshot_emitted: bool = False
 
     def get_ordering(self) -> CapabilityOrdering:
         return CapabilityOrdering(position="outermost")
+
+    def _build_snapshot(self) -> dict:
+        """L1: 构造 context_snapshot(system+tools policy+skills+model)进 tick_started.data。
+
+        D 模型 event=context 投影:context = system(spec.instructions)+ tools(spec policy)
+        + messages(事件流重建)。snapshot 提供 system/tools(固定部分,spec 一次性源),
+        observe 端 get_context_at join snapshot + 事件流 replay 重建完整 context。
+        session 级发一次(spec 不变;_snapshot_emitted 守)。
+        """
+        spec = self.spec
+        if spec is None:
+            return {}
+        return {
+            "agent_id": self.agent_id,
+            "system": getattr(spec, "instructions", None) or "",
+            "tools_policy": {
+                "allow": list(getattr(spec.tools, "allow", None) or []),
+                "deny": list(getattr(spec.tools, "deny", None) or []),
+            },
+            "skills": list(getattr(spec, "skills", None) or []),
+            "model": getattr(spec, "model", None) or "",
+        }
 
     async def wrap_run_event_stream(self, ctx, *, stream):
         if self.emitter is None:
@@ -77,6 +104,9 @@ class ObserveCapability(AbstractCapability[Any]):
         # tick_completed 带最终完整 response 是 TUI 渲染主源。
         assistant_text = ""
         started = False  # 延迟到首个有内容 event 才 emit tick_started(见 async for)
+        # 跟踪当前 tick 最近未配对 tool_call 的 call_id — except/retry 时补 tool_result
+        # 保 call_id 配对(ponytail: 单值覆盖单 tool 多数;多 tool tick 重建侧兜底)
+        pending_call_id = ""
         # 用户消息优先(ctx.prompt);占位 [native run] 仅在 prompt 不可得时(避免 TUI 把
         # 占位当用户消息渲染 → 内容跟 cc/oc harness 不一致)。
         prompt = getattr(ctx, "prompt", None)
@@ -91,10 +121,13 @@ class ObserveCapability(AbstractCapability[Any]):
                         isinstance(event, PartDeltaEvent) and isinstance(event.delta, TextPartDelta)
                     )
                     if has_content:
-                        await self._emit(
-                            tick_started(HARNESS_TYPE, self.harness_id, self.session_id, tick_id, user_msg,
+                        ev = tick_started(HARNESS_TYPE, self.harness_id, self.session_id, tick_id, user_msg,
                                          agent_id=self.agent_id)
-                        )
+                        # L1: session 首 tick_started 附 context_snapshot(system/tools 投影)
+                        if not self._snapshot_emitted and self.spec is not None:
+                            ev["data"]["context_snapshot"] = self._build_snapshot()
+                            self._snapshot_emitted = True
+                        await self._emit(ev)
                         started = True
                 yield event  # forward 到主路径(always)
                 if isinstance(event, FunctionToolCallEvent):
@@ -106,12 +139,20 @@ class ObserveCapability(AbstractCapability[Any]):
                         tool_name=part.tool_name, arguments=args,
                         call_id=part.tool_call_id, agent_id=self.agent_id,
                     ))
+                    pending_call_id = part.tool_call_id
                 elif isinstance(event, FunctionToolResultEvent):
                     part = event.part
-                    # RetryPromptPart(ModelRetry 场景)非真 result — 不上报,避免
-                    # 把 retry 消息误报成成功 tool_result 污染 observe
+                    # RetryPromptPart(ModelRetry 场景)非真 result — 但 tool_call 已 emit,
+                    # 补一条 model_retry tool_result 保 call_id 配对(避免 orphan)
                     if getattr(part, "part_kind", None) == "retry-prompt":
-                        pass
+                        # 仅当本 tick 已 emit 过 tool_call(pending)才补 model_retry result
+                        # 保配对;无前置 tool_call 的纯 RetryPromptPart 保留原 skip(原行为)
+                        if pending_call_id:
+                            await self._emit(tool_result(
+                                HARNESS_TYPE, self.harness_id, self.session_id, tick_id,
+                                call_id=pending_call_id, error="model_retry", agent_id=self.agent_id,
+                            ))
+                        pending_call_id = ""
                     else:
                         # ToolReturnPart.outcome: success | failed | denied | interrupted
                         outcome = getattr(part, "outcome", "success")
@@ -123,6 +164,7 @@ class ObserveCapability(AbstractCapability[Any]):
                             error="" if ok else f"tool outcome: {outcome}",
                             agent_id=self.agent_id,
                         ))
+                        pending_call_id = ""
                 elif isinstance(event, PartDeltaEvent) and isinstance(event.delta, TextPartDelta):
                     assistant_text += event.delta.content_delta
                     await self._emit(token_delta(
@@ -136,8 +178,14 @@ class ObserveCapability(AbstractCapability[Any]):
                     status="success", response=assistant_text, tool_count=tool_count, agent_id=self.agent_id,
                 ))
         except Exception:
-            # 主路径异常:补 error tick 闭环(仅当 started),再传播(不吞主异常)
+            # 主路径异常:补 orphan tool_call 的 result(保 call_id 配对)+ error tick 闭环
             if started:
+                if pending_call_id:
+                    await self._emit(tool_result(
+                        HARNESS_TYPE, self.harness_id, self.session_id, tick_id,
+                        call_id=pending_call_id, error="tool execution aborted",
+                        agent_id=self.agent_id,
+                    ))
                 await self._emit(tick_completed(
                     HARNESS_TYPE, self.harness_id, self.session_id, tick_id,
                     status="error", response="native run failed", agent_id=self.agent_id,

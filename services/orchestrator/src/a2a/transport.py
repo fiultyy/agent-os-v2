@@ -119,6 +119,7 @@ class LocalTransport:
         from src.harness.mcp_config import load_global_mcp_servers
         agent = build_native_agent(
             capabilities=caps,
+            instructions=spec.instructions or "",  # P2 真 bug:consumed agent system prompt
             model_settings={
                 "anthropic_cache_instructions": "5m",
                 "anthropic_cache_tool_definitions": "5m",

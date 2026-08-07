@@ -67,8 +67,21 @@ def _foreign_session(payload: Dict[str, Any], own_session: str) -> bool:
 
 # ── Event Mapping: openclaw ChatEvent / agent tool → ObserveEvent ─────
 
+def _agent_id_from_key(session_key: str) -> str:
+    """openclaw session_key `agent:<agent>:<conv>` → <agent>;非标准 → 空串。
+
+    agent_id 兜底来源:OpenClawClient 构造时若未显式传 agent_id 则从此派生,
+    让 observe 事件总能归属到一个 agent(治 db 92% openclaw agent_id 空)。
+    """
+    parts = session_key.split(":")
+    if len(parts) >= 3 and parts[0] == "agent":
+        return parts[1]
+    return ""
+
+
 def map_chat_event(
     chat_event: Dict[str, Any], harness_id: str, session_id: str,
+    agent_id: str = "",
 ) -> Optional[Dict[str, Any]]:
     """Map openclaw ChatEvent → ObserveEvent dict.
 
@@ -89,23 +102,27 @@ def map_chat_event(
                 if isinstance(block, dict) and block.get("type") == "text":
                     response += block.get("text", "")
         return tick_completed(ht, harness_id, session_key, tick_id,
-                              status="success", response=response, tool_count=0)
+                              status="success", response=response, tool_count=0,
+                              agent_id=agent_id)
 
     if state == "aborted":
         return tick_completed(ht, harness_id, session_key, tick_id,
                               status="error",
-                              response="Turn aborted by user or coordinator")
+                              response="Turn aborted by user or coordinator",
+                              agent_id=agent_id)
 
     if state == "error":
         err_msg = chat_event.get("errorMessage", "Unknown error")
         err_kind = chat_event.get("errorKind", "unknown")
         return tick_completed(ht, harness_id, session_key, tick_id,
                               status="error",
-                              response=f"Turn failed: {err_kind} - {err_msg}")
+                              response=f"Turn failed: {err_kind} - {err_msg}",
+                              agent_id=agent_id)
 
     if state == "delta":
         return token_delta(ht, harness_id, session_key, tick_id,
-                           delta_text=chat_event.get("deltaText", ""))
+                           delta_text=chat_event.get("deltaText", ""),
+                           agent_id=agent_id)
 
     logger.warning("Unknown chat event state: %s", state)
     return None
@@ -113,6 +130,7 @@ def map_chat_event(
 
 def map_agent_tool_event(
     agent_event: Dict[str, Any], harness_id: str, session_id: str,
+    agent_id: str = "",
 ) -> Optional[Dict[str, Any]]:
     """Map openclaw agent tool event → ObserveEvent dict.
 
@@ -131,14 +149,14 @@ def map_agent_tool_event(
         return tool_call(ht, harness_id, session_key, tick_id,
                          tool_name=agent_event.get("name", ""),
                          arguments=args if isinstance(args, dict) else {},
-                         call_id=call_id)
+                         call_id=call_id, agent_id=agent_id)
 
     if stream == "tool" and phase == "result":
         result = agent_event.get("result")
         error = agent_event.get("error", "")
         return tool_result(ht, harness_id, session_key, tick_id,
                            call_id=call_id, result=result,
-                           error=error if error else "")
+                           error=error if error else "", agent_id=agent_id)
 
     return None
 
@@ -161,8 +179,11 @@ class OpenClawClient:
         gateway_url: str = GATEWAY_DEFAULT_URL,
         harness_id: str = "",
         emitter: Optional[ObserveEmitter] = None,
+        agent_id: str = "",
     ):
         self.session_key = session_key
+        # agent_id: 显式传优先,否则从 session_key `agent:<agent>:<conv>` 派生兜底
+        self.agent_id = agent_id or _agent_id_from_key(session_key)
         self.gateway_url = gateway_url
         self.harness_id = harness_id or f"openclaw_{uuid.uuid4().hex[:8]}"
         self.emitter = emitter or ObserveEmitter(
@@ -244,13 +265,13 @@ class OpenClawClient:
                     if _foreign_session(payload, self.session_key):
                         continue
                     await self._ensure_tick_started(payload)
-                    ev = map_chat_event(payload, self.harness_id, self.session_key)
+                    ev = map_chat_event(payload, self.harness_id, self.session_key, self.agent_id)
                     await self._dispatch(ev)
                 elif event_name == "agent":
                     if _foreign_session(payload, self.session_key):
                         continue
                     await self._ensure_tick_started(payload)
-                    ev = map_agent_tool_event(payload, self.harness_id, self.session_key)
+                    ev = map_agent_tool_event(payload, self.harness_id, self.session_key, self.agent_id)
                     await self._dispatch(ev)
         except Exception as e:
             logger.error("Error in openclaw event loop: %s", e)
@@ -324,7 +345,7 @@ class OpenClawClient:
 
         ev = tick_started(
             "openclaw", self.harness_id, self.session_key,
-            tick_id=run_id, request=self._last_prompt,
+            tick_id=run_id, request=self._last_prompt, agent_id=self.agent_id,
         )
         await self._dispatch(ev)
 
@@ -369,6 +390,7 @@ class OpenClawClient:
             "idempotencyKey": f"send_{uuid.uuid4().hex}",
         }
         if agent_id:
+            self.agent_id = agent_id  # per-turn override 刷新(session 可换 agent)
             params["agentId"] = agent_id
         if thinking:
             params["thinking"] = thinking
@@ -421,11 +443,12 @@ class OpenClawClient:
         tid = self._pending_run_id or f"dead_{uuid.uuid4().hex[:8]}"
         await self.emitter.emit(
             tick_started("openclaw", self.harness_id, self.session_key,
-                         tick_id=tid, request=self._last_prompt)
+                         tick_id=tid, request=self._last_prompt, agent_id=self.agent_id)
         )
         await self.emitter.emit(
             tick_completed("openclaw", self.harness_id, self.session_key, tid,
-                           status="error", response=reason, tool_count=0)
+                           status="error", response=reason, tool_count=0,
+                           agent_id=self.agent_id)
         )
         logger.error("claw turn dead/stale (%s): %s", self.session_key, reason)
 

@@ -46,12 +46,15 @@ def memory_event(event: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 
     ponytail: dict builder, no dataclass — the wire format is the contract
     (mirrors harness/flow.py:flow_event + harness/events.py:_base).
+    agent_id 从 payload.ctx.agent_id 提取(触发 turn 的 agent,非 side agent —
+    memory hook 是无状态转发器,身份由 turn ctx 携带)。
     """
     return {
         "event_id": _event_id(),
         "harness_type": _MEMORY_HARNESS_TYPE,
         "harness_id": _MEMORY_HARNESS_ID,
         "session_id": _MEMORY_SESSION_ID,
+        "agent_id": payload.get("agent_id", "") or "",
         "tick_id": "",
         "event_type": "tick_completed",
         "data": {

@@ -229,12 +229,14 @@ class WorkflowEngine:
     def __init__(
         self,
         emitter: Any = None,            # ObserveEmitter(_state.memory_observe_emitter)
-        pitfail_registry: Any = None,   # _state.pitfail_registry(harness 故意 typo,见 design §3 R2)
+        pitfail_registry: Any = None,   # _state.pitfall_registry(harness 故意 typo,见 design §3 R2)
         tool_executor: Any = None,      # _state.tool_executor
+        agent_id_prefix: str = "",      # run 级 agent_id(_emit_workflow 顶层 agent_id 来源)
     ) -> None:
         self.emitter = emitter
         self.pitfail_registry = pitfail_registry
         self.tool_executor = tool_executor
+        self.agent_id_prefix = agent_id_prefix
 
     async def _spawn_agent(
         self,
@@ -333,6 +335,7 @@ class WorkflowEngine:
                 emitter=self.emitter,
                 harness_id=f"wf_{agent_id[:12]}",
                 session_id=ctx.session_id,
+                agent_id=agent_id,  # P2:sub-agent 事件归属(治 a2 指出的漏传)
             ))
 
         # R5:不传工程纪律 capability 实例 → 走默认 prepend 分支(native_agent.py:114)。
@@ -650,6 +653,7 @@ class WorkflowEngine:
         run_id: str,
         payload: dict,
         session_id: Optional[str] = None,
+        agent_id: str = "",
     ) -> None:
         """workflow_* 事件 → observe wire。
 
@@ -675,6 +679,7 @@ class WorkflowEngine:
                 "harness_type": "workflow",
                 "harness_id": run_id,
                 "session_id": session_id or run_id,
+                "agent_id": agent_id or self.agent_id_prefix,
                 "tick_id": run_id,
                 "event_type": "tick_completed",  # R4:冻结
                 "data": {

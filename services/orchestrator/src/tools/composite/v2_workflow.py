@@ -286,6 +286,7 @@ async def workflow_run_handler(
 
     # ── 薄桥调 engine.run(async with wt_manager 兜底释放未 release 的 worktree)──
     engine = _build_engine()
+    engine.agent_id_prefix = ctx.agent_id_prefix  # run 级 agent_id → _emit_workflow 顶层
     try:
         async with wt_manager:
             result = await engine.run(spec, ctx)

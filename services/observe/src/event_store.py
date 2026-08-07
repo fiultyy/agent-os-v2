@@ -226,6 +226,72 @@ class EventStore:
         finally:
             conn.close()
 
+    def get_context_at(
+        self,
+        harness_type: str,
+        session_id: str,
+        tick_id: str,
+        agent_id: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        """L3(D 模型 event=context 投影):重建某 tick 时的 agent context。
+
+        context = system + tools(从 session 首 tick_started.data.context_snapshot,
+        L1 emit)+ messages(从 session 头到该 tick timestamp 截断的事件流累积重建:
+        tick_started.request→user, tool_call→assistant tool_use, tool_result→tool,
+        tick_completed.response→assistant;token_delta 跳过,用终态 response)。
+        agent_id 可选过滤(多 agent 同 session);空串则不过滤。
+        无 checkpoint(ponytail: N<10^4 replay 可接受;N 破 10^5 再加 snapshots 表)。
+        """
+        conn = self._read_connection()
+        try:
+            row = conn.execute(
+                "SELECT MAX(timestamp) AS ts FROM observe_events WHERE harness_type=? AND session_id=? AND tick_id=?",
+                (harness_type, session_id, tick_id),
+            ).fetchone()
+            cutoff = row["ts"] if row else None
+            if not cutoff:
+                return None
+            rows = conn.execute(
+                "SELECT * FROM observe_events WHERE harness_type=? AND session_id=? AND timestamp <= ? ORDER BY timestamp ASC",
+                (harness_type, session_id, cutoff),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        system, tools = "", {}
+        messages: List[Dict[str, Any]] = []
+        snapshot_found = False
+        for r in rows:
+            aid = r["agent_id"] if "agent_id" in r.keys() else None
+            if agent_id and aid and aid != agent_id:
+                continue  # 多 agent 同 session 过滤
+            ev = self._row_to_event_dict(r)
+            data = ev.get("data", {}) or {}
+            etype = ev["event_type"]
+            if etype == "tick_started":
+                if not snapshot_found and isinstance(data.get("context_snapshot"), dict):
+                    snap = data["context_snapshot"]
+                    system = snap.get("system", "")
+                    tools = snap.get("tools_policy", {})
+                    snapshot_found = True
+                req = data.get("request", "")
+                if req:
+                    messages.append({"role": "user", "content": req})
+            elif etype == "tool_call":
+                messages.append({"role": "assistant", "content": [
+                    {"type": "tool_use", "id": data.get("call_id", ""),
+                     "name": data.get("tool_name", ""), "input": data.get("arguments", {})}
+                ]})
+            elif etype == "tool_result":
+                err = data.get("error", "")
+                messages.append({"role": "tool", "tool_call_id": data.get("call_id", ""),
+                                 "content": f"error: {err}" if err else data.get("result", "")})
+            elif etype == "tick_completed":
+                resp = data.get("response", "")
+                if resp:
+                    messages.append({"role": "assistant", "content": resp})
+        return {"system": system, "tools": tools, "messages": messages, "tick_id": tick_id}
+
     # ── Utility ─────────────────────────────────────────────────────
 
     def _row_to_event_dict(self, row: sqlite3.Row) -> Dict[str, Any]:

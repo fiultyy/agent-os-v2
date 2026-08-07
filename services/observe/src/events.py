@@ -22,7 +22,6 @@ class EventType(str, Enum):
     TOOL_RESULT = "tool_result"
     TICK_COMPLETED = "tick_completed"
     BRANCH_CREATED = "branch_created"  # Optional: agent-os-v2 specific
-    BRANCH_MERGED = "branch_merged"    # Optional: agent-os-v2 specific
     TOKEN_DELTA = "token_delta"
 
 
@@ -226,27 +225,4 @@ def branch_created(
         },
         agent_id=agent_id,
         parent_session_id=parent_branch_id,
-    )
-
-
-def branch_merged(
-    harness_type: str,
-    harness_id: str,
-    session_id: str,
-    branch_id: str,
-    target_branch_id: str,
-    merge_tick_id: str = "",
-) -> ObserveEvent:
-    """Create branch_merged event (agent-os-v2 specific)."""
-    return ObserveEvent(
-        harness_type=harness_type,
-        harness_id=harness_id,
-        session_id=session_id,
-        tick_id="",
-        event_type=EventType.BRANCH_MERGED,
-        data={
-            "branch_id": branch_id,
-            "target_branch_id": target_branch_id,
-            "merge_tick_id": merge_tick_id,
-        },
     )

@@ -183,7 +183,10 @@ def _validate_type(harness_type: str) -> None:
 
 
 async def _create_claw(session_id: str, agent_id: Optional[str]) -> OpenClawClient:
-    client = OpenClawClient(session_key=session_id or agent_id or "agent:main:main")
+    client = OpenClawClient(
+        session_key=session_id or agent_id or "agent:main:main",
+        agent_id=agent_id or "",
+    )
     client.start_background()
     return client
 
@@ -392,7 +395,7 @@ def assemble_capabilities(
         skill_caps = all_skills
     caps = [
         ObserveCapability(emitter=emitter, harness_id=harness_id, session_id=session_id,
-                          agent_id=spec_id),
+                          agent_id=spec_id, spec=spec),
         MemoryWriterCapability(
             memory_event_bus=_state.memory_event_bus,
             knowledge_graph=_state.knowledge_graph,

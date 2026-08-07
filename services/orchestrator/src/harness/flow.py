@@ -95,7 +95,7 @@ class FlowDef(BaseModel):
 
 # ── Flow-level event constructors (harness_type="flow") ──────────────
 
-def flow_event(event_type: str, flow_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
+def flow_event(event_type: str, flow_id: str, data: Dict[str, Any], *, agent_id: str = "") -> Dict[str, Any]:
     """flow_* 事件,session_id = flow_id,harness_type=flow。
 
     ponytail: observe 的 EventType enum 只有 tick_*/tool_*/branch_*/token_*
@@ -103,12 +103,14 @@ def flow_event(event_type: str, flow_id: str, data: Dict[str, Any]) -> Dict[str,
     抛 ValueError 被静默丢。红线禁改 observe,所以 flow/node 事件 wire 成
     tick_completed(observe 接受的唯一泛化"完成"类型),真实语义塞进
     data.flow_event + data.flow_payload。TUI/消费者按 data.flow_event 分类。
+    agent_id 顶层(run 级编排 agent;per-node 事件归 node 自己的 turn agent)。
     """
     return {
         "event_id": str(uuid.uuid4()),
         "harness_type": FLOW_HARNESS_TYPE,
         "harness_id": OBSERVE_FLOW_HARNESS_ID,
         "session_id": flow_id,
+        "agent_id": agent_id,
         "tick_id": flow_id,
         "event_type": "tick_completed",
         "data": {
@@ -484,7 +486,7 @@ class FlowScheduler:
 
     async def _emit_flow(self, event_type: str, data: Dict[str, Any]) -> None:
         """Push a flow_* event through the persistent flow emitter."""
-        ev = flow_event(event_type, self.flow_id, data)
+        ev = flow_event(event_type, self.flow_id, data, agent_id=getattr(self, "agent_id", ""))
         if self._flow_emitter is not None:
             await self._flow_emitter.emit(ev)
         else:
