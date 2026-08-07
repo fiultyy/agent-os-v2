@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AO2 记忆模块架构报告</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<style>
+:root{
+  --bg:#0b0f17; --bg2:#11161f; --card:#161c28; --card2:#1c2433;
+  --bd:#262f42; --tx:#d7dde8; --tx2:#8b95a7; --mute:#5b6679;
+  --pri:#5bc8ff; --pri2:#7c8cff; --acc:#c099ff; --ok:#56d364; --warn:#ffb454; --danger:#ff6b6b;
+  --grad:linear-gradient(135deg,#5bc8ff 0%,#7c8cff 45%,#c099ff 100%);
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--tx);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;font-size:15px;line-height:1.65;-webkit-font-smoothing:antialiased}
+code,.mono{font-family:"JetBrains Mono","SF Mono",Consolas,"Liberation Mono",Menlo,monospace}
+main{max-width:1280px;margin:0 auto;padding:0 32px 80px}
+.hero{margin:32px 0 8px;padding:34px;border-radius:18px;background:radial-gradient(1200px 300px at 0% 0%,rgba(124,140,255,.18),transparent),radial-gradient(900px 280px at 100% 0%,rgba(192,153,255,.14),transparent),var(--card);border:1px solid var(--bd)}
+.hero h1{margin:0 0 8px;font-size:28px}
+.hero h1 .grad{background:var(--grad);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+.hero .lead{font-size:15.5px;color:var(--tx2);max-width:880px;margin:0 0 14px}
+.hero .stack{display:flex;flex-wrap:wrap;gap:7px;margin-top:8px}
+.tag{display:inline-block;padding:3px 10px;border-radius:20px;font-size:12px;background:var(--card2);border:1px solid var(--bd);color:var(--tx)}
+.tag.t{color:var(--pri);border-color:#23344750}
+.tag.ok{color:var(--ok);border-color:#2a4a3070}
+.tag.warn{color:var(--warn);border-color:#4a3a2070}
+.overview{margin:20px 0;padding:22px;border-radius:14px;background:var(--card);border:1px solid var(--bd)}
+.overview h2{margin:0 0 14px;font-size:18px}
+.ov-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+.ov-card{padding:13px 15px;border-radius:11px;background:var(--bg2);border:1px solid var(--bd)}
+.ov-card h4{margin:0 0 5px;font-size:13px;color:var(--pri)}
+.ov-card p{margin:0;font-size:12.5px;color:var(--tx2)}
+.section{margin:30px 0 0;padding:0}
+.sec-head{display:flex;align-items:baseline;gap:12px;border-bottom:1px solid var(--bd);padding-bottom:10px;margin-bottom:16px}
+.sec-head h2{margin:0;font-size:21px}
+.sec-id{font-size:12px;color:var(--mute);font-family:"JetBrains Mono",Consolas,monospace}
+.block{margin:16px 0}
+.block-title{font-size:13px;font-weight:600;color:var(--pri);margin-bottom:8px;letter-spacing:.3px}
+.flow-text{font-size:13.5px;color:var(--tx2);margin-bottom:14px;line-height:1.75}
+.mermaid-wrap{margin:14px 0;padding:18px;border-radius:12px;background:var(--bg2);border:1px solid var(--bd);text-align:center;overflow-x:auto}
+.timeline{position:relative;padding-left:28px}
+.timeline::before{content:"";position:absolute;left:11px;top:6px;bottom:6px;width:2px;background:var(--bd)}
+.tl-item{position:relative;padding:0 0 18px 22px}
+.tl-item::before{content:"";position:absolute;left:-22px;top:4px;width:14px;height:14px;border-radius:50%;background:var(--card);border:2px solid var(--pri);box-shadow:0 0 0 4px var(--bg)}
+.tl-item.warn::before{border-color:var(--warn)}
+.tl-item.ok::before{border-color:var(--ok)}
+.tl-date{font-size:11.5px;color:var(--mute);font-family:"JetBrains Mono",Consolas,monospace}
+.tl-title{font-size:14.5px;font-weight:600;color:var(--tx);margin:2px 0 3px}
+.tl-desc{font-size:13px;color:var(--tx2);line-height:1.65}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.sub-card{padding:13px 15px;border-radius:11px;background:var(--bg2);border:1px solid var(--bd)}
+.sub-card h4{margin:0 0 6px;font-size:13.5px;color:var(--acc)}
+.sub-card p{margin:0;font-size:12.5px;color:var(--tx2);line-height:1.6}
+.sub-card .files{margin-top:7px;font-size:11px;color:var(--mute);font-family:"JetBrains Mono",Consolas,monospace;word-break:break-all;line-height:1.7}
+table.kg{width:100%;border-collapse:collapse;font-size:12.5px;margin:10px 0}
+table.kg th,table.kg td{padding:8px 10px;border:1px solid var(--bd);text-align:left;vertical-align:top}
+table.kg th{background:var(--card2);color:var(--pri);font-weight:600;font-size:12px}
+table.kg td code{color:var(--acc);font-size:11.5px}
+table.kg tr:nth-child(even) td{background:rgba(255,255,255,.015)}
+.redline{padding:13px 15px;border-radius:11px;background:var(--bg2);border:1px solid var(--bd);border-left:3px solid var(--danger)}
+.redline h4{margin:0 0 5px;font-size:13.5px;color:var(--danger)}
+.redline p{margin:0;font-size:12.5px;color:var(--tx2);line-height:1.6}
+.e2e-table th{background:rgba(86,211,100,.08)}
+.uf{margin-top:14px;padding:11px 15px;border-radius:10px;background:rgba(86,211,100,.07);border:1px solid #2a4a3050;font-size:13px}
+.uf-k{color:var(--ok);font-weight:600;margin-right:6px}
+.evo-banner{border-left:4px solid var(--warn);background:rgba(255,180,84,.07);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0;font-size:13px;color:var(--tx);line-height:1.75}
+.evo-banner b{color:var(--warn)}
+footer{margin:40px 0 0;padding:22px;border-radius:14px;background:var(--card);border:1px solid var(--bd);font-size:12.5px;color:var(--mute)}
+footer h3{color:var(--tx);margin:0 0 10px;font-size:14px}
+@media (max-width:900px){.ov-grid{grid-template-columns:1fr 1fr}.grid-2,.grid-3{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<main>
+
+<div class="hero">
+  <h1>🧠 AO2 <span class="grad">记忆模块</span> 架构报告</h1>
+  <div class="lead">agent-os-v2 最早独立的核心模块 —— "大脑记忆中枢"。四优势红线(蝴蝶翼双向联想 / 信任域五级权限 / 五维评分 / 语义召回)+ 四层分层(Working/Session/Episodic/Semantic)+ 三层架构(内核 / side agent 归档+重接 / native capability)。本文结合 codebase kg 核对生成,反映 2026-08-04 真实状态(HEAD 874da0c + 重接 63e2049)。</div>
+  <div class="stack">
+    <span class="tag t">kg 57 类</span>
+    <span class="tag t">三层架构</span>
+    <span class="tag warn">side agent env gate opt-in</span>
+    <span class="tag ok">e2e 真 GLM PASS</span>
+    <span class="tag">2026-08-04 核对</span>
+    <span class="tag">位置 services/orchestrator/src/memory/</span>
+  </div>
+</div>
+
+<div class="evo-banner">
+  <b>⚡ 当前关键状态(2026-08-04)</b>:side agent 已从"持续后台运行"(7月18 architecture-report 描述)<b>归档</b>(59695b1,14 文件 <code># ARCHIVED</code>)→ <b>重接</b>(63e2049,env gate opt-in 默认关);native AO2 主路径走 <code>MemoryWriterCapability</code>(写)/<code>MemoryCapability</code>(读)非 side agent;SSE→observe WS(web 弃用 / TUI 接力);<code>fire</code> 返回值修(<code>→Any</code>)。详见"演进时间线"。
+</div>
+
+<div class="overview">
+  <h2>📊 规模与组成</h2>
+  <div class="ov-grid">
+    <div class="ov-card"><h4>📁 文件规模</h4><p>顶层 ~40 .py + <code>_recall/</code>(7 召回策略) + <code>sideline/</code>(15 side agent) + <code>tools/</code>(2 Agent 工具)</p></div>
+    <div class="ov-card"><h4>🔗 kg 节点</h4><p>codebase-memory 索引 <b>57 类</b>(memory 相关,含 sidelined 全集);调用图完整</p></div>
+    <div class="ov-card"><h4>🗄 持久化</h4><p><code>data/memories.db</code>(四层+blocks+sessions) / <code>kg.db</code>(实体关系) / <code>experience_kg.db</code>(经验+蝴蝶翼) / 可选 Postgres</p></div>
+    <div class="ov-card"><h4>⚡ 通电状态</h4><p>内核 ✅ 装配 | side agent ⚠️ env gate opt-in | native cap ✅ | SemanticRecall ❌ NOT-WIRED</p></div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="sec-head"><h2>📅 演进时间线</h2><span class="sec-id">timeline · P0→63e2049</span></div>
+  <div class="timeline">
+    <div class="tl-item ok"><div class="tl-date">2026-06 · P0-P4 收官</div><div class="tl-title">四优势红线 + 四层分层 + 事件总线</div><div class="tl-desc">origin provenance(FOREGROUND/AGENT 红线)+ MemoryEventBus + hook 解耦 + 状态机(ACTIVE/STALE/ARCHIVED)+ TaskConsolidationAgent。四优势固化:蝴蝶翼/信任域/五维评分/语义召回。</div></div>
+    <div class="tl-item ok"><div class="tl-date">2026-06 · 90926b7</div><div class="tl-title">recall-redesign 阶段1:GET /v1/memory/graph 图端点</div><div class="tl-desc">LIF+KG+蝴蝶翼图结构只读组装端点(detail=True 透出 match/lif/activated_entities)。recall-redesign 阶段 0/2/3 在 openclaw 侧。</div></div>
+    <div class="tl-item warn"><div class="tl-date">2026-07 · 59695b1</div><div class="tl-title">web 弃用 → side agent 归档 + SSE→observe WS</div><div class="tl-desc">web 弃用后 4 side agent(ingestor/consolidator/retriever/curator)+ task_consolidator + side_llm 从 engine.py 装配移除(<code># ARCHIVED</code>,14 文件);<code>_emit_sse</code> 删,新 <code>MemoryObserveHook</code> 推 observe :8002 WS → TUI。"待 AO2 capability 重接"。</div></div>
+    <div class="tl-item"><div class="tl-date">2026-07 · pydantic-ai v2</div><div class="tl-title">native AO2 主路径:capability 取代 side agent</div><div class="tl-desc"><code>MemoryWriterCapability</code>(写侧,wrap_run_event_stream 自动沉淀 working/tool_result + fire INGEST/KG/PRE_COMPRESS)+ <code>MemoryCapability</code>(读侧,experience_memory/kg_memory 两 function-call tools)。route 层手工注入(harness/routes.py:396, chat.py:308)。</div></div>
+    <div class="tl-item ok"><div class="tl-date">2026-08-04 · 63e2049</div><div class="tl-title">side agent 重接 + fire 返回值修</div><div class="tl-desc">恢复 59695b1 删掉的装配段(逐字 <code>git show 59695b1^</code>),env gate opt-in(<code>MEMORY_INGESTOR/CONSOLIDATOR/RETRIEVER/CURATOR_ENABLED</code> 默认关);<code>_state.fire</code> <code>→None</code> 改 <code>→Any</code> 返 emit 结果(修 2c560c5 丢返回值,致 /v1/memories RetrieverHook scored 不可达)。复用 agent+Hook+测试(非重写 capability)。</div></div>
+    <div class="tl-item ok"><div class="tl-date">2026-08-04 · e2e 真 GLM</div><div class="tl-title">端到端验证 PASS</div><div class="tl-desc">env 全开 turn → IngestorAgent KG +实体(李四/Python/docker/k8s 富语义 LLM 提炼)/ graph 14 nodes / neural Python 0.866 / /v1/memories score=1.0 / 第二轮召回正确。报告 <code>.scratch/mem-refine-e2e-verify.md</code>。</div></div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="sec-head"><h2>🏗 三层架构</h2><span class="sec-id">arch · kernel/sideline/capability</span></div>
+  <div class="flow-text">memory 模块分三层,分别对应"确定性内核 / LLM 旁路提炼 / native 主路径"。内核始终装配;side agent 默认关(opt-in);native capability 是 AO2 主路径(每 turn 自动沉淀 + 模型主动召回)。</div>
+  <div class="mermaid-wrap">
+<div class="mermaid">
+flowchart TB
+  subgraph native["native AO2 主路径(pydantic-ai)"]
+    MWC["MemoryWriterCapability<br/>写侧 wrap_run_event_stream"]
+    MC["MemoryCapability<br/>读侧 tools(experience/kg)"]
+  end
+  subgraph kernel["内核(确定性,装配在跑)"]
+    BUS["MemoryEventBus<br/>9 EventType"]
+    DMH["DefaultMemoryHook<br/>SYSTEM working→session→episodic"]
+    MS["MemoryService<br/>store/recall/reflect"]
+    KG["KnowledgeGraph<br/>实体关系抽取"]
+    NF["NeuralField<br/>LIF 注意力"]
+    BW["ButterflyWing<br/>双向联想"]
+    PERM["PermissionManager<br/>五级权限"]
+    DBW["MemoryDBWatcher<br/>idle 维护"]
+  end
+  subgraph sideline["side agent(env gate opt-in 默认关)"]
+    ING["IngestorAgent+Hook<br/>LLM 提炼 KG"]
+    CON["ConsolidatorAgent+Hook<br/>episodic→semantic"]
+    RET["RetrieverAgent+Hook<br/>match×lif 排序"]
+    CUR["CuratorAgent+Hook<br/>离线 QA"]
+    TC["TaskConsolidationAgent<br/>任务后巩固(无gate)"]
+  end
+  OBS["MemoryObserveHook<br/>→ observe WS → TUI"]
+  MWC -->|fire INGEST/TURN_END/PRE_COMPRESS| BUS
+  MC -.->|model function-call| MS
+  BUS --> DMH --> MS
+  BUS -.->|gate 开时| ING & CON & RET & CUR
+  ING --> KG
+  RET --> NF & BW
+  MS --> PERM
+  DBW -->|idle gate| ING & CON
+  BUS --> OBS
+  classResult bridge
+</div>
+  </div>
+  <div class="grid-3">
+    <div class="sub-card"><h4>① 内核(✅ 装配在跑)</h4><p>确定性逻辑,无 LLM(除 KG 抽取可降级 regex)。engine.py bootstrap 必装。MemoryEventBus 9 事件(SYSTEM/OBSERVER 优先级)派发,DefaultMemoryHook 拥有迁移+压缩副作用。</p><div class="files">service.py · event_bus.py · hooks.py · default_hook.py · knowledge_graph.py · scorer.py · neural_field.py · butterfly_wing.py · permissions.py · db_watcher.py</div></div>
+    <div class="sub-card"><h4>② side agent(⚠️ 归档+重接)</h4><p>LLM 旁路提炼。59695b1 归档(<code># ARCHIVED</code>),63e2049 重接 env gate opt-in。默认关 = 提炼链断(降级 regex);gate 开 = Ingestor/Consolidator/Retriever/Curator 复活。</p><div class="files">sideline/ingestor_agent.py · consolidator_agent.py · retriever_agent.py · curator_agent.py · task_consolidator.py</div></div>
+    <div class="sub-card"><h4>③ native capability(✅ 主路径)</h4><p>pydantic-ai capability,route 层注入。MemoryWriterCapability 每_turn 自动沉淀(写侧);MemoryCapability 注册 tools 供 LLM 主动召回(读侧)。不依赖 side agent。</p><div class="files">harness/capabilities/memory_writer_capability.py · memory_capability.py</div></div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="sec-head"><h2>🔄 数据流(沉淀→提炼→召回)</h2><span class="sec-id">dataflow · 单 turn 全链路</span></div>
+  <div class="mermaid-wrap">
+<div class="mermaid">
+sequenceDiagram
+  participant U as 用户 turn
+  participant MWC as MemoryWriterCapability
+  participant BUS as MemoryEventBus
+  participant DMH as DefaultMemoryHook
+  participant ING as IngestorAgent(gate)
+  participant KG as KnowledgeGraph
+  participant NF as NeuralField
+  participant OBS as ObserveHook→TUI
+  participant RET as RetrieverAgent(gate)
+  U->>MWC: Agent.run stream 耗尽
+  MWC->>BUS: emit TURN_END(working)
+  MWC->>BUS: fire INGEST(content)
+  MWC->>KG: extract_and_ingest(直接)
+  MWC->>BUS: emit PRE_COMPRESS
+  BUS->>DMH: migrate working→session(打分)
+  BUS->>ING: on_ingest(gate 开时)
+  ING->>KG: LLM 抽实体+评分+identity
+  BUS->>NF: drift_turn(concept)
+  BUS->>OBS: 推 observe WS
+  Note over U,RET: 第二轮 召回
+  U->>RET: GET /v1/memories?query
+  RET->>NF: lif 权重
+  RET->>KG: 实体命中
+  RET-->>U: match×lif scored(带 score)
+</div>
+  </div>
+  <div class="block">
+    <div class="block-title">关键时序点</div>
+    <div class="flow-text">① <code>MemoryWriterCapability.wrap_run_event_stream</code> 在 native Agent.run stream 耗尽时触发(非 after_run,避免丢中间轮 tool_result)。② <code>_fire_ingest</code> fire-and-forget emit INGEST —— gate 关时 IngestorHook 未注册返 None(no-op);gate 开时 IngestorHook LLM 提炼。③ <code>_fire_kg</code> 直接调 <code>kg.extract_and_ingest</code>(不经 bus),所以 KG 实体抽取即使 side agent 全关仍工作(简化版,非 IngestorAgent 完整 LLM 链)。④ 召回 <code>fire RECALL</code> 修后返 RetrieverHook ranked(带 score);gate 关走 service.recall fallback。</div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="sec-head"><h2>🛡 四优势红线(严禁推倒)</h2><span class="sec-id">redlines · Phase 6 守护</span></div>
+  <div class="grid-2">
+    <div class="redline"><h4>🦋 蝴蝶翼双向联想</h4><p><code>butterfly_wing.py</code> — forward 归纳翼 + backward 锚定翼 + composite 协调。ButterflyRecallStrategy 为 RetrieverAgent 提供双向联想过滤。不改数据结构与召回策略。</p></div>
+    <div class="redline"><h4>🛡 信任域五级权限</h4><p><code>permissions.py</code> — L0-L4(None/Metadata/Summary/Full/Admin),默认跨域 L2 摘要。<code>origin</code> 字段(FOREGROUND/AGENT)不绕过权限层,FOREGROUND 红线永不被自动消化。</p></div>
+    <div class="redline"><h4>📊 五维评分</h4><p><code>scorer.py</code> ImportanceScorer — recency 指数衰减/frequency/relevance/emotional_weight/actionability。三种预设(RESEARCH/CODING/GENERAL)。状态机与评分协同,不替换评分。</p></div>
+    <div class="redline"><h4>🔍 语义召回</h4><p><code>_recall/</code> 7 策略(base/keyword/kg/semantic/shared/unified/weighted)。SemanticRecall <b>NOT-WIRED</b>(D-27 FAISS 移除,运行时 Keyword+KG unified)。FAISSVectorStore 类保留不上电。</p></div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="sec-head"><h2>🔗 codebase kg 核对(57 类)</h2><span class="sec-id">kg audit · 真实节点</span></div>
+  <div class="flow-text">codebase-memory(HEAD 874da0c)索引的 memory 相关类清单,按子模块分组核对通电状态。</div>
+  <table class="kg">
+    <thead><tr><th>子模块</th><th>类</th><th>通电</th></tr></thead>
+    <tbody>
+      <tr><td><b>_recall/</b><br/>7 召回策略</td><td><code>RecallStrategy</code>(base) · <code>KeywordRecall</code> · <code>KGRecall</code> · <code>SharedRecall</code> · <code>UnifiedRecall</code>(kw0.4+kg0.6) · <code>SemanticRecall</code> · <code>WeightedRecall</code>(match×lif)</td><td>✅ 装配<br/><span style="color:var(--danger)">SemanticRecall NOT-WIRED</span></td></tr>
+      <tr><td><b>sideline/</b><br/>4 agent + Hook</td><td><code>IngestorAgent+IngestorHook</code> · <code>ConsolidatorAgent+ConsolidatorHook</code> · <code>RetrieverAgent+RetrieverHook</code> · <code>CuratorAgent+CuratorHook</code> · <code>TaskConsolidationAgent</code>(无 Hook,无 gate)</td><td>⚠️ env gate opt-in<br/>63e2049 重接</td></tr>
+      <tr><td><b>sideline/</b><br/>旁路(归档)</td><td><code>CriticAgent</code> · <code>DreamerAgent</code>(无消费者 defer) · <code>KairosAgent</code> · <code>RecallVerifier</code> · <code>SidelineMemoryAgent</code>(老主控) · <code>RecallMode</code></td><td>❌ 归档未接</td></tr>
+      <tr><td><b>neural_field</b></td><td><code>NeuralState</code> · <code>NeuralFieldEngine</code> · <code>NeuralFieldStore</code> · <code>NeuralFieldRobustness</code> · <code>NeuralHook</code></td><td>⚠️ MEMORY_NEURAL_FIELD_ENABLED gate</td></tr>
+      <tr><td><b>butterfly_wing</b></td><td><code>ButterflyWing</code> · <code>ButterflyEngine</code> · <code>ButterflyStore</code> · <code>ButterflyRecallStrategy</code></td><td>✅ 红线保留</td></tr>
+      <tr><td><b>types</b></td><td><code>MemoryItem</code> · <code>MemoryBlock</code> · <code>MemoryFilter</code> · <code>MemoryType</code>(四层) · <code>MemoryScope</code> · <code>MemoryOrigin</code>(红线) · <code>MemoryState</code> · <code>MemoryRef</code> · <code>RecallMode</code></td><td>✅ 核心</td></tr>
+      <tr><td><b>核心内核</b></td><td><code>MemoryService</code>(门面) · <code>MemoryEventBus</code> · <code>MemoryHook</code>+<code>HookPriority</code> · <code>DefaultMemoryHook</code> · <code>MemoryDBWatcher</code> · <code>ImportanceScorer</code>+<code>ImportanceScore</code> · <code>KnowledgeGraph</code> · <code>MemoryMigrator</code> · <code>MemoryWriteQueue</code> · <code>MemoryObserveHook</code> · <code>RuntimeObserverHook</code> · <code>InMemoryStore</code></td><td>✅ 装配在跑</td></tr>
+      <tr><td><b>tools</b><br/>Agent function-call</td><td><code>KGMemoryTool</code>(search/expand/neighbors/path/stats) · <code>ExperienceTool</code>(top/butterfly/skill)</td><td>✅ 注册(native MemoryCapability 桥接)</td></tr>
+    </tbody>
+  </table>
+  <div class="block">
+    <div class="block-title">kg 核对结论</div>
+    <div class="flow-text">① <b>内核完整</b>:所有确定性组件装配(engine.py bootstrap)。<br/>② <b>side agent 重接正确</b>:IngestorHook/ConsolidatorHook/RetrieverHook/CuratorHook env gate opt-in,gate 开时注册 bus。<br/>③ <b>native capability 是主路径</b>:MemoryWriterCapability/MemoryCapability 在 harness/capabilities/(不在 memory/,kg 索引含)。<br/>④ <b>SemanticRecall 仍 NOT-WIRED</b>:_recall/__init__.py 未导出,D-27 FAISS 移除后维持 Keyword+KG unified。<br/>⑤ <b>MemoryObserveHook</b>(observe WS)替代老 SSE,推 TUI。<br/>⑥ <b>旁路 agent(Critic/Dreamer/Kairos/Verifier)归档未接</b>:Dreamer 无消费者 defer,其余待用。</div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="sec-head"><h2>✅ e2e 真 GLM 验证(2026-08-04)</h2><span class="sec-id">verify · 63e2049</span></div>
+  <table class="kg e2e-table">
+    <thead><tr><th>环节</th><th>实测</th><th>判定</th></tr></thead>
+    <tbody>
+      <tr><td><b>沉淀</b>(MemoryWriter)</td><td>turn completed,GLM 确认记下李四/Python/Docker/K8s</td><td>✅</td></tr>
+      <tr><td><b>提炼</b>(IngestorAgent LLM)</td><td>KG entities 876→880(<code>李四{identity}</code>/<code>Python{technical_term}</code>/docker/k8s,富语义 LLM 提炼非 regex 降级)</td><td>✅</td></tr>
+      <tr><td><b>neural field</b></td><td>concept Python potential <b>0.866/1.000</b> &gt; 5×baseline(异常检测激活)</td><td>✅</td></tr>
+      <tr><td><b>graph</b>(RetrieverAgent)</td><td><b>14 nodes / 421 edges</b>(ent::李四/Python/docker/k8s/Kubernetes,baseline 0)</td><td>✅</td></tr>
+      <tr><td><b>fire 修验证</b></td><td>GET /v1/memories?query=Python 返 3 条<b>带 score=1.0</b>(走 RetrieverHook scored,非 fallback)</td><td>✅</td></tr>
+      <tr><td><b>召回闭环</b></td><td>第二轮问"用什么语言/部署" → 回答"<b>Python 写后端,Docker+K8s 部署</b>"(native MemoryCapability 召回第一轮记忆)</td><td>✅</td></tr>
+      <tr><td><b>observe→TUI</b></td><td>observe 推 memory 事件 → TUI memory tab 显数</td><td>✅</td></tr>
+    </tbody>
+  </table>
+  <div class="uf"><span class="uf-k">📋 完整报告</span><code>.scratch/mem-refine-e2e-verify.md</code> · env 配方:<code>MEMORY_INGESTOR/CONSOLIDATOR/RETRIEVER/CURATOR/NEURAL_FIELD_ENABLED=1 + SIDE_LLM_ENABLED=1</code>(清 SOCKS + LD_PRELOAD libsqlite3.so.0)</div>
+</div>
+
+<div class="section">
+  <div class="sec-head"><h2>📦 子模块速览</h2><span class="sec-id">submodules</span></div>
+  <div class="grid-2">
+    <div class="sub-card"><h4>存储分层(store/sqlitestore/pgstore)</h4><p>InMemory→SQLite(WAL+迁移列,默认)→Postgres(asyncpg,生产)。同一 store/get/search/block/session 接口。</p></div>
+    <div class="sub-card"><h4>知识图谱(knowledge_graph + experience_kg)</h4><p>两套独立 SQLite 图:通用 KG(实体-关系-多跳路径,中英文正则)+ 经验 KG(高复用经验+蝴蝶翼边+技能包)。</p></div>
+    <div class="sub-card"><h4>召回引擎(_recall)</h4><p>策略模式:Keyword(子串)/KG(实体反查)/Shared(跨代理权限)/Unified(kw0.4+kg0.6)/Weighted(match×lif)。Semantic NOT-WIRED。</p></div>
+    <div class="sub-card"><h4>事件总线(event_bus/hooks/default_hook)</h4><p>9 类生命周期事件按 SYSTEM/OBSERVER 优先级派发。DefaultMemoryHook 核 SYSTEM hook,拥有 working→session→episodic 迁移+压缩。</p></div>
+    <div class="sub-card"><h4>旁路 LLM Agent(sideline)</h4><p>4 agent + Hook(Ingestor/Consolidator/Retriever/Curator)+ TaskConsolidation。59695b1 归档,63e2049 env gate 重接。</p></div>
+    <div class="sub-card"><h4>高级认知场(neural_field + butterfly_wing)</h4><p>神经状态场(per-concept 电位+基线防漂移)+ 蝴蝶翼双向联想(forward 归纳/backward 锚定)。为 RetrieverAgent 提供 lif 权重。</p></div>
+    <div class="sub-card"><h4>维护链(db_watcher + state_pruner + forgetting + migrator + compressor)</h4><p>DBWatcher 轮询触发 → TimeBasedStatePruner(30/90天)→ ActiveForgetting → Migrator(四层)→ Compressor(70%异步/85%同步)。</p></div>
+    <div class="sub-card"><h4>native capability(harness/capabilities/)</h4><p>MemoryWriterCapability(写,wrap_run_event_stream)+ MemoryCapability(读,experience_memory/kg_memory tools)。pydantic-ai 2.0,native 主路径。</p></div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="sec-head"><h2>⏭ defer / follow-up</h2><span class="sec-id">backlog</span></div>
+  <div class="flow-text">
+    <b>DreamerAgent</b>:无消费者,归档未接(add when 有显式消费者)。<br/>
+    <b>ConsolidatorAgent 真场景演练</b>:单 turn 不触发(需 CONSOLIDATE/SESSION_END),e2e 未验 SEMANTIC 凝结。<br/>
+    <b>neural 强制开</b>:<code>MEMORY_NEURAL_FIELD_ENABLED</code> 默认关,deploy 配方问题(retriever 单开降级纯 match 排序仍工作,建议同开)。<br/>
+    <b>SemanticRecall 接回</b>:ApiEmbeddingProvider 已配置化(LM Studio),维持 KG-only(D-27)还是接回待决。<br/>
+    <b>memory.updated_at epoch bug</b>:写入未持久化时间戳(1970),recall 排序用 importance 不受影响但需修。<br/>
+    <b>存量 backfill migration</b>:已沉积失智(low_info_reply 标记缺失)未扫库回填(<code>retriever_agent.py:146</code> TODO)。<br/>
+    <b>orch app logger 配置</b>:logger.info 不进 orch.log(只 print 进),side-agent wired log 不可见。
+  </div>
+</div>
+
+<footer>
+  <h3>关于本报告</h3>
+  2026-08-04 生成,结合 codebase-memory kg(HEAD 874da0c,57 memory 类)+ 源码核对 + 本轮重接(63e2049)+ e2e 真 GLM 验证。对应全架构报告 <code>docs/architecture-report.html</code>(memory 段已加演进 banner)。维护:memory 模块迭代时同步更新本表 + 演进时间线。<br/><br/>
+  <b>相关记忆</b>:memory-side-agent-rewiring · memory-iteration-progress · memory-system-p0-fixes · recall-redesign-progress · pydantic-ai-v2-harness-adoption · memory-first-pi-deferred-strategy(均在 ~/.claude memory)。
+</footer>
+
+</main>
+<script>mermaid.initialize({startOnLoad:true,theme:'dark',themeVariables:{primaryColor:'#1c2433',primaryTextColor:'#d7dde8',primaryBorderColor:'#5bc8ff',lineColor:'#5b6679',secondaryColor:'#161c28',tertiaryColor:'#11161f'}});</script>
+</body>
+</html>
