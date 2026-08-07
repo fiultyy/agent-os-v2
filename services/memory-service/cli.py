@@ -163,6 +163,26 @@ def init_memory(memory_dir: str | None = None, use_regex: bool = False,
     return bootstrap.init_memory(memory_dir, providers=providers, source_cwd=source_cwd)
 
 
+# ── build-index (投影 → CC memory, ADR-15 分布式 index) ─────────────
+
+def build_index(scope: str | None = None, top_k: int = 20, memory_dir: str | None = None) -> dict:
+    """投影 KG 高 LIF top-K fact → CC memory/mem-<id>.md + MEMORY.md [mem] 索引行(真嵌入 CC)。
+    PreCompact(autodream 后硬编)/ new / cli 触发。"""
+    import db
+    import projection
+    import store
+    cwd = scope or os.getcwd()
+    mem_dir = Path(memory_dir) if memory_dir else projection.cc_memory_dir(cwd)
+    conn = db.get_conn()
+    rows = conn.execute(
+        "SELECT * FROM fact WHERE status='active' AND (source_cwd=? OR source_cwd IS NULL) "
+        "ORDER BY LIF DESC LIMIT ?",
+        (cwd, top_k)).fetchall()
+    facts = [store._decode_fact(r) for r in rows]
+    ent_names = {r["id"]: r["name"] for r in conn.execute("SELECT id, name FROM entity").fetchall()}
+    return projection.build_index(facts, ent_names, mem_dir)
+
+
 # ── argv entry ──────────────────────────────────────────────────────
 
 def _main(argv: list[str] | None = None) -> int:
@@ -219,6 +239,13 @@ def _main(argv: list[str] | None = None) -> int:
         help="ADR-14 记 source_cwd(来源 cwd, 默认 NULL)",
     )
 
+    bi = sub.add_parser("build-index",
+                        help="投影 KG 高 LIF fact → CC memory + MEMORY.md (ADR-15 分布式 index)")
+    bi.add_argument("--scope", default=None, help="来源 cwd(默认 os.getcwd)")
+    bi.add_argument("--top-k", dest="top_k", type=int, default=20)
+    bi.add_argument("--memory-dir", dest="memory_dir", default=None,
+                    help="CC memory dir(默认 ~/.claude/projects/<encoded>/memory/)")
+
     args = p.parse_args(argv)
     if args.cmd == "ingest":
         print(json.dumps(
@@ -234,6 +261,8 @@ def _main(argv: list[str] | None = None) -> int:
         print(json.dumps(autodream(args.session, args.transcript, use_regex=args.regex, cwd=args.cwd), ensure_ascii=False))
     elif args.cmd == "init-memory":
         print(json.dumps(init_memory(args.memory_dir, use_regex=args.regex, source_cwd=args.cwd), ensure_ascii=False))
+    elif args.cmd == "build-index":
+        print(json.dumps(build_index(scope=args.scope, top_k=args.top_k, memory_dir=args.memory_dir), ensure_ascii=False))
     return 0
 
 
