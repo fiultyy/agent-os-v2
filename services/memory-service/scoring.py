@@ -115,6 +115,7 @@ def match_item(
 ALPHA_MATCH = 0.5
 BETA_CENTRALITY = 0.3
 GAMMA_LIF = 0.2
+DELTA_VEC = 0.3  # ADR-13 向量层(vec_sim)默认权重; use_vec 时融合, 默认 off 不改 ADR-4v2 score
 
 
 def score_fact(
@@ -122,7 +123,9 @@ def score_fact(
     query: str,
     *,
     centrality: float = 0.0,
+    vec_sim: float = 0.0,
     weights: tuple[float, float, float] | None = None,
+    delta: float | None = None,
 ) -> dict[str, Any]:
     """Score one Fact: ``score = α·match + β·centrality + γ·LIF`` (ADR-4v2).
 
@@ -158,8 +161,10 @@ def score_fact(
     lif = float(fact.get("LIF") or 0.0)
     c = float(centrality or 0.0)
     alpha, beta, gamma = weights if weights is not None else (ALPHA_MATCH, BETA_CENTRALITY, GAMMA_LIF)
-    score = alpha * m + beta * c + gamma * lif
-    return {"fact": fact, "match": m, "centrality": c, "lif": lif, "score": float(score)}
+    d = DELTA_VEC if delta is None else delta
+    vs = float(vec_sim or 0.0)
+    score = alpha * m + beta * c + gamma * lif + d * vs
+    return {"fact": fact, "match": m, "centrality": c, "lif": lif, "vec_sim": vs, "score": float(score)}
 
 
 # ── ADR-8v2 LIF five-dim composite ──────────────────────────────────
