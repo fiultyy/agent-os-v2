@@ -56,7 +56,7 @@ mem-service 是一个 <b>KG (Entity + Fact reified) 结构化记忆服务</b>。
 <div class="layer">
   <div class="layer-title">抽取层 (ingest)</div>
   <span class="mod">adapter.py</span><span class="mod-desc">蝴蝶翼 LLM(N=3 fan-out + 投票 quorum ⌈n/2⌉ + regex fallback + merge voted)</span><br>
-  <span class="mod">llm_provider.py</span><span class="mod-desc">LLMProvider Protocol + CCRProvider(glm-4.5-air @ 3456)</span><br>
+  <span class="mod">llm_provider.py</span><span class="mod-desc">LLMProvider Protocol + ZhipuAnthropicProvider(直连智谱 glm-5-turbo) + CCRProvider(fallback)</span><br>
   <span class="mod">extractor.py</span><span class="mod-desc">regex(7 英文模式 + 中文同义 + 9 关系)ADR-5 fallback</span>
 </div>
 <div class="layer">
@@ -223,7 +223,8 @@ recall --vector 融合(qwen3-embedding-4b): <b>57.1%</b><br>
 <h2>部署拓扑</h2>
 <div class="layer">
 <div class="layer-title">本机 LLM/embedding 基础设施(mem-service 依赖)</div>
-<span class="mod">CCR 3456</span><span class="mod-desc">LLM 路由 glm-4.5-air(蝴蝶翼抽取)</span><br>
+<span class="mod">智谱直连</span><span class="mod-desc">open.bigmodel.cn/api/anthropic glm-5-turbo(蝴蝶翼抽取默认, ZhipuAnthropicProvider, key 复用 CCR config)</span><br>
+<span class="mod">CCR 3456</span><span class="mod-desc">LLM 路由 fallback(Zhipu 不可达时)</span><br>
 <span class="mod">LM Studio 16666</span><span class="mod-desc">qwen3-embedding-4b dim 2560(embedding 默认, 需 lms load)</span><br>
 <span class="mod">Ollama 11434</span><span class="mod-desc">qwen3-embedding:4b dim 2560(embedding fallback)</span><br>
 <span class="mod">~/.claude/settings.json</span><span class="mod-desc">PreCompact hook 注册(command → AO2 仓内源绝对路径)</span><br>
