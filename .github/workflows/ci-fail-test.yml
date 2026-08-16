@@ -1,0 +1,7 @@
+name: ci-fail-test
+on: workflow_dispatch
+jobs:
+  fail:
+    runs-on: ubuntu-latest
+    steps:
+      - run: exit 1
